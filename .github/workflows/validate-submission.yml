@@ -1,0 +1,66 @@
+# Validates each new/edited submission issue (runs instantly, no cron delay).
+# Enforces: tagline length, screenshot count (min 2 advisory), demo link present,
+# sharp deadline (cutoff 18:00 UTC Oct 4 = 12:00 PM MDT sharp, no exceptions), needs-review routing.
+# Free-plan safe: ubuntu-latest, read issue body only.
+name: Validate Submission
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: validate-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: contains(github.event.issue.labels.*.name, 'submission')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check submission and label
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || "";
+            const createdAt = new Date(issue.created_at);
+            const DEADLINE = new Date("2026-10-04T18:00:00Z"); // 12:00 PM MDT sharp - no exceptions
+            const notes = [];
+
+            // 1. Demo link (YouTube/Loom/http) should be present
+            if (!/https?:\/\/(www\.)?(youtube\.com|youtu\.be|loom\.com|.*)/i.test(body)) {
+              notes.push("ℹ️ No demo/live-site link detected in field 8. A link is optional but recommended (direct video upload capped at 10 MB on Free).");
+            }
+
+            // 2. Screenshot count advisory (min 2, max 5) - count CDN image embeds
+            const imgs = (body.match(/!\[[^\]]*\]\(https:\/\/user-images\.githubusercontent\.com[^)]+\)/g) || []).length
+                       + (body.match(/!\[[^\]]*\]\(https:\/\/github\.com\/user-attachments[^)]+\)/g) || []).length;
+            if (imgs < 2) notes.push(`⚠️ Only ~${imgs} embedded screenshot(s) detected (min 2 required, max 5). Drag-drop images into field 7 (\`needs-fix\`).`);
+
+            // 3. Late stamping (sharp deadline - no exceptions)
+            const labelsToAdd = ["needs-review"];
+            if (createdAt > DEADLINE) {
+              labelsToAdd.push("late");
+              notes.push("⏰ Created after the 12:00 PM MDT sharp deadline - marked `late` and will not be accepted (no exceptions).");
+            }
+
+            if (body.length < 500) {
+              labelsToAdd.push("needs-fix");
+              notes.push("⚠️ Submission looks very short (<500 chars). Check fields 6–7 are complete.");
+            }
+            if (notes.some(n => n.includes("needs-fix")) && !labelsToAdd.includes("needs-fix")) labelsToAdd.push("needs-fix");
+
+            try {
+              await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels: [...new Set(labelsToAdd)] });
+            } catch (e) { core.warning("label failed: " + e.message); }
+            if (notes.length) {
+              try {
+                await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: ["**Submission check:**", "", ...notes].join("\n") });
+              } catch (e) { core.warning("comment failed: " + e.message); }
+            } else {
+              core.info("submission looks complete");
+            }

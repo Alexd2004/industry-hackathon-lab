@@ -1,0 +1,314 @@
+date,company,corridor,substance,release_m3,incident_type,cause,latitude,longitude,consequence
+2015-01-14,Enbridge,Edmonton,Not Applicable,,Fire,Maintenance,53.5421,-113.3584,low
+2015-01-16,Keystone,Hardisty,crude Sweet,2.3,Release of Substance,Engineering and Planning,52.654,-111.2685,high
+2015-02-01,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Inadequate Supervision,53.5431,-113.3542,low
+2015-02-27,NOVA Gas,Grande Prairie,Sweet,0.1,Release of Substance,Human Factors,55.0045,-119.472,medium
+2015-03-04,Enbridge,Hardisty,Not Applicable,,Fire,Human Factors,52.4925,-110.852,low
+2015-04-02,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Standards and Procedures,53.5443,-113.3561,low
+2015-04-18,Pembina Energy Services Inc.,Spirit River,Not Applicable,,Fire,Failure in communication,55.7866,-118.9348,low
+2015-04-21,Trans Mountain,Jasper,Not Applicable,,Serious Injury (as defined in the OPR),Standards and Procedures,53.0102,-118.1004,low
+2015-05-11,NOVA Gas,Medicine Hat,Sweet,3400000.0,Release of Substance,Engineering and Planning,50.1663,-110.5932,high
+2015-05-12,Enbridge,Edmonton,Not Applicable,,Fire,Inadequate Supervision,53.5376,-113.3683,low
+2015-05-13,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.5519,-113.3516,low
+2015-05-21,Enbridge,Hardisty,Not Applicable,,Fire,Human Factors,52.6319,-111.2825,low
+2015-06-27,Express Pipeline Ltd.,Hardisty,crude Sweet,16.0,Release of Substance,Human Factors,52.6347,-111.2641,high
+2015-07-09,Alliance Pipeline Ltd.,Karr Receipt Point is approximately 95 km SE of Grande Prairie,Sweet,1.0,Release of Substance,Failure in communication,54.6137,-118.2116,medium
+2015-07-10,NOVA Gas,Grande Prairie,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.8301,-118.647,low
+2015-07-30,NOVA Gas,Grande Prairie,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.8301,-118.647,low
+2015-08-05,Alliance Pipeline Ltd.,Valleyview,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.4245,-117.7596,low
+2015-08-19,Enbridge,Hardisty,Not Applicable,,Explosion,Engineering and Planning,52.6393,-111.2793,high
+2015-08-28,NOVA Gas,Smoky Lake,Not Applicable,,Fire,Maintenance,54.0959,-112.305,low
+2015-10-23,NOVA Gas,Fort McKay,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,57.3402,-111.6711,medium
+2015-10-26,NOVA Gas,Grande Prairie,Sweet,1.22,Release of Substance,Human Factors,54.8301,-118.6455,medium
+2015-11-01,NOVA Gas,Fort McKay,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,57.3402,-111.6777,medium
+2015-11-07,NOVA Gas,Fort McKay,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,57.34,-111.68,medium
+2015-11-08,NOVA Gas,CFB Wainwright,Sweet,14075.0,Release of Substance,Maintenance,52.6141,-110.9646,high
+2015-11-09,NOVA Gas,Fort McKay,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,57.3,-111.68,medium
+2015-11-09,NOVA Gas,Fort McKay,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,57.3,-111.68,medium
+2015-11-24,NOVA Gas,Fox Creek,Not Applicable,,Fire,Human Factors,54.4451,-117.6974,low
+2015-12-02,NOVA Gas,Fort McMurray,Not Applicable,,Fire,Maintenance,56.0207,-112.1821,low
+2015-12-02,NOVA Gas,Fort McMurray,Not Applicable,,Fire,Human Factors,55.9788,-111.9815,low
+2015-12-03,NOVA Gas,Fort McMurray,Not Applicable,,Fire,Maintenance,55.9773,-112.0273,low
+2015-12-11,Enbridge,Hardisty AB,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,52.6376,-111.2792,low
+2015-12-11,NOVA Gas,Rainbow Lake,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,58.4464,-119.2234,low
+2015-12-30,NOVA Gas,Fort McMurray,Not Applicable,,Fire,Maintenance,56.044,-112.4355,low
+2016-01-02,Enbridge,Sherwood Park,Not Applicable,,Fire,Tools and Equipment,53.5415,-113.3539,low
+2016-01-03,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.5442,-113.3551,low
+2016-01-19,NOVA Gas,Manning,Sweet,42.0,Release of Substance,Maintenance,57.4224,-118.2492,medium
+2016-01-21,NOVA Gas,Wabasca,Not Applicable,,Fire,Engineering and Planning,56.4861,-114.1175,low
+2016-02-04,NOVA Gas,Fox Creek,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,54.45,-117.7,low
+2016-02-10,Enbridge,Strome,Natural Gas Liquids,0.0,Release of Substance,Failure in communication,52.9333,-112.0821,medium
+2016-05-11,Enbridge,Hardisty,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,52.6375,-111.2775,low
+2016-05-17,NOVA Gas,Manning,Not Applicable,,Fire,Tools and Equipment,57.189,-118.1927,low
+2016-06-09,NOVA Gas,Edson,Not Applicable,,Fire,Maintenance,53.4875,-116.4639,low
+2016-06-28,NOVA Gas,FT MacKy,Not Applicable,,Fire,Standards and Procedures,56.9899,-111.5582,low
+2016-06-29,NOVA Gas,Pecten,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,49.3064,-114.0392,low
+2016-07-21,Trans Mountain,Edmonton & Sherwood Park,Diesel Fuel,2.3,Release of Substance,Engineering and Planning,53.5429,-113.3645,medium
+2016-07-25,NOVA Gas,Pecten,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,49.3072,-114.015,low
+2016-07-30,Enbridge,Hardisty,Not Applicable,,Operation Beyond Design Limits,Human Factors,52.6382,-111.2786,low
+2016-08-05,NOVA Gas,Grande Prairie,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.95,-119.194,low
+2016-08-12,NOVA Gas,Fort McKay,Not Applicable,,Fire,Tools and Equipment,57.34,-111.68,low
+2016-08-13,NOVA Gas,Lodgepole,Not Applicable,,Fire,Failure in communication,53.1005,-115.3642,low
+2016-08-23,NOVA Gas,Smoky Lake,Not Applicable,,Fire,Tools and Equipment,54.0951,-112.3058,low
+2016-08-24,NOVA Gas,Endiang,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,51.9397,-112.0737,low
+2016-08-25,Enbridge,Sherwood Park,Natural Gas Liquids,0.0,Release of Substance,Failure in communication,53.5474,-113.3557,medium
+2016-08-26,NOVA Gas,Patricia,Lube Oil,1.5,Release of Substance,Engineering and Planning,50.6969,-111.5347,medium
+2016-08-27,NOVA Gas,Chisholm,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.9727,-114.2918,low
+2016-08-29,NOVA Gas,Grande Prairie,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.8301,-118.647,low
+2016-09-15,NOVA Gas,Chisholm,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,55.0693,-114.4423,low
+2016-09-22,Enbridge,Hardisty Alberta,Natural Gas Liquids,0.0,Release of Substance,Tools and Equipment,52.6382,-111.2786,medium
+2016-09-23,NOVA Gas,Grande Prairie,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.8301,-118.647,low
+2016-09-27,NOVA Gas,Hythe,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,55.5214,-119.3545,low
+2016-10-05,NOVA Gas,Didsbury,Sweet,342.0,Release of Substance,Maintenance,51.5994,-114.2442,high
+2016-10-28,NOVA Gas,Brooks,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,50.541,-111.76,low
+2016-11-07,NOVA Gas,Grande Prairie,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,55.1288,-119.3898,low
+2016-11-16,NOVA Gas,St.Paul,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,53.9605,-111.8067,low
+2016-12-05,NOVA Gas,Endiang,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,51.9397,-112.0737,low
+2016-12-08,Keystone,Hardisty,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,52.6436,-111.2775,low
+2016-12-09,NOVA Gas,Gordondale,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,55.8116,-119.2702,low
+2017-01-08,NOVA Gas,Zama City,Not Applicable,,Operation Beyond Design Limits,Failure in communication,59.0577,-118.8719,low
+2017-01-15,NOVA Gas,Chisholm,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,55.0693,-114.4423,low
+2017-01-26,NOVA Gas,Edson,Not Applicable,,Fire,Maintenance,53.5746,-116.5604,low
+2017-01-28,NOVA Gas,Edson,Not Applicable,,Fire,Failure in communication,53.652,-116.7071,low
+2017-02-07,NOVA Gas,Bonanza,Not Applicable,,Fire,Human Factors,55.8974,-119.4945,low
+2017-02-13,NOVA Gas,Cleardale,Not Applicable,,Fire,Natural or Environmental Forces,56.5373,-119.9031,low
+2017-02-15,NOVA Gas,High Prairie,Not Applicable,,Fire,Human Factors,56.9335,-115.2286,low
+2017-02-16,NOVA Gas,Grande Cache,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,54.3898,-118.7791,low
+2017-02-17,Enbridge,Edmonton,Condensate,988.0,Release of Substance,Engineering and Planning,53.5165,-113.3701,high
+2017-02-18,NOVA Gas,Cleardale,Not Applicable,,Fire,Human Factors,56.8584,-120.0447,low
+2017-02-25,NOVA Gas,Edson,Not Applicable,,Fire,Engineering and Planning,53.6438,-116.6934,low
+2017-03-02,Enbridge,Fort Simpson,Not Applicable,,Fire,Human Factors,61.8433,-121.3365,low
+2017-03-03,NOVA Gas,Conklin,Not Applicable,,Fire,Failure in communication,55.8748,-110.774,low
+2017-03-16,NOVA Gas,Bonanza,Not Applicable,,Fire,Failure in communication,56.4,-119.9,low
+2017-03-20,NOVA Gas,Bonanza,Not Applicable,,Fire,Human Factors,56.38,-119.92,low
+2017-03-20,Enbridge,Sherwood Park AB,crude Synthetic,10.0,Release of Substance,Maintenance,53.5474,-113.3557,high
+2017-03-29,NOVA Gas,Bonanza,Not Applicable,,Fire,Human Factors,55.9663,-119.5977,low
+2017-03-30,NOVA Gas,Endiang,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,51.3598,-111.7425,low
+2017-04-03,NOVA Gas,Athabasca,Not Applicable,,Fire,Maintenance,56.1786,-112.8428,low
+2017-04-15,NOVA Gas,Patricia,Lube Oil,1.75,Release of Substance,Engineering and Planning,50.6983,-111.5306,medium
+2017-04-18,Enbridge,Sherwood Park AB,crude Synthetic,88.0,Release of Substance,Engineering and Planning,53.543,-113.354,high
+2017-05-04,NOVA Gas,Smoky Lake,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.9611,-112.3289,low
+2017-05-08,NOVA Gas,Rainbow Lake,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,58.4767,-118.5712,low
+2017-05-30,Enbridge,Sherwood Park,crude Synthetic,12.8,Release of Substance,Engineering and Planning,53.5442,-113.3493,high
+2017-06-21,Enbridge,Sherwood Park,Not Applicable,,Operation Beyond Design Limits,Human Factors,53.5474,-113.3557,low
+2017-07-04,Alliance Pipeline Ltd.,Morinville,Sweet,1.0,Release of Substance,Maintenance,49.324,-102.2964,medium
+2017-07-07,NOVA Gas,Hanna,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,51.4,-111.79,low
+2017-07-09,NOVA Gas,Bonanza,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,55.8925,-119.7914,low
+2017-07-11,NOVA Gas,Twin Butte,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,49.3072,-114.015,low
+2017-09-23,NOVA Gas,Rosemary,Not Applicable,,Operation Beyond Design Limits,Tools and Equipment,50.71,-112.09,low
+2017-10-12,NOVA Gas,Drayton Valley,Sweet,24.0,Release of Substance,Inadequate Procurement,53.1005,-115.3642,medium
+2017-10-18,NOVA Gas,Grovedale,Sweet,10.0,Release of Substance,Engineering and Planning,54.63,-118.95,medium
+2017-10-19,NOVA Gas,Brooks,Not Applicable,,Serious Injury (as defined in the OPR),Inadequate Supervision,50.7919,-111.8507,low
+2017-11-03,NOVA Gas,Edson,Not Applicable,,Fire,Failure in communication,53.7242,-116.8311,low
+2017-11-21,Alliance Pipeline Ltd.,Grande Prairie,Sweet,1.0,Release of Substance,Maintenance,54.5282,-118.1594,medium
+2017-12-05,NOVA Gas,Fox Creek,Sweet,5125.0,Release of Substance,Engineering and Planning,54.1742,-116.6733,high
+2017-12-12,NOVA Gas,Irricana,Sweet,786.0,Release of Substance,Engineering and Planning,51.4084,-113.6557,high
+2018-01-12,NOVA Gas,Bonnyville,Not Applicable,,Fire,Engineering and Planning,54.3097,-111.2592,low
+2018-01-23,NOVA Gas,Sundre,Not Applicable,,Fire,Natural or Environmental Forces,51.8127,-114.5804,low
+2018-01-31,NOVA Gas,Drayton Valley,Sweet,17260.0,Release of Substance,Maintenance,53.1005,-115.3642,high
+2018-02-16,NOVA Gas,Cremona,Not Applicable,,Fire,Engineering and Planning,51.4442,-114.5271,low
+2018-04-03,Enbridge,Sherwood Park,Diesel Fuel,5.0,Release of Substance,Engineering and Planning,53.543,-113.354,medium
+2018-05-07,Enbridge,Hardisty,Not Applicable,,Operation Beyond Design Limits,Human Factors,52.6382,-111.2786,low
+2018-06-28,Enbridge,Sedgewick,Not Applicable,,Operation Beyond Design Limits,Natural or Environmental Forces,52.8043,-111.7265,low
+2018-07-25,NOVA Gas,Slave Lake,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,55.6411,-113.8828,low
+2018-08-22,NOVA Gas,Big Valley,Not Applicable,,Fire,Human Factors,51.9389,-112.075,low
+2018-08-24,NOVA Gas,Sedgewick,Not Applicable,,Fire,Maintenance,52.6098,-111.6706,low
+2018-08-28,NOVA Gas,Mc Neil,Not Applicable,,Fire,Inadequate Supervision,50.6844,-110.0829,low
+2018-08-31,NOVA Gas,Albright,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,55.2648,-119.4951,low
+2018-09-14,NOVA Gas,Spirit River,Not Applicable,,Fire,Inadequate Supervision,55.8169,-119.4138,low
+2018-09-25,NOVA Gas,Gordondale,Not Applicable,,Fire,Engineering and Planning,49.0,-120.0,low
+2018-10-05,NOVA Gas,Rainier,Sweet,607.13,Release of Substance,Engineering and Planning,50.305,-112.0968,high
+2018-10-14,NOVA Gas,Cleardale,Sweet,10.0,Release of Substance,Engineering and Planning,56.3708,-119.9227,medium
+2018-11-20,NOVA Gas,Trout Lake,Sweet,8213.59,Release of Substance,Standards and Procedures,56.4861,-114.1175,high
+2018-11-30,Express Pipeline Ltd.,Hardisty,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,52.6382,-111.2786,low
+2019-01-09,Enbridge,Sherwood Park,Not Applicable,,Operation Beyond Design Limits,Human Factors,53.5446,-113.3539,low
+2019-01-09,NOVA Gas,Fox Creek,Not Applicable,,Fire,Human Factors,54.4016,-118.0205,low
+2019-01-14,NOVA Gas,Valleyview,Not Applicable,,Fire,Engineering and Planning,55.0359,-117.3636,low
+2019-01-28,Trans Mountain,Edson Alberta,Not Applicable,,Fire,Human Factors,53.6079,-115.5797,low
+2019-02-03,NOVA Gas,Grande Prairie,Not Applicable,,Fire,Maintenance,54.4831,-118.0999,low
+2019-02-06,NOVA Gas,Burstall,Not Applicable,,Fire,Inadequate Supervision,50.6612,-110.0251,low
+2019-02-13,Enbridge,Hardisty,Not Applicable,,Operation Beyond Design Limits,Maintenance,52.6417,-111.2739,low
+2019-02-27,NOVA Gas,Edson,Not Applicable,,Fire,Natural or Environmental Forces,53.2457,-116.2396,low
+2019-03-07,Trans Mountain,Edmoton,Not Applicable,,Fire,Human Factors,53.4995,-113.5897,low
+2019-04-03,Trans Mountain,Sherwood Park,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.5423,-113.3678,low
+2019-04-15,Trans Mountain,Town of Japser,Not Applicable,,Explosion,Maintenance,52.9382,-118.0434,high
+2019-06-29,Trans Mountain,Sherwood Park,Not Applicable,,Fire,Human Factors,53.5429,-113.3645,low
+2019-07-14,Express Pipeline Ltd.,Suffield,crude Sweet,5.0,Release of Substance,Engineering and Planning,50.1731,-111.1657,high
+2019-08-14,NOVA Gas,Edson,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.8887,-117.1146,low
+2019-09-07,Trans Mountain,Edson,Not Applicable,,Fire,Maintenance,53.5758,-116.6476,low
+2019-09-29,Trans Mountain,Branch Modular Home Park,Not Applicable,,Operation Beyond Design Limits,Natural or Environmental Forces,53.5758,-116.6476,low
+2019-10-08,Enbridge,Edmonton,crude Synthetic,8.0,Release of Substance,Maintenance,53.5474,-113.3557,high
+2019-10-18,Trans Mountain,Sherwood Park,crude Sweet,2.0,Release of Substance,Human Factors,53.5457,-113.3655,high
+2019-12-09,NOVA Gas,Edson,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.7803,-116.6291,low
+2019-12-15,Keystone,Hardisty,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,52.6503,-111.2684,low
+2020-01-25,NOVA Gas,Paddle Prairie,Not Applicable,,Fire,To be determined,57.8078,-118.0997,low
+2020-01-25,NOVA Gas,Manning,Not Applicable,,Fire,Maintenance,57.1229,-117.6319,low
+2020-02-04,NOVA Gas,Hinton,Not Applicable,,Fire,Human Factors,54.01,-117.37,low
+2020-02-13,NOVA Gas,Daysland,Sweet,22702.0,Release of Substance,Engineering and Planning,52.9881,-112.1914,high
+2020-02-14,Trans Mountain,Edson,Not Applicable,,Fire,Maintenance,53.5758,-116.6476,low
+2020-03-01,NOVA Gas,Claresholm,Not Applicable,,Fire,Inadequate Supervision,49.9758,-114.1312,low
+2020-03-06,Trans Mountain,Edmonton,Not Applicable,,Fire,Tools and Equipment,53.5429,-113.3645,low
+2020-03-22,NOVA Gas,Conklin,Not Applicable,,Fire,Maintenance,55.6885,-111.443,low
+2020-05-01,Trans Mountain,Sherwood Park,Not Applicable,,Fire,Engineering and Planning,53.5429,-113.3643,low
+2020-05-23,NOVA Gas,Longview,Sweet,86.0,Release of Substance,Tools and Equipment,50.3825,-114.2264,medium
+2020-06-13,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.5431,-113.3542,low
+2020-06-15,Keystone,Hardisty,Not Applicable,,Explosion,Natural or Environmental Forces,52.6436,-111.2775,high
+2020-07-02,NOVA Gas,Red Earth,Not Applicable,,Serious Injury (as defined in the OPR),Tools and Equipment,56.9335,-115.2286,low
+2020-08-19,Keystone,Oyen,Not Applicable,,Fire,Natural or Environmental Forces,51.68,-110.5453,low
+2020-09-15,NOVA Gas,Manning,Not Applicable,,Fire,Engineering and Planning,57.1915,-118.1943,low
+2020-09-25,NOVA Gas,Wildwood,Not Applicable,,Operation Beyond Design Limits,Maintenance,53.381,-115.6176,low
+2020-09-30,Keystone,Provost,Not Applicable,,Serious Injury (as defined in the OPR),Failure in communication,52.3467,-110.764,low
+2020-10-02,Express Pipeline Ltd.,Youngstown Village,crude Sweet,66.5,Release of Substance,Engineering and Planning,51.4895,-111.1658,high
+2020-10-24,Trans Mountain,Edmonton,Not Applicable,,Serious Injury (as defined in the OPR),Standards and Procedures,53.4578,-113.5276,low
+2020-10-25,Trans Mountain,Edmonton,Not Applicable,,Serious Injury (as defined in the OPR),Engineering and Planning,53.43,-113.5664,low
+2020-10-27,Trans Mountain,Edmonton,Not Applicable,,Fatality,Failure in communication,53.474,-113.65,high
+2020-11-06,NOVA Gas,Wabasca,Not Applicable,,Fire,Human Factors,56.4861,-114.1175,low
+2020-11-15,NOVA Gas,Grande Prairie,Not Applicable,,Fire,Failure in communication,54.4831,-118.0999,low
+2020-12-09,Enbridge,Sherwood Park,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.5474,-113.3557,low
+2021-01-19,Keystone,Oyen,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,51.8235,-110.5626,low
+2021-02-03,NOVA Gas,Suffield,Not Applicable,,Fire,Natural or Environmental Forces,50.1734,-111.0474,low
+2021-02-18,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Human Factors,53.5457,-113.3518,low
+2021-02-20,NOVA Gas,Edson AB,Not Applicable,,Fire,Natural or Environmental Forces,53.5016,-116.4735,low
+2021-02-21,NOVA Gas,Manning AB,Not Applicable,,Fire,Human Factors,57.1926,-118.197,low
+2021-03-19,NOVA Gas,Edson,Not Applicable,,Fire,Natural or Environmental Forces,53.2472,-116.2379,low
+2021-04-16,Trans Mountain,Edson,Not Applicable,,Fire,Human Factors,53.5758,-116.6476,low
+2021-05-04,Trans Mountain,Edson,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,53.5886,-116.4975,medium
+2021-05-06,NOVA Gas,Rocky Mountain House,Not Applicable,,Fire,Human Factors,52.7191,-115.7086,low
+2021-05-10,NOVA Gas,Manning,Sweet,17128.0,Release of Substance,Engineering and Planning,56.8525,-118.1343,high
+2021-06-11,NOVA Gas,Grovedale,Not Applicable,,Serious Injury (as defined in the OPR),Failure in communication,55.0307,-119.1117,low
+2021-06-18,NOVA Gas,Peers,Not Applicable,,Fire,Tools and Equipment,53.557,-116.5407,low
+2021-07-11,NOVA Gas,Grande Cache AB,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.9162,-119.1711,low
+2021-08-13,Alliance Pipeline Ltd.,Fox Creek,Not Applicable,,Adverse Environmental Effects,Natural or Environmental Forces,54.3116,-117.2245,medium
+2021-08-31,NOVA Gas,Grande Prairie,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,54.3883,-118.0158,low
+2021-09-23,Trans Mountain,Sherwood Park,crude Sweet,7.0,Release of Substance,Human Factors,53.5429,-113.3645,high
+2021-10-05,Foothills Pipe Lines Ltd.,Empress,Not Applicable,,Fire,Tools and Equipment,50.6773,-110.0216,low
+2021-10-16,NOVA Gas,Edson,Not Applicable,,Adverse Environmental Effects,Failure in communication,53.277,-116.2599,medium
+2021-11-13,NOVA Gas,Rocky Mountain House,Not Applicable,,Fire,Natural or Environmental Forces,52.268,-115.2152,low
+2021-11-15,NOVA Gas,Drayton Valley,Not Applicable,,Adverse Environmental Effects,Failure in communication,52.752,-115.7338,medium
+2021-11-18,NOVA Gas,Fox Creek,Not Applicable,,Serious Injury (as defined in the OPR),Natural or Environmental Forces,54.1942,-117.6793,low
+2021-11-23,NOVA Gas,Edson AB,Not Applicable,,Fire,Tools and Equipment,53.4882,-116.463,low
+2021-12-01,TC Energy,Sundre,Not Applicable,,Serious Injury (as defined in the OPR),Natural or Environmental Forces,51.7971,-114.6394,low
+2021-12-16,NOVA Gas,Grande Prairie,Not Applicable,,Fire,Tools and Equipment,54.3827,-118.1658,low
+2021-12-17,NOVA Gas,Edson,Not Applicable,,Fire,Natural or Environmental Forces,53.1832,-116.1659,low
+2022-01-18,NOVA Gas,Hotchkiss,Not Applicable,,Fire,Human Factors,57.3677,-119.7528,low
+2022-01-20,NOVA Gas,Viking,Sweet,601769.0,Release of Substance,Engineering and Planning,53.1967,-111.7878,high
+2022-01-21,NOVA Gas,Edson,Sweet,0.08,Release of Substance,Failure in communication,53.557,-116.5408,medium
+2022-01-21,Trans Mountain,8500,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.5513,-116.7004,low
+2022-01-30,Trans Mountain,Wabamun,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,53.5691,-114.4608,medium
+2022-02-03,NOVA Gas,Didsbury,Not Applicable,,Fire,Engineering and Planning,51.5989,-114.2373,low
+2022-02-09,NOVA Gas,Whitecourt,Not Applicable,,Adverse Environmental Effects,Natural or Environmental Forces,54.1125,-117.4351,medium
+2022-02-15,NOVA Gas,Wabasca,Not Applicable,,Fire,Tools and Equipment,56.5156,-113.6705,low
+2022-02-18,NOVA Gas,Grande Prairie,Not Applicable,,Fire,Engineering and Planning,55.3093,-118.7122,low
+2022-03-16,NOVA Gas,Rocky Mountain House,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,52.686,-115.669,low
+2022-03-23,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.5371,-113.3623,low
+2022-03-31,NOVA Gas,Edson,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.2457,-116.2396,low
+2022-04-07,NOVA Gas,Fox Creek,Sweet,3747527.0,Fire,Engineering and Planning,54.4222,-117.7581,high
+2022-05-27,NOVA Gas,Rocky Mountain House,Not Applicable,,Fire,Inadequate Supervision,52.6814,-115.3754,low
+2022-06-29,NOVA Gas,Edson AB,Not Applicable,,Adverse Environmental Effects,Natural or Environmental Forces,53.2391,-116.2288,medium
+2022-07-15,NOVA Gas,Coleman,Not Applicable,,Fire,Maintenance,49.537,-114.597,low
+2022-07-24,NOVA Gas,Manning,Not Applicable,,Fire,Tools and Equipment,57.3677,-119.7524,low
+2022-08-11,Trans Mountain,17,Not Applicable,,Fire,Failure in communication,53.5215,-113.7871,low
+2022-08-20,NOVA Gas,Coleman,Not Applicable,,Explosion,Natural or Environmental Forces,49.643,-114.63,high
+2022-08-23,Keystone,Bindloss,Not Applicable,,Fire,Engineering and Planning,50.8562,-110.349,low
+2022-08-24,NOVA Gas,Caroline,Not Applicable,,Serious Injury (as defined in the OPR),Failure in communication,51.9972,-114.8093,low
+2022-08-26,NOVA Gas,Fairview,Not Applicable,,Serious Injury (as defined in the OPR),Engineering and Planning,56.2241,-119.8021,low
+2022-09-07,Foothills Pipe Lines Ltd.,Jenner,Sweet,390649.0,Release of Substance,Engineering and Planning,50.7021,-111.0998,high
+2022-09-14,Trans Mountain,Edson,Not Applicable,,Serious Injury (as defined in the OPR),Inadequate Supervision,53.5758,-116.6476,low
+2022-09-16,NOVA Gas,Garrington,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,51.9243,-114.4002,low
+2022-09-19,Milk River Pipeline Ltd.,Milk River Town,Not Applicable,,Fire,Engineering and Planning,49.1354,-112.0804,low
+2022-09-27,Trans Mountain,Jasper,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,52.8906,-118.7383,low
+2022-10-01,NOVA Gas,Coleman,Not Applicable,,Fire,Maintenance,49.6445,-114.6383,low
+2022-10-24,Trans Mountain,Sherwood Park,Not Applicable,,Fire,Engineering and Planning,53.5429,-113.3645,low
+2022-10-27,Trans Mountain,Wabamun,Not Applicable,,Adverse Environmental Effects,Engineering and Planning,53.566,-114.3634,medium
+2022-11-05,Enbridge,Zama,Not Applicable,,Fire,Inadequate Procurement,59.0667,-118.8538,low
+2022-11-13,NOVA Gas,Strachan,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,52.2476,-115.229,low
+2022-12-01,NOVA Gas,Edson AB,Sweet,80200.0,Release of Substance,Engineering and Planning,53.4647,-116.4452,high
+2022-12-02,NOVA Gas,Peace River,Not Applicable,,Fire,Standards and Procedures,56.8762,-114.7551,low
+2022-12-06,NOVA Gas,Clear Hills County,Not Applicable,,Fire,Failure in communication,57.3677,-119.7528,low
+2022-12-12,Trans Mountain,Gainford,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.581,-114.7633,low
+2022-12-17,NOVA Gas,Manning,Not Applicable,,Adverse Environmental Effects,Human Factors,57.3593,-119.5911,medium
+2022-12-20,NOVA Gas,Edson AB,Not Applicable,,Fire,Maintenance,53.792,-116.9642,low
+2022-12-30,NOVA Gas,Grande Cache,Not Applicable,,Operation Beyond Design Limits,Human Factors,54.0057,-119.1144,low
+2023-01-17,NOVA Gas,Fort McMurray,Not Applicable,,Fire,Failure in communication,56.4654,-112.8429,low
+2023-01-31,NOVA Gas,Fox Creek,Not Applicable,,Fire,Maintenance,54.3802,-117.1656,low
+2023-02-03,Trans Mountain,Stony Plain,Not Applicable,,Serious Injury (as defined in the OPR),Engineering and Planning,53.5577,-114.1491,low
+2023-02-23,NOVA Gas,Didsbury,Not Applicable,,Explosion,Tools and Equipment,51.6003,-114.239,high
+2023-02-23,NOVA Gas,Fox Creek,Not Applicable,,Fire,Human Factors,54.3858,-118.0109,low
+2023-03-01,NOVA Gas,Peers,Sweet,310826.0,Release of Substance,Tools and Equipment,53.6971,-115.978,high
+2023-03-02,NOVA Gas,Grande Prairie,Not Applicable,,Fire,Human Factors,57.36,-119.7498,low
+2023-03-08,NOVA Gas,Fort Mcmurray,Not Applicable,,Operation Beyond Design Limits,Failure in communication,56.69,-111.385,low
+2023-03-08,NOVA Gas,Fox Creek,Not Applicable,,Serious Injury (as defined in the OPR),Maintenance,53.9389,-117.2128,low
+2023-03-13,NOVA Gas,Fort Mcmurray,Not Applicable,,Fire,Human Factors,56.7056,-111.4043,low
+2023-03-22,NOVA Gas,Manning,Sweet,0.91,Release of Substance,Engineering and Planning,56.8783,-116.5479,medium
+2023-03-30,NOVA Gas,Caroline,Not Applicable,,Fire,Maintenance,51.9436,-114.7364,low
+2023-04-19,NOVA Gas,Lac La Biche,Sweet,0.1,Release of Substance,Maintenance,55.1946,-111.4817,medium
+2023-04-26,NOVA Gas,Stettler,Not Applicable,,Serious Injury (as defined in the OPR),To be determined,52.5756,-112.6904,low
+2023-04-27,NOVA Gas,Water Valley,Not Applicable,,Fire,Engineering and Planning,51.4442,-114.5271,low
+2023-05-04,1057533 Alberta Ltd.,Rainbow Lake,Not Applicable,,Fire,Natural or Environmental Forces,58.496,-119.4341,low
+2023-05-05,NOVA Gas,Edson,Not Applicable,,Fire,Natural or Environmental Forces,53.792,-116.9642,low
+2023-06-22,NOVA Gas,Edson,Not Applicable,,Operation Beyond Design Limits,Natural or Environmental Forces,53.5699,-115.8294,low
+2023-06-22,NOVA Gas,Whitecourt,Not Applicable,,Operation Beyond Design Limits,Natural or Environmental Forces,53.9061,-115.8888,low
+2023-06-27,NOVA Gas,Smoky Lake,Not Applicable,,Fire,Maintenance,54.0951,-112.3058,low
+2023-07-04,NOVA Gas,Glendon,Not Applicable,,Fire,Standards and Procedures,54.3097,-111.2592,low
+2023-07-23,NOVA Gas,Furman,Not Applicable,,Fire,Engineering and Planning,49.9758,-114.1312,low
+2023-07-23,NOVA Gas,Edson,Not Applicable,,Serious Injury (as defined in the OPR),Failure in communication,53.792,-116.9642,low
+2023-07-24,NOVA Gas,Drumheller,Sweet,43.73,Release of Substance,Engineering and Planning,51.0987,-112.6387,medium
+2023-07-25,Enbridge,Sherwood Park,crude Sweet,2.25,Release of Substance,Failure in communication,53.5541,-113.3532,high
+2023-08-23,NOVA Gas,Sundre,Not Applicable,,Fire,Maintenance,51.9436,-114.7354,low
+2023-09-02,NOVA Gas,Swalwell,Not Applicable,,Fire,Failure in communication,51.3576,-113.0253,low
+2023-09-09,NOVA Gas,Sundre,Not Applicable,,Fire,Maintenance,51.9434,-114.7349,low
+2023-09-18,NOVA Gas,Nordegg,Sweet,3437.02,Release of Substance,Engineering and Planning,52.7204,-115.706,high
+2023-09-28,NOVA Gas,Grande Prairie,Not Applicable,,Fire,Natural or Environmental Forces,54.4831,-118.0999,low
+2023-09-28,NOVA Gas,Hussar,Not Applicable,,Fire,Maintenance,51.0987,-112.6387,low
+2023-10-01,NOVA Gas,Beiseker,Not Applicable,,Fire,Engineering and Planning,51.3219,-113.3817,low
+2023-10-25,NOVA Gas,Cochrane,Sweet,2595.0,Release of Substance,Maintenance,51.2216,-114.6326,high
+2023-12-13,NOVA Gas,Edson,Not Applicable,,Operation Beyond Design Limits,Failure in communication,53.5573,-116.543,low
+2023-12-14,Foothills Pipe Lines Ltd.,Jenner,Sweet,135900.0,Release of Substance,Engineering and Planning,50.7024,-111.1006,high
+2023-12-27,NOVA Gas,Gordondale,Sweet,119308.92,Release of Substance,Engineering and Planning,55.8117,-119.3666,high
+2024-01-12,NOVA Gas,Cochrane,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,51.2204,-114.4929,low
+2024-01-13,Enbridge,Hardisty,Not Applicable,,Explosion,Natural or Environmental Forces,52.6384,-111.2794,high
+2024-02-05,NOVA Gas,Zama City,Not Applicable,,Serious Injury (as defined in the OPR),Failure in communication,59.0577,-118.8719,high
+2024-02-07,Alliance Pipeline Ltd.,Irma,Not Applicable,,Serious Injury (as defined in the OPR),Human Factors,53.0328,-111.2237,low
+2024-02-24,NOVA Gas,Zama City,Not Applicable,,Fire,Inadequate Supervision,58.7136,-119.9912,low
+2024-04-01,NOVA Gas,Manning,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,57.339,-118.6543,low
+2024-04-16,NOVA Gas,Edson AB,Sweet,5.98,Explosion,Engineering and Planning,53.7799,-116.9342,high
+2024-04-16,NOVA Gas,Homestead,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,55.5214,-119.3545,low
+2024-06-24,NOVA Gas,Worsley,Not Applicable,,Operation Beyond Design Limits,Maintenance,56.5589,-119.0248,low
+2024-07-07,Enbridge,Strome,Natural Gas Liquids,18.67,Release of Substance,Maintenance,52.93,-112.08,medium
+2024-07-24,NOVA Gas,Grande Prairie,Sweet,11659.6,Release of Substance,Engineering and Planning,54.3554,-117.9412,high
+2024-07-30,NOVA Gas,Edson,Not Applicable,,Fire,Maintenance,54.0437,-117.4205,low
+2024-08-20,NOVA Gas,Coleman,Not Applicable,,Serious Injury (as defined in the OPR),Standards and Procedures,49.6442,-114.6365,low
+2024-09-08,Trans Mountain,Edmonton,crude Sweet,3.0,Release of Substance,Engineering and Planning,53.5429,-113.3645,high
+2024-11-03,Trans Mountain,Edson Ab,Not Applicable,,Fire,Human Factors,53.5435,-116.8777,low
+2024-12-11,NOVA Gas,Glendon,Sweet,96.5,Release of Substance,Maintenance,54.3091,-111.2576,medium
+2025-01-20,NOVA Gas,Keg River,Not Applicable,,Fire,Maintenance,57.1938,-118.1974,low
+2025-01-22,NOVA Gas,Edson,Sweet,1498.37,Release of Substance,Engineering and Planning,53.792,-116.9642,high
+2025-01-28,NOVA Gas,Wandering River,Sweet,1400.0,Release of Substance,Maintenance,55.9807,-111.9666,high
+2025-02-02,NOVA Gas,Westcott,Sweet,5934.85,Release of Substance,Engineering and Planning,51.6003,-114.239,high
+2025-02-03,NOVA Gas,Red Earth,Not Applicable,,Serious Injury (as defined in the OPR),Inadequate Supervision,57.0053,-114.8712,low
+2025-02-06,NOVA Gas,Manning,Sweet,2813.0,Release of Substance,Engineering and Planning,56.878,-116.5471,high
+2025-03-12,NOVA Gas,Wandering River,Sweet,2700.0,Release of Substance,Maintenance,55.9807,-111.9666,high
+2025-03-18,NOVA Gas,Manning,Sweet,11018.99,Release of Substance,Engineering and Planning,56.8782,-116.5467,high
+2025-03-25,Spectra,Dawson Creek,Not Applicable,,Fire,Engineering and Planning,55.826,-119.756,low
+2025-04-15,Enbridge,Metiskow,Not Applicable,,Explosion,Engineering and Planning,52.4079,-110.5825,high
+2025-04-19,NOVA Gas,Edson,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,53.9604,-116.4583,low
+2025-05-12,NOVA Gas,Halkirk,Sweet,52.4,Release of Substance,Engineering and Planning,52.4368,-112.2343,medium
+2025-06-03,NOVA Gas,Warwick,Not Applicable,,Operation Beyond Design Limits,To be determined,53.6374,-112.0193,low
+2025-06-05,Foothills Pipe Lines Ltd.,Sundre,Sweet,1311.0,Release of Substance,Maintenance,51.9457,-114.7403,high
+2025-06-13,Trans Mountain,Hinton,Not Applicable,,Fire,Maintenance,53.5059,-117.3355,low
+2025-07-12,NOVA Gas,Rocky Mountain House,Not Applicable,,Fire,Inadequate Supervision,52.4682,-114.869,low
+2025-07-15,NOVA Gas,Empress,Not Applicable,,Operation Beyond Design Limits,To be determined,50.8988,-110.6336,low
+2025-09-08,NOVA Gas,Kinsella,Not Applicable,,Fire,Natural or Environmental Forces,52.9371,-111.5646,low
+2025-09-09,NOVA Gas,Kinsella,Not Applicable,,Fire,Natural or Environmental Forces,52.9429,-111.5715,low
+2025-12-04,NorthRiver Midstream NEBC Connector GP Inc.,Bonanza,Not Applicable,,Adverse Environmental Effects,Natural or Environmental Forces,55.855,-119.7082,medium
+2025-12-10,NOVA Gas,Halkirk,Not Applicable,,Operation Beyond Design Limits,To be determined,52.4349,-112.2343,low
+2025-12-17,NOVA Gas,Bear Canyon,Not Applicable,,Fire,Maintenance,56.3708,-119.9227,low
+2026-01-21,NOVA Gas,Lac La Biche,Not Applicable,,Fire,Maintenance,54.7434,-111.7213,low
+2026-04-17,Enbridge,Edmonton,Not Applicable,,Operation Beyond Design Limits,Human Factors,53.5474,-113.3557,low
+2026-05-24,NOVA Gas,Macklin,Sweet,1.0,Release of Substance,To be determined,52.2557,-110.0298,medium
+2026-05-25,NOVA Gas,Mclennan,Not Applicable,,Operation Beyond Design Limits,Engineering and Planning,55.8643,-117.035,low
+2026-06-25,NOVA Gas,Blue Ridge,Not Applicable,,Operation Beyond Design Limits,To be determined,54.0993,-115.5079,low
+2026-07-08,NOVA Gas,Grande Prairie,Not Applicable,,Fire,To be determined,54.4174,-119.355,low
+2026-08-02,NOVA Gas,Manning,Not Applicable,,Fire,To be determined,57.1908,-118.1941,low
+2026-08-04,NOVA Gas,Manning,Not Applicable,,Fire,To be determined,56.8783,-116.5479,low
+2026-08-24,NOVA Gas,Manning,Not Applicable,,Operation Beyond Design Limits,To be determined,57.2981,-118.2272,low

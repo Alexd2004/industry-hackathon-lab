@@ -1,0 +1,17 @@
+# Scam-Text Risk Scorer: Design Summary
+- **Purpose:** Desktop tool for authorized staff that estimates how likely an SMS is a scam, without declaring it one.
+- **Tech stack:** Electron + React (frontend), FastAPI + SQLAlchemy (backend), Supabase (auth, roles, row-level security), REST.
+- **System design:** Monolith with four parts: desktop app, FastAPI backend, Supabase auth, and a local database.
+- **System flow:** The app logs in via Supabase, then sends requests with a token that the backend verifies with Supabase.
+- **System priorities:** Security first, then scalability, and the detection logic stays server-side and never ships to the app.
+- **System security:** Argon2id password hashing and roles stored in Supabase, accepting lower scalability for a small user base.
+- **Backend endpoints:** `/auth` (login, logout, me), `/datasets` (upload, list, clean, admin update/delete), `/models` (admin training as a background job), `/score`, `/results` and feedback.
+- **Backend signals:** Money mentions and repetition across recipients raise the risk, but the ML model weighs all signals together.
+- **Backend models:** Logistic regression is the explainable baseline, and gradient-boosted trees are the main model that learns signal combinations.
+- **Backend evaluation:** Hold out about 30% for testing, weight the rare scam class (~13%), and judge on precision, recall, false-block and missed-scam rates.
+- **Backend output:** The score maps to deliver, warn or hold, and the model is retrained regularly using user feedback as labels.
+- **Backend data:** Users and Access live in Supabase, while StoreDataRaw, StoreDataCleaned, ScoredData and DataValidity are local.
+- **Frontend flow:** Login (no register page, admins add accounts), then upload CSV, clean, train, results, and back to upload.
+- **Frontend feedback:** Results are ranked from most to least suspicious, each with an agree/disagree button and an info popup on method limits.
+- **Frontend feel:** Progress animations for saving, cleaning and training, plus a completion popup, following `ai_design_mockup`.
+- **Testing:** Unit tests for each endpoint, training output and data cleaning, plus end-to-end tests of the UX flow and frontend-to-backend calls.
