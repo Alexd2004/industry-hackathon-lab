@@ -116,3 +116,14 @@ def test_cap_band_shown_around_cap():
     assert not at.exception
     assert any("Band: 11.7% to 18.3%" in c.value for c in at.caption)
     assert any("Point estimate" in c.value for c in at.caption)
+
+
+def test_placeholder_regulator_rows_match_winning_plan_pdf():
+    # Case5-Winning-Plan.pdf ladder table, "Regulator framing" rows (frozen 600 in the PDF)
+    df = pd.read_csv(PLACEHOLDER_CSV).set_index("stage")
+    for stage, want in {
+        "10 regulator missed-teen <= 10%": (0.861, 0.913, 0.160, 0.087, 0.955),
+        "10 regulator missed-teen <= 3%": (0.738, 0.974, 0.375, 0.026, 0.955),
+    }.items():
+        got = df.loc[stage, ["prec", "rec", "ft", "mt", "auc"]].tolist()
+        assert got == pytest.approx(want)

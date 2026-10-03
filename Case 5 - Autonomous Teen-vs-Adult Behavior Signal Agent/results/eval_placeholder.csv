@@ -9,5 +9,5 @@ stage,eval_set,prec,rec,ft,mt,f1,auc
 8 SoftSignal at 6% cap,projected,,0.74,0.06,,,
 9 loop R0,projected,,0.82,0.34,,,
 9 loop R7,projected,,0.87,0.14,,,
-10 regulator missed-teen <= 10%,projected,,0.90,0.16,0.10,,
-10 regulator missed-teen <= 3%,projected,,0.97,0.375,0.03,,
+10 regulator missed-teen <= 10%,projected,0.861,0.913,0.160,0.087,,0.955
+10 regulator missed-teen <= 3%,projected,0.738,0.974,0.375,0.026,,0.955
