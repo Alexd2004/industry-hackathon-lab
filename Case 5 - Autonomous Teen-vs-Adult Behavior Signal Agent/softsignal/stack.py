@@ -16,6 +16,7 @@ the tabular LR of step 6, with no text model and no TF-IDF cache needed.
 
 Run: python -m softsignal.stack
 """
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,14 +53,18 @@ def _fit_level2(X: pd.DataFrame, y) -> Pipeline:
     return make_tabular_lr().fit(X, np.asarray(y))
 
 
-def check_vocabulary(tm: TextMatrix, train: pd.DataFrame) -> None:
-    """Raise if the TF-IDF vocabulary was fit on any account outside train (e.g. on test text).
+def check_vocabulary(tm: TextMatrix, train_ids) -> None:
+    """Raise if the TF-IDF vocabulary was fit on any account outside the train set (e.g. on test text).
 
-    A TextMatrix built by hand has fit_ids None and is not checked; build_matrix always sets it.
+    train_ids is the whole train set. A frame smaller than train (a subsample, or the revealed
+    labels of a loop refit) is fine as long as the matrix was fit inside train. A matrix with
+    no fit_ids (hand-built) cannot be checked, so it only warns; build_matrix always sets them.
     """
     if tm.fit_ids is None:
+        warnings.warn("the text matrix has no fit_ids, so its vocabulary cannot be checked as train-only",
+                      stacklevel=3)
         return
-    outside = tm.fit_ids - set(train[ID_COL].astype(str))
+    outside = tm.fit_ids - set(pd.Index(train_ids).astype(str))
     if outside:
         raise ValueError(
             f"the text matrix vocabulary was fit on {len(outside)} account(s) outside train, "
@@ -67,9 +72,14 @@ def check_vocabulary(tm: TextMatrix, train: pd.DataFrame) -> None:
         )
 
 
-def nested_oof(tm: TextMatrix, train: pd.DataFrame, k: int = 5) -> np.ndarray:
-    """One level-2 score per train row, each from models that never saw that row (nested k x k)."""
-    check_vocabulary(tm, train)
+def nested_oof(tm: TextMatrix, train: pd.DataFrame, k: int = 5, train_ids=None) -> np.ndarray:
+    """One level-2 score per train row, each from models that never saw that row (nested k x k).
+
+    train_ids: the whole train set when `train` is only part of it; defaults to train's own ids.
+    The vocabulary was fit once on all those rows (no labels), so it has seen each outer-val
+    row's text but never its label.
+    """
+    check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids)
     ids, y = train[ID_COL].to_numpy(), train[TARGET].to_numpy()
     out = np.full(len(train), np.nan)
     for fit_idx, val_idx in cv_folds(train, k=k):
@@ -91,12 +101,14 @@ class Stack:
     tm: TextMatrix | None = None
 
     @classmethod
-    def fit(cls, train: pd.DataFrame, tm: TextMatrix | None = None, use_text: bool = True) -> "Stack":
+    def fit(
+        cls, train: pd.DataFrame, tm: TextMatrix | None = None, use_text: bool = True, train_ids=None
+    ) -> "Stack":
         y = train[TARGET].to_numpy()
         if not use_text:
             return cls(level2=_fit_level2(stack_features(train), y), use_text=False)
         tm = tm if tm is not None else build_matrix(train[ID_COL])
-        check_vocabulary(tm, train)
+        check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids)
         level2 = _fit_level2(stack_features(train, oof_text_score(tm, train)), y)
         return cls(level2=level2, use_text=True, text_model=fit_text_model(tm, train[ID_COL], y), tm=tm)
 

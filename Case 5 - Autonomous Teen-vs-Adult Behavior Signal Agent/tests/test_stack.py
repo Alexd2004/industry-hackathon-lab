@@ -118,6 +118,21 @@ def test_stack_fit_score_and_coefs(tm, frame):
     assert coefs[stk.TEXT_FEATURE] > 0
 
 
+def test_stack_fit_trains_level2_on_oof_text_scores_not_in_sample_ones(tm, frame, monkeypatch):
+    calls = []
+    real = stk.oof_text_score
+
+    def spy(tm_, train, k=5):
+        calls.append(train)
+        return real(tm_, train, k)
+    monkeypatch.setattr(stk, "oof_text_score", spy)
+    s = stk.Stack.fit(frame, tm=tm)
+    assert len(calls) == 1 and calls[0] is frame
+    oof_logit = stk.logit(real(tm, frame))  # level 2 must have been fitted on exactly these inputs
+    ref = stk._fit_level2(stk.stack_features(frame, real(tm, frame)), frame[TARGET])
+    assert np.allclose(s.level2[-1].coef_, ref[-1].coef_) and np.isfinite(oof_logit).all()
+
+
 def test_level2_never_receives_a_forbidden_column(tm, frame):
     s = stk.Stack.fit(frame, tm=tm)
     assert not FORBIDDEN & set(s.level2.feature_names_in_)
@@ -155,8 +170,23 @@ def test_a_matrix_fit_on_test_text_is_rejected_everywhere(posts, small_params, f
 
 def test_a_matrix_fit_on_a_subset_of_train_is_accepted(posts, small_params, frame, tm):
     sub = tmod.build_matrix(frame[ID_COL].iloc[:30], posts_path=posts, cache_dir=None)
-    stk.check_vocabulary(sub, frame)  # nothing from outside train, so no error
-    stk.check_vocabulary(tm, frame)
+    stk.check_vocabulary(sub, frame[ID_COL])  # nothing from outside train, so no error
+    stk.check_vocabulary(tm, frame[ID_COL])
+
+
+def test_a_smaller_frame_is_fine_when_the_whole_train_set_is_given(tm, frame):
+    """A refit on part of train (e.g. revealed labels) uses a matrix fit on all of train."""
+    part = frame.iloc[:40].reset_index(drop=True)
+    with pytest.raises(ValueError, match="outside train"):
+        stk.nested_oof(tm, part)  # default: the frame itself is taken as train
+    assert np.isfinite(stk.nested_oof(tm, part, train_ids=frame[ID_COL])).all()
+    assert stk.Stack.fit(part, tm=tm, train_ids=frame[ID_COL]).use_text
+
+
+def test_train_ids_cannot_hide_test_text(posts, small_params, frame):
+    leaky = tmod.build_matrix(frame[ID_COL], posts_path=posts, cache_dir=None)
+    with pytest.raises(ValueError, match="outside train"):
+        stk.nested_oof(leaky, frame.iloc[:40], train_ids=frame[ID_COL].iloc[:40])
 
 
 def test_matrix_from_cache_still_knows_its_fit_ids(posts, small_params, frame, tmp_path):
@@ -166,9 +196,12 @@ def test_matrix_from_cache_still_knows_its_fit_ids(posts, small_params, frame, t
     assert first.fit_ids == again.fit_ids == frozenset(ids)
 
 
-def test_a_hand_built_matrix_without_fit_ids_is_not_checked(tm, frame):
-    tm.fit_ids = None
-    stk.check_vocabulary(tm, frame.iloc[:10])
+def test_a_matrix_without_fit_ids_warns_instead_of_passing_silently(tm, frame):
+    tm.fit_ids = None  # hand-built, or dataclasses.replace(tm, fit_ids=None)
+    with pytest.warns(UserWarning, match="no fit_ids"):
+        stk.check_vocabulary(tm, frame[ID_COL])
+    with pytest.warns(UserWarning, match="no fit_ids"):
+        stk.nested_oof(tm, frame)
 
 
 # --- fallback flag -----------------------------------------------------------------------
