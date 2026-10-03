@@ -62,7 +62,7 @@ def main() -> None:
 
     flipped = int((v1 != v2).sum())
     print(f"\nAccounts that flipped v1->revise: {flipped}/{len(df)}")
-    print("Next: raise blend_w toward activity, or train LogisticRegression on the numeric columns.")
+    print("Next: train LogisticRegression on the numeric columns.")
     print("Honesty: posts are 2004 blogs; activity columns are synthetic_calibrated_demo.")
 
 

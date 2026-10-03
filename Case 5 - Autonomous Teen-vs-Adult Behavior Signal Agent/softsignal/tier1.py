@@ -1,5 +1,8 @@
 """Tier 1: style score, its cutoff sweep (step 3) and tune() under the false-teen cap (step 4)."""
+import hashlib
+import inspect
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -137,20 +140,30 @@ def eval_point(df: pd.DataFrame, w: float, cutoff: float) -> dict:
     return {"prec": prec, "rec": rec, "ft": ft, "mt": mt, "f1": f1(prec, rec)}
 
 
-def save_best(point: dict, train_metrics: dict, cap: float, n_train: int, path: Path = CHECKPOINT) -> bool:
-    """Write the cap-best point. Under the same cap and split, overwrite only on strictly higher train recall."""
+def rules_id() -> str:
+    """Short hash of the scoring rules and grids, so a checkpoint is tied to the code that made it."""
+    text = inspect.getsource(style_score) + inspect.getsource(activity_score) + repr(W_GRID) + repr(CUTOFFS)
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def save_best(
+    point: dict, train_metrics: dict, cap: float, n_train: int, path: Path = CHECKPOINT, rules: str | None = None
+) -> bool:
+    """Write the cap-best point. Under the same cap, split and scoring rules, overwrite only on strictly higher train recall."""
     new = {"w": point["w"], "cutoff": point["cutoff"], "cap": cap, "seed": SEED, "n_test": N_TEST,
-           "n_train": n_train, "train": train_metrics}
+           "n_train": n_train, "rules": rules or rules_id(), "train": train_metrics}
     if path.exists():
         try:
             old = json.loads(path.read_text())
-            same = all(old.get(k) == new[k] for k in ("cap", "seed", "n_test", "n_train"))
+            same = all(old.get(k) == new[k] for k in ("cap", "seed", "n_test", "n_train", "rules"))
             if same and not new["train"]["rec"] > old["train"]["rec"]:
                 return False
         except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
             pass  # unreadable checkpoint: replace it
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(new, indent=2) + "\n")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(new, indent=2) + "\n")
+    os.replace(tmp, path)  # atomic, so an interrupted write cannot leave a truncated checkpoint
     return True
 
 

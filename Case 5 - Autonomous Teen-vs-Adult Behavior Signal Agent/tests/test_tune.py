@@ -4,7 +4,7 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.tier1 import (
-    CUTOFFS, W_GRID, blend, eval_point, pick_points, save_best, style_score, activity_score,
+    CUTOFFS, W_GRID, activity_score, blend, eval_point, pick_points, rules_id, save_best, style_score,
     style_sweep_report, sweep_cutoffs, sweep_grid, tune,
 )
 
@@ -39,40 +39,34 @@ def test_pick_points_tie_break_and_cap():
     assert pick_points(grid, cap=0.01)["cap_best"] is None
 
 
-def test_cap_best_respects_cap_on_train():
+def test_cap_best_respects_cap_on_train(tmp_path):
     train, test = load_data()
-    out = tune(train, test, checkpoint=_tmp_path())
+    out = tune(train, test, checkpoint=tmp_path / "best_params.json")
     pt = out["picks"]["cap_best"]
     row = out["grid"][(out["grid"]["w"] == pt["w"]) & (out["grid"]["cutoff"] == pt["cutoff"])].iloc[0]
     assert row["ft"] <= 0.15
     assert row["rec"] == out["grid"][out["grid"]["ft"] <= 0.15]["rec"].max()
 
 
-def _tmp_path():
-    import tempfile
-    from pathlib import Path
-    return Path(tempfile.mkdtemp()) / "best_params.json"
-
-
-def test_tune_scores_test_once_per_pick_and_matches_eval_point():
+def test_tune_scores_test_once_per_pick_and_matches_eval_point(tmp_path):
     train, test = load_data()
-    out = tune(train, test, checkpoint=_tmp_path())
+    out = tune(train, test, checkpoint=tmp_path / "best_params.json")
     for _, r in out["test"].iterrows():
         m = eval_point(test, r["w"], r["cutoff"])
         assert (r["prec"], r["rec"], r["ft"], r["mt"]) == (m["prec"], m["rec"], m["ft"], m["mt"])
 
 
-def test_picks_use_train_only():
+def test_picks_use_train_only(tmp_path):
     train, test = load_data()
-    base = tune(train, test, checkpoint=_tmp_path())["picks"]
+    base = tune(train, test, checkpoint=tmp_path / "best_params.json")["picks"]
     flipped = test.copy()
     flipped["label_teen"] = 1 - flipped["label_teen"]
-    assert tune(train, flipped, checkpoint=_tmp_path())["picks"] == base
+    assert tune(train, flipped, checkpoint=tmp_path / "best_params.json")["picks"] == base
 
 
-def test_blend_pick_recall_not_below_the_step3_style_only_pick():
+def test_blend_pick_recall_not_below_the_step3_style_only_pick(tmp_path):
     train, test = load_data()
-    out = tune(train, test, checkpoint=_tmp_path())
+    out = tune(train, test, checkpoint=tmp_path / "best_params.json")
     step3 = style_sweep_report(train, test)["picks"]["cap_best"]
     g = out["grid"]
     w0 = g[(g["w"] == 0.0) & (g["cutoff"] == step3)]["rec"].iloc[0]
@@ -91,5 +85,14 @@ def test_save_best_overwrites_only_on_strictly_higher_recall(tmp_path):
     assert save_best({"w": 0.7, "cutoff": 0.6}, tm(0.65), 0.15, 2100, path) is True
     assert json.loads(path.read_text())["w"] == 0.7
     assert save_best({"w": 0.1, "cutoff": 0.6}, tm(0.10), 0.20, 2100, path) is True  # different cap: new context
+    assert save_best(pt, tm(0.1), 0.15, 2100, path, rules="other") is True  # scoring rules changed: replaced
+    assert json.loads(path.read_text())["rules"] == "other"
+    assert save_best(pt, tm(0.2), 0.15, 2100, path, rules="other") is True
+    assert json.loads(path.read_text())["rules"] == "other"
+    assert not list(path.parent.glob("*.tmp"))
     path.write_text("not json")
     assert save_best(pt, tm(0.1), 0.15, 2100, path) is True  # unreadable: replaced
+
+
+def test_rules_id_is_stable_and_stored():
+    assert rules_id() == rules_id() and len(rules_id()) == 12
