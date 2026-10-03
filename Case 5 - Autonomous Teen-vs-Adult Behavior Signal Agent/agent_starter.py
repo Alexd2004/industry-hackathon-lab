@@ -4,22 +4,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from softsignal.data import load_data
+from softsignal.metrics import prf
+from softsignal.tier1 import style_sweep_report
+
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
-
-
-def prf(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float, float]:
-    """precision, recall, false-teen rate, missed-teen rate."""
-    y_true = y_true.astype(int)
-    y_pred = y_pred.astype(int)
-    tp = int(((y_pred == 1) & (y_true == 1)).sum())
-    fp = int(((y_pred == 1) & (y_true == 0)).sum())
-    fn = int(((y_pred == 0) & (y_true == 1)).sum())
-    tn = int(((y_pred == 0) & (y_true == 0)).sum())
-    prec = tp / (tp + fp) if (tp + fp) else 0.0
-    rec = tp / (tp + fn) if (tp + fn) else 0.0
-    false_teen = fp / (fp + tn) if (fp + tn) else 0.0  # adults wrongly called teen
-    missed_teen = fn / (fn + tp) if (fn + tp) else 0.0
-    return prec, rec, false_teen, missed_teen
 
 
 def report(name: str, y_true: np.ndarray, y_pred: np.ndarray) -> None:
@@ -64,6 +53,15 @@ def main() -> None:
     blended = (1.0 - blend_w) * style + blend_w * activity
     v2 = (blended >= 0.50).astype(int).to_numpy()
     report(f"Revise blend w={blend_w}", y, v2)
+
+    # --- Step 3: sweep the style cutoff on train, evaluate the picks once on test ---
+    train, test = load_data()
+    rep = style_sweep_report(train, test)
+    print(f"\nStyle cutoff sweep on train ({len(train)} rows):")
+    print(rep["train_sweep"].round(3).to_string(index=False))
+    print(f"Picks (train): {rep['picks']}")
+    print(f"\nPicked cutoffs on test ({len(test)} rows):")
+    print(rep["test"].round(3).to_string(index=False))
 
     flipped = int((v1 != v2).sum())
     print(f"\nAccounts that flipped v1->revise: {flipped}/{len(df)}")
