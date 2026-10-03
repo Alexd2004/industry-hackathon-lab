@@ -10,6 +10,7 @@ from softsignal.metrics import DEFAULT_CAP, EVAL_COLS
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 EVAL_CSV = RESULTS / "eval.csv"
 PLACEHOLDER_CSV = RESULTS / "eval_placeholder.csv"
+NUMERIC_COLS = [c for c in EVAL_COLS if c not in ("stage", "eval_set")]
 
 BANNER = "PLACEHOLDER, projected, not measured. These are Combined Plan section 7 numbers, not results from this repo."
 CI_NOTE = "95% CI on 900 test accounts: recall +/- 2.5 pts, false-teen +/- 3.3 pts. The cap is a band, not a line."
@@ -20,15 +21,28 @@ FOOTER = (
 )
 
 
-def load_ladder(results_dir: Path = RESULTS) -> tuple[pd.DataFrame, bool]:
+def load_ladder(results_dir: Path | None = None) -> tuple[pd.DataFrame, bool]:
     """(ladder, is_placeholder). The real eval.csv wins; the placeholder is used only when it is missing."""
+    results_dir = RESULTS if results_dir is None else results_dir
     real, placeholder = results_dir / "eval.csv", results_dir / "eval_placeholder.csv"
     path, is_placeholder = (real, False) if real.exists() else (placeholder, True)
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.ParserError as e:
+        raise ValueError(f"{path.name} is not a readable CSV: {e}") from e
+    except pd.errors.EmptyDataError as e:
+        raise ValueError(f"{path.name} is empty") from e
     missing = [c for c in EVAL_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"{path.name} is missing columns {missing}")
-    return df[EVAL_COLS], is_placeholder
+    df = df[EVAL_COLS].copy()
+    for col in NUMERIC_COLS:
+        num = pd.to_numeric(df[col], errors="coerce")
+        bad = df[col].notna() & num.isna()  # a non-number must fail loudly, not turn into a blank
+        if bad.any():
+            raise ValueError(f"{path.name}: column {col} has non-numeric values {df.loc[bad, col].tolist()[:3]}")
+        df[col] = num
+    return df, is_placeholder
 
 
 def best_under_cap(ladder: pd.DataFrame, cap: float = DEFAULT_CAP) -> pd.Series | None:
@@ -42,7 +56,12 @@ def _pct(x) -> str:
 
 
 def render_results_tab() -> None:
-    ladder, is_placeholder = load_ladder()
+    try:
+        ladder, is_placeholder = load_ladder()
+    except ValueError as e:
+        st.error(f"Cannot show results: {e}")
+        st.caption(FOOTER)
+        return
     if is_placeholder:
         st.warning(BANNER)
 
