@@ -1,4 +1,4 @@
-"""Shared metrics and eval.csv rows. Every stage of the results ladder is scored here."""
+"""Shared metrics, cutoffs and eval.csv rows (Tier 1, steps 2, 3, 6). Every ladder stage is scored here."""
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
@@ -40,6 +40,7 @@ def prf(y_true, y_pred) -> tuple[float, float, float, float]:
 
 
 def f1(prec: float, rec: float) -> float:
+    """Harmonic mean of precision and recall, 0 when both are 0."""
     return 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
 
 
