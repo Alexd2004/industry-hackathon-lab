@@ -1,5 +1,6 @@
 """Shared data loading and the frozen train/test split (Tier 1, step 1)."""
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -39,9 +40,15 @@ def make_split(df: pd.DataFrame, seed: int = SEED, test_fraction: float = TEST_F
 
 
 def load_data(
-    path: Path = JOINED, split_file: Path = SPLIT_FILE
+    path: Path = JOINED, split_file: Path = SPLIT_FILE, on_param_mismatch: str = "warn"
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (train, test). Reads the shared split file, or creates it if missing."""
+    """Return (train, test). Reads the shared split file, or creates it if missing.
+
+    The file wins over SEED / TEST_FRACTION. If they differ from the file, on_param_mismatch
+    is "warn" (use the file, warn) or "error" (raise). The file is never regenerated here.
+    """
+    if on_param_mismatch not in ("warn", "error"):
+        raise ValueError('on_param_mismatch must be "warn" or "error"')
     df = pd.read_csv(path)
     if split_file.exists():
         split = json.loads(split_file.read_text())
@@ -50,11 +57,29 @@ def load_data(
         split_file.parent.mkdir(parents=True, exist_ok=True)
         split_file.write_text(json.dumps(split, indent=2) + "\n")
 
+    stored = {"seed": split.get("seed"), "test_fraction": split.get("test_fraction")}
+    current = {"seed": SEED, "test_fraction": TEST_FRACTION}
+    if stored != current:
+        msg = (
+            f"{split_file.name} was made with {stored} but the code has {current}; "
+            "the file is used as is. Delete it to regenerate with the code values."
+        )
+        if on_param_mismatch == "error":
+            raise ValueError(msg)
+        warnings.warn(msg, stacklevel=2)
+
     train_ids, test_ids = set(split["train_ids"]), set(split["test_ids"])
     if train_ids & test_ids or (train_ids | test_ids) != set(df["blogger_id"]):
         raise ValueError(
             f"{split_file} does not match {path.name}; delete it to regenerate the split"
         )
+    for label, grp in df.groupby(TARGET):
+        expected = int(round(len(grp) * split["test_fraction"]))
+        if grp[ID_COL].isin(test_ids).sum() != expected:
+            raise ValueError(
+                f"{split_file} is not stratified on {TARGET} for {path.name}; "
+                "delete it to regenerate the split"
+            )
     train = df[df["blogger_id"].isin(train_ids)].reset_index(drop=True)
     test = df[df["blogger_id"].isin(test_ids)].reset_index(drop=True)
     return train, test
