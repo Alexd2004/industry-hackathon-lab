@@ -36,6 +36,8 @@ def load_ladder(results_dir: Path | None = None) -> tuple[pd.DataFrame, bool]:
         raise ValueError(f"{path.name} is not a readable CSV: {e}") from e
     except pd.errors.EmptyDataError as e:
         raise ValueError(f"{path.name} is empty") from e
+    except OSError as e:  # missing file, a folder named eval.csv, no read permission
+        raise ValueError(f"{path.name} cannot be read: {e.strerror or e}") from e
     missing = [c for c in EVAL_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"{path.name} is missing columns {missing}")

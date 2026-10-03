@@ -134,3 +134,22 @@ def test_placeholder_regulator_rows_match_winning_plan_pdf():
     }.items():
         got = df.loc[stage, ["prec", "rec", "ft", "mt", "auc"]].tolist()
         assert got == pytest.approx(want)
+
+
+def test_missing_placeholder_raises_clear_error(tmp_path):
+    with pytest.raises(ValueError, match="eval_placeholder.csv cannot be read"):
+        load_ladder(tmp_path)
+
+
+def test_unreadable_eval_csv_raises_clear_error(tmp_path):
+    (tmp_path / "eval.csv").mkdir()  # a folder where the file should be
+    with pytest.raises(ValueError, match="eval.csv cannot be read"):
+        load_ladder(tmp_path)
+
+
+def test_tab_shows_error_when_eval_csv_is_a_folder(tmp_path, monkeypatch):
+    (tmp_path / "eval.csv").mkdir()
+    monkeypatch.setattr(ui_results, "RESULTS", tmp_path)
+    at = AppTest.from_function(render).run()
+    assert not at.exception
+    assert any("Cannot show results" in e.value for e in at.error)
