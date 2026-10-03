@@ -3,8 +3,9 @@ import json
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from softsignal.features import FEATURE_COLS, ID_COL, N_TEST, SEED, TARGET
 
@@ -94,3 +95,13 @@ def load_data(
 def split_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     """Return (X, y) with X limited to the allow-listed FEATURE_COLS."""
     return df[FEATURE_COLS].copy(), df[TARGET]
+
+
+def cv_folds(train: pd.DataFrame, k: int = 5, seed: int = SEED) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Stratified (fit_idx, val_idx) folds over the train set, as positional indices.
+
+    Pick cutoffs, blend weights and other settings with these folds. Never use the
+    test set for that: touch it once, for the final report.
+    """
+    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
+    return list(skf.split(train, train[TARGET]))

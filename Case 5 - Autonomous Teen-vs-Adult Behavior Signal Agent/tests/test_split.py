@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from softsignal.data import ID_COL, TARGET, check_frame, load_data, make_split
+from softsignal.data import ID_COL, TARGET, check_frame, cv_folds, load_data, make_split
 from softsignal.features import N_TEST, SEED
 
 
@@ -124,3 +124,21 @@ def test_matching_params_do_not_warn(csv_path, tmp_path):
 def test_invalid_on_param_mismatch_value(csv_path, tmp_path):
     with pytest.raises(ValueError, match="on_param_mismatch"):
         load_data(csv_path, tmp_path / "split.json", on_param_mismatch="ignore")
+
+
+def test_cv_folds_partition_train_and_stay_stratified():
+    train = make_df(2100)
+    folds = cv_folds(train, k=5)
+    assert len(folds) == 5
+    val_all = np.concatenate([val for _, val in folds])
+    assert sorted(val_all) == list(range(len(train)))
+    for fit, val in folds:
+        assert not set(fit) & set(val)
+        counts = train.iloc[val][TARGET].value_counts()
+        assert abs(counts[0] - counts[1]) <= 1
+
+
+def test_cv_folds_same_seed_same_folds():
+    train = make_df(2100)
+    a, b = cv_folds(train), cv_folds(train)
+    assert all((x[1] == y[1]).all() for x, y in zip(a, b))
