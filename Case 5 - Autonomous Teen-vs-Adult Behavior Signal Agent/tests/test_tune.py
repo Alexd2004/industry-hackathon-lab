@@ -4,8 +4,8 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.tier1 import (
-    CUTOFFS, W_GRID, activity_score, blend, eval_point, pick_points, rules_id, save_best, style_score,
-    style_sweep_report, sweep_cutoffs, sweep_grid, tune,
+    CUTOFFS, W_GRID, activity_score, blend, data_id, eval_point, load_best, pick_points, rules_id, save_best,
+    style_score, style_sweep_report, sweep_cutoffs, sweep_grid, tune,
 )
 
 
@@ -96,3 +96,37 @@ def test_save_best_overwrites_only_on_strictly_higher_recall(tmp_path):
 
 def test_rules_id_is_stable_and_stored():
     assert rules_id() == rules_id() and len(rules_id()) == 12
+
+
+def test_rules_id_covers_blend_and_flag(monkeypatch):
+    import softsignal.tier1 as t1
+
+    base = t1.rules_id()
+    monkeypatch.setattr(t1, "blend", lambda style, activity, w: style)
+    assert t1.rules_id() != base
+
+
+def test_data_id_changes_with_the_rows(tmp_path):
+    train, _ = load_data()
+    assert data_id(train) == data_id(train.copy())
+    changed = train.copy()
+    changed.loc[0, "avg_word_len"] += 1.0
+    assert data_id(changed) != data_id(train)
+
+
+def test_save_best_replaces_when_the_data_changed(tmp_path):
+    path = tmp_path / "best_params.json"
+    pt = {"w": 0.5, "cutoff": 0.5}
+    tm = {"prec": 0.5, "rec": 0.6, "ft": 0.1, "mt": 0.4, "f1": 0.5}
+    assert save_best(pt, tm, 0.15, 2100, path, data="a") is True
+    assert save_best(pt, tm, 0.15, 2100, path, data="a") is False
+    assert save_best(pt, tm, 0.15, 2100, path, data="b") is True  # same size, different rows
+
+
+def test_load_best_reads_the_stored_checkpoint(tmp_path):
+    path = tmp_path / "best_params.json"
+    assert load_best(path) is None
+    path.write_text("{bad")
+    assert load_best(path) is None
+    path.write_text('{"w": 0.5}')
+    assert load_best(path) == {"w": 0.5}

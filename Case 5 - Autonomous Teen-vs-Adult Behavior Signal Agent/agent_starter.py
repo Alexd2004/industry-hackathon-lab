@@ -6,7 +6,7 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.metrics import prf
-from softsignal.tier1 import activity_score, style_score, style_sweep_report, tune
+from softsignal.tier1 import activity_score, blend, load_best, style_score, style_sweep_report, tune
 
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
 
@@ -39,7 +39,7 @@ def main() -> None:
     # Higher evening / short-video / night opens, lower school-hour activity -> more teen-like.
     activity = activity_score(df)
     blend_w = 0.45  # weight on activity; change this and re-run
-    blended = (1.0 - blend_w) * style + blend_w * activity
+    blended = blend(style, activity, blend_w)
     v2 = (blended >= 0.50).astype(int).to_numpy()
     report(f"Revise blend w={blend_w}", y, v2)
 
@@ -54,6 +54,8 @@ def main() -> None:
     print(f"Flag-everyone F1 on test (reference): {rep['flag_all_f1']:.3f}")
 
     # --- Step 4: grid blend weight x cutoff on train under the 15% cap, picks scored once on test ---
+    prior = load_best()
+    print(f"\nStored best before tuning: {prior if prior else 'none'}")
     tuned = tune(train, test)
     print(f"\nTune picks (train, {len(tuned['grid'])} grid points): {tuned['picks']}")
     print(f"Picked points on test ({len(test)} rows):")

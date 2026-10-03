@@ -8,10 +8,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from softsignal.features import N_TEST, SEED, TARGET
+from softsignal.features import FEATURE_COLS, ID_COL, N_TEST, SEED, TARGET
 from softsignal.metrics import f1, prf
 
-CAP = 0.15  # max false-teen rate (adults wrongly called teen), 15% cap from the Combined Plan; move to policy.yaml cap_false_teen when it exists
+# Max false-teen rate (adults wrongly called teen), 15% cap from the Combined Plan.
+# Move to policy.yaml cap_false_teen when it exists.
+CAP = 0.15
 CUTOFFS = [round(0.10 + 0.05 * i, 2) for i in range(17)]  # 0.10 .. 0.90
 
 W_GRID = [round(0.05 * i, 2) for i in range(21)]  # weight on activity, 0.00 .. 1.00
@@ -141,21 +143,42 @@ def eval_point(df: pd.DataFrame, w: float, cutoff: float) -> dict:
 
 
 def rules_id() -> str:
-    """Short hash of the scoring rules and grids, so a checkpoint is tied to the code that made it."""
-    text = inspect.getsource(style_score) + inspect.getsource(activity_score) + repr(W_GRID) + repr(CUTOFFS)
+    """Short hash of the scoring code and grids, so a checkpoint is tied to the code that made it."""
+    parts = (style_score, activity_score, blend, flag, sweep_cutoffs, prf, f1)
+    text = "".join(inspect.getsource(fn) for fn in parts) + repr(W_GRID) + repr(CUTOFFS)
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
+def data_id(df: pd.DataFrame) -> str:
+    """Short hash of the train rows (ids, label, model inputs), so a checkpoint is tied to its data."""
+    rows = pd.util.hash_pandas_object(df[[ID_COL, TARGET, *FEATURE_COLS]], index=False)
+    return hashlib.sha256(rows.to_numpy().tobytes()).hexdigest()[:12]
+
+
+def load_best(path: Path = CHECKPOINT) -> dict | None:
+    """The stored cap-best checkpoint, or None when it is missing or unreadable."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def save_best(
-    point: dict, train_metrics: dict, cap: float, n_train: int, path: Path = CHECKPOINT, rules: str | None = None
+    point: dict,
+    train_metrics: dict,
+    cap: float,
+    n_train: int,
+    path: Path = CHECKPOINT,
+    rules: str | None = None,
+    data: str | None = None,
 ) -> bool:
-    """Write the cap-best point. Under the same cap, split and scoring rules, overwrite only on strictly higher train recall."""
+    """Write the cap-best point. Under the same cap, split, data and scoring rules, overwrite only on strictly higher train recall."""
     new = {"w": point["w"], "cutoff": point["cutoff"], "cap": cap, "seed": SEED, "n_test": N_TEST,
-           "n_train": n_train, "rules": rules or rules_id(), "train": train_metrics}
+           "n_train": n_train, "rules": rules or rules_id(), "data": data, "train": train_metrics}
     if path.exists():
         try:
             old = json.loads(path.read_text())
-            same = all(old.get(k) == new[k] for k in ("cap", "seed", "n_test", "n_train", "rules"))
+            same = all(old.get(k) == new[k] for k in ("cap", "seed", "n_test", "n_train", "rules", "data"))
             if same and not new["train"]["rec"] > old["train"]["rec"]:
                 return False
         except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
@@ -180,7 +203,6 @@ def tune(train: pd.DataFrame, test: pd.DataFrame, cap: float = CAP, checkpoint: 
     test_df["cap_ok"] = test_df["ft"] <= cap
     written = False
     if picks["cap_best"] is not None:
-        at = grid[(grid["w"] == picks["cap_best"]["w"]) & (grid["cutoff"] == picks["cap_best"]["cutoff"])].iloc[0]
-        train_metrics = {k: float(at[k]) for k in ("prec", "rec", "ft", "mt", "f1")}
-        written = save_best(picks["cap_best"], train_metrics, cap, len(train), checkpoint)
+        at = eval_point(train, picks["cap_best"]["w"], picks["cap_best"]["cutoff"])
+        written = save_best(picks["cap_best"], at, cap, len(train), checkpoint, data=data_id(train))
     return {"grid": grid, "picks": picks, "test": test_df, "checkpoint_written": written}
