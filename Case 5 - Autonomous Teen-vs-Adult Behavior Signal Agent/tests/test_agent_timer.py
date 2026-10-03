@@ -156,6 +156,16 @@ class TimerTest(unittest.TestCase):
                 pass
         self.assertEqual(self.timer.write_errors, 2)
 
+    def test_broken_stderr_keeps_original_exception(self) -> None:
+        closed = mock.MagicMock()
+        closed.write.side_effect = ValueError("I/O operation on closed file")
+        with mock.patch.object(Path, "open", side_effect=PermissionError("denied")), \
+                mock.patch("sys.stderr", closed):
+            with self.assertRaises(TimeoutError):
+                with self.timer.call("A1", "ask"):
+                    raise TimeoutError("4 s")
+        self.assertEqual(self.timer.write_errors, 1)
+
     def test_unencodable_value_keeps_original_exception(self) -> None:
         # numpy-style ints from a DataFrame must not turn a timeout into a TypeError
         class NpInt(int):
@@ -177,6 +187,15 @@ class TimerTest(unittest.TestCase):
             with self.timer.call("A1", "ask", round_id=loop):
                 raise TimeoutError("4 s")
         self.assertEqual(self.timer.write_errors, 1)
+
+        class BadStr:
+            def __str__(self) -> str:
+                raise RuntimeError("no str")
+
+        with self.assertRaises(TimeoutError):
+            with self.timer.call("A1", "ask", round_id=BadStr()):
+                raise TimeoutError("4 s")
+        self.assertEqual(self.timer.write_errors, 2)
         with self.timer.call("A1", "ask", round_id=NpInt(3)):
             pass
         self.assertEqual(load_records(self.path)[-1]["round"], 3)
@@ -274,11 +293,20 @@ class TimerTest(unittest.TestCase):
             pass
         with self.path.open("a") as f:
             f.write('123\nnull\n{"run": "test"}\n')
-            full = rec("A1", "ask", "model", None)
-            f.write(json.dumps(full) + "\n")
+            ok = rec("A1", "ask", "model", 1)
+            ok["start"] = ok["end"] = "2026-10-03T12:00:00.000+00:00"
+            bad = [dict(ok, ms=None), dict(ok, kind="llm"), dict(ok, status="OK"),
+                   dict(ok, start="yesterday"), dict(ok, end=None), dict(ok, agent=1),
+                   dict(ok, tokens_in="12"), dict(ok, tokens_out=True)]
+            for b in bad:
+                f.write(json.dumps(b) + "\n")
         records = load_records(self.path)
         self.assertEqual(len(records), 1)
-        summarize(records)  # must not crash
+        # none of the readers may crash on what load_records returns
+        summarize(records)
+        round_agent_summary(records, 2)
+        round_time_ms(records, 2)
+        round_span_ms(records, 2)
 
     def test_round_span_from_real_timer_output(self) -> None:
         with self.timer.call("A1", "ask"):

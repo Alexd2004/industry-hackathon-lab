@@ -201,7 +201,7 @@ class AgentTimer:
         # exception (e.g. the timeout a fallback is waiting to catch)
         try:
             line = json.dumps(record, default=_json_default) + "\n"
-        except (TypeError, ValueError) as exc:  # e.g. a circular reference
+        except Exception as exc:  # circular or deep values, a __str__ that raises
             self._write_failed(f"could not encode record: {exc}")
             return
         with self._lock:
@@ -216,8 +216,11 @@ class AgentTimer:
         # warn once; callers show write_errors next to the timing summary
         self.write_errors += 1
         if self.write_errors == 1:
-            print(f"agent_timer: {msg} (further failures only counted in write_errors)",
-                  file=sys.stderr)
+            try:
+                print(f"agent_timer: {msg} (further failures only counted in write_errors)",
+                      file=sys.stderr)
+            except Exception:  # closed or broken stderr: the warning is best effort
+                pass
 
 
 _default_timer: AgentTimer | None = None
@@ -231,6 +234,29 @@ def get_timer() -> AgentTimer:
         if _default_timer is None:
             _default_timer = AgentTimer()
         return _default_timer
+
+
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _valid_record(obj: Any) -> bool:
+    """True if obj has every field the readers rely on, with a usable type."""
+    if not (isinstance(obj, dict) and RECORD_KEYS <= obj.keys()):
+        return False
+    if not (_is_num(obj["ms"]) and obj["kind"] in KINDS
+            and (obj["status"] is None or obj["status"] in STATUSES)
+            and isinstance(obj["agent"], str) and isinstance(obj["step"], str)):
+        return False
+    if not all(v is None or (isinstance(v, int) and not isinstance(v, bool))
+               for v in (obj["tokens_in"], obj["tokens_out"])):
+        return False
+    try:
+        _parse_ts(obj["start"])
+        _parse_ts(obj["end"])
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def load_records(path: Path | str = DEFAULT_LOG) -> list[dict]:
@@ -253,8 +279,7 @@ def load_records(path: Path | str = DEFAULT_LOG) -> list[dict]:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if (isinstance(obj, dict) and RECORD_KEYS <= obj.keys()
-                    and isinstance(obj["ms"], (int, float)) and not isinstance(obj["ms"], bool)):
+            if _valid_record(obj):
                 out.append(obj)
     return out
 
