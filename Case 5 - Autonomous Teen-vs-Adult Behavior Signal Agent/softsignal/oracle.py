@@ -28,6 +28,7 @@ REVIEW_BUDGET = 0.25  # max share of a batch in the verify band
 
 LABEL_COLS = [ID_COL, TARGET, "in_verify", "in_audit"]
 REVEALED_COLS = ["round", *LABEL_COLS]
+LABEL_DTYPES = {TARGET: "int64", "in_verify": bool, "in_audit": bool}
 LOG_KEYS = ["round", "verify_ids", "audit_ids", "n_verify", "n_audit", "n_overlap", "n_labels", "n_audit_adults"]
 
 
@@ -121,8 +122,11 @@ class Oracle:
         return len(self._batches)
 
     def verify_budget(self, batch: Batch) -> int:
-        """Max unique ids in the verify band for this batch: floor(review_budget * batch size)."""
-        return math.floor(self.review_budget * len(batch.ids))
+        """Max unique ids in the verify band for this batch: floor(review_budget * batch size).
+
+        The 1e-9 keeps float error from costing a slot (0.29 * 100 is 28.999999999999996).
+        """
+        return math.floor(self.review_budget * len(batch.ids) + 1e-9)
 
     def next_batch(self) -> Batch | None:
         """The next round's batch (features only), or None after the last round."""
@@ -174,7 +178,7 @@ class Oracle:
             TARGET: [self._labels[i] for i in ids],
             "in_verify": [i in verify_set for i in ids],
             "in_audit": [i in audit_set for i in ids],
-        }, columns=LABEL_COLS)
+        }, columns=LABEL_COLS).astype(LABEL_DTYPES)
         n_overlap = len(verify_set & audit_set)
 
         self._revealed_rounds.add(r)
@@ -198,7 +202,8 @@ class Oracle:
         if source not in ("audit", "verify", "all"):
             raise OracleError(f'source must be "audit", "verify" or "all", got {source!r}')
         if not self._store:
-            return pd.DataFrame(columns=REVEALED_COLS)
+            # Typed even when empty: an object-dtype in_audit column would make df[df["in_audit"]] select columns.
+            return pd.DataFrame(columns=REVEALED_COLS).astype({"round": "int64", **LABEL_DTYPES})
         out = pd.concat(self._store, ignore_index=True)
         if before_round is not None:
             out = out[out["round"] < before_round]

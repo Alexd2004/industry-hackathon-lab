@@ -237,6 +237,17 @@ def test_band_of_76_raises_and_75_is_ok(train, test_ids):
     assert rv.n_verify == 75 and rv.labels["in_verify"].sum() == 75
 
 
+@pytest.mark.parametrize("n, budget, expected", [(301, 0.25, 75), (100, 0.29, 29), (300, 0.0, 0)])
+def test_budget_floors_without_float_error(test_ids, n, budget, expected):
+    """floor, not ceil (0.25 * 301 = 75.25), and 0.29 * 100 must not round down to 28."""
+    o = Oracle(make_frame(n), test_ids, batch_size=n, review_budget=budget)
+    b = o.next_batch()
+    assert o.verify_budget(b) == expected
+    with pytest.raises(OracleError, match=f"budget is {expected}"):
+        o.reveal(b, top_band(b, expected + 1))
+    assert o.reveal(b, top_band(b, expected)).n_verify == expected
+
+
 def test_duplicates_are_dropped_before_the_budget(oracle):
     b = oracle.next_batch()
     band = top_band(b, 75)
@@ -296,6 +307,17 @@ def test_revealed_sources_and_before_round(oracle, train):
     assert oracle.revealed(before_round=1).empty
     with pytest.raises(OracleError, match="source"):
         oracle.revealed("test")
+
+
+def test_empty_revealed_is_typed_and_filterable(oracle, test_ids):
+    """Before any reveal (and with no labels at all), boolean filters keep the columns, as A3 does."""
+    for df in (oracle.revealed(), oracle.revealed("audit"), oracle.revealed(before_round=1)):
+        assert df.empty and df["in_audit"].dtype == bool and df["in_verify"].dtype == bool
+        assert list(df[df["in_audit"] & ~df["in_verify"]].columns) == list(df.columns)
+    o = Oracle(make_frame(40), test_ids, audit_per_batch=0)
+    rv = o.reveal(o.next_batch(), [])
+    assert rv.labels.empty and rv.labels["in_audit"].dtype == bool
+    assert list(rv.labels[rv.labels["in_audit"]].columns) == list(rv.labels.columns)
 
 
 def test_returned_frames_are_copies(oracle):

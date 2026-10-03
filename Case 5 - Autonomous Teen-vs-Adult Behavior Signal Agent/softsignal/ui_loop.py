@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from softsignal.metrics import DEFAULT_CAP, ROUNDS_COLS
-from softsignal.ui_results import FOOTER, FT_CI, load_ladder
+from softsignal.ui_results import FOOTER, FT_CI, headline_rows, load_ladder
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 ROUNDS_FILE, DECISIONS_FILE = "rounds.csv", "decisions.jsonl"
@@ -119,14 +119,18 @@ def valid_decision(rec) -> bool:
     rnd = rec.get("round")
     if not isinstance(rnd, int) or isinstance(rnd, bool) or rnd < 0:
         return False
-    if any(k not in rec or not _valid_agent(rec[k]) for k in AGENTS):
+    if any(not _valid_agent(rec.get(k)) for k in AGENTS):  # a missing agent (e.g. a 3-agent crew) = not run
         return False
     applied = rec.get("applied")
     if not isinstance(rec.get("rule_decision"), dict) or not isinstance(applied, dict):
         return False
     if not isinstance(applied.get("decision"), dict) or applied.get("source") not in SOURCES:
         return False
-    return isinstance(rec.get("diff", {}), dict)
+    if not isinstance(rec.get("diff", {}), dict):
+        return False
+    # decision blocks carry parameters, never test metrics (A5's output may quote them; A1-A4 never read it)
+    return not any(TEST_METRIC_KEYS & block.keys()
+                   for block in (rec["rule_decision"], applied["decision"], rec.get("diff", {})))
 
 
 def load_decisions(path: Path) -> tuple[list, int]:
@@ -144,6 +148,8 @@ def load_decisions(path: Path) -> tuple[list, int]:
             skipped += 1
             continue
         rec.setdefault("diff", {})
+        for k in AGENTS:
+            rec.setdefault(k, None)
         by_key[(rec["run"], rec["round"])] = rec
     return [by_key[k] for k in sorted(by_key)], skipped
 
@@ -200,14 +206,18 @@ def diff_table(decision: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def log_line(decision: dict, round_row: pd.Series | None) -> str:
-    """One plain-English line per round for the decision log."""
+def _pct(v) -> str:
+    return f"{v:.0%}" if isinstance(v, (int, float)) and not isinstance(v, bool) else _fmt(v)
+
+
+def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
+    """One plain-English line per round for the decision log. tag marks the test metrics, e.g. " (projected)"."""
     d, src = decision["applied"]["decision"], decision["applied"]["source"]
     parts = [f"R{decision['round']}: applied {d.get('action', '?')} from {src}"]
     if d.get("cutoff") is not None:
         parts[0] += f", cutoff {_fmt(d['cutoff'])}"
     if d.get("cap") is not None:
-        parts[0] += f", cap {d['cap']:.0%}"
+        parts[0] += f", cap {_pct(d['cap'])}"
     if decision["diff"]:
         changes = ", ".join(f"{k} {_fmt(v[0])} -> {_fmt(v[1])}" if isinstance(v, list) and len(v) == 2 else k
                             for k, v in decision["diff"].items())
@@ -217,7 +227,7 @@ def log_line(decision: dict, round_row: pd.Series | None) -> str:
     if fallbacks:
         parts.append("Fallback: " + ", ".join(fallbacks))
     if round_row is not None:
-        parts.append(f"{round_row['mode']}, recall {round_row['rec']:.0%}, false-teen {round_row['ft']:.0%}")
+        parts.append(f"{round_row['mode']}, recall {round_row['rec']:.0%}, false-teen {round_row['ft']:.0%}{tag}")
     return ". ".join(parts) + "."
 
 
@@ -227,15 +237,20 @@ def _is_insufficient(block: dict) -> bool:
             or (isinstance(out, dict) and out.get("drift") == "insufficient_data"))
 
 
+def _dicts(items) -> list[dict]:
+    """The dict entries of a list; anything else (a model's malformed output) gives []."""
+    return [x for x in items if isinstance(x, dict)] if isinstance(items, list) else []
+
+
 def _card_body(key: str, block: dict, decision: dict) -> None:
     out = block["output"]
     if key == "a1" and isinstance(out, dict):
         st.markdown(f"**Drift:** {out.get('drift', '?')}")
         st.caption(str(out.get("reason", "")))
     elif key == "a3" and isinstance(out, dict):
-        pats = out.get("patterns") or []
+        pats = _dicts(out.get("patterns"))
         st.markdown(f"**Top pattern:** {pats[0].get('description', '?')}" if pats else "No pattern found.")
-        for ch in out.get("suggested_param_changes") or []:
+        for ch in _dicts(out.get("suggested_param_changes")):
             st.caption(f"Suggests {ch.get('param')} {ch.get('direction')}: {ch.get('reason', '')}")
     elif key == "a2":
         if isinstance(out, dict):
@@ -245,11 +260,11 @@ def _card_body(key: str, block: dict, decision: dict) -> None:
     elif key == "a4" and isinstance(out, dict):
         st.caption(str(out.get("batch_reason", "")))  # no labels next to A4 notes
     elif key == "a5" and isinstance(out, list):
-        verdicts = pd.Series([c.get("verdict") for c in out if isinstance(c, dict)]).value_counts()
+        verdicts = pd.Series([str(c.get("verdict")) for c in _dicts(out)]).value_counts()
         st.caption(", ".join(f"{n} {v}" for v, n in verdicts.items()) or "No claims checked.")
 
 
-def agent_card(key: str, decision: dict | None) -> None:
+def agent_card(key: str, decision: dict | None, placeholder: bool = False) -> None:
     with st.container(border=True):
         st.markdown(f"**{AGENT_NAMES[key]}**")
         if decision is None:
@@ -260,7 +275,8 @@ def agent_card(key: str, decision: dict | None) -> None:
             st.caption("working...")
             return
         if block["status"]:
-            st.badge(block["status"], color=BADGE_COLOR[block["status"]])
+            label = f"{block['status']} (placeholder)" if placeholder else block["status"]  # no agent was called
+            st.badge(label, color=BADGE_COLOR[block["status"]])
         if _is_insufficient(block):
             st.caption("insufficient_data: not enough labels yet (normal early on, not an error).")
             return
@@ -270,23 +286,40 @@ def agent_card(key: str, decision: dict | None) -> None:
             if key == "a2" and decision["applied"]["source"] == "starter":
                 st.caption("Starter rule (no A2 decision at round 0).")
                 st.dataframe(diff_table(decision), hide_index=True, width="stretch")
+            elif key == "a2" and block["status"] == "FALLBACK":  # the rule decided: show what was applied
+                st.dataframe(diff_table(decision), hide_index=True, width="stretch")
             elif block["status"] != "FALLBACK":
                 st.caption("Not run this round.")
             return
         _card_body(key, block, decision)
 
 
-def agent_row(decision: dict | None) -> None:
+def agent_row(decision: dict | None, placeholder: bool = False) -> None:
     for col, key in zip(st.columns(3), ("a1", "a3", "a2")):
         with col:
-            agent_card(key, decision)
+            agent_card(key, decision, placeholder)
     for col, key in zip(st.columns(2), ("a4", "a5")):
         with col:
-            agent_card(key, decision)
+            agent_card(key, decision, placeholder)
 
 
 def _num(v, fmt: str) -> str:
     return "n/a" if v is None or pd.isna(v) else fmt.format(v)
+
+
+def baselines() -> tuple[pd.DataFrame, bool]:
+    """(rows, is_projected): ladder rows 1 (keyword) and 2 (starter blend) with a false-teen value.
+
+    Same row rule as the Results tab: a real eval.csv gives held-out test rows only. Empty if the ladder fails.
+    """
+    try:
+        ladder, ladder_placeholder = load_ladder(RESULTS)
+    except ValueError:
+        return pd.DataFrame(), False
+    rows = headline_rows(ladder, ladder_placeholder)
+    # placeholder names start "1 " / "2 "; real eval.csv names are keyword_baseline / starter_blend_...
+    base = rows[rows["stage"].astype(str).str.match(r"^(?:[12] |keyword_baseline|starter_blend)")].dropna(subset=["ft"])
+    return base.assign(label=base["stage"] + (" (projected)" if ladder_placeholder else "")), ladder_placeholder
 
 
 def loop_chart(rounds: pd.DataFrame, cap: float, tag: str) -> alt.LayerChart:
@@ -300,12 +333,7 @@ def loop_chart(rounds: pd.DataFrame, cap: float, tag: str) -> alt.LayerChart:
     layers = [alt.Chart(pd.DataFrame(band)).mark_area(opacity=0.15, color=FT_HUE).encode(
         x=x, y=alt.Y("lo:Q", title="rate", scale=alt.Scale(domain=[0, 1])), y2="hi:Q",
         tooltip=[alt.Tooltip("cap:Q", format=".0%"), alt.Tooltip("lo:Q", format=".1%"), alt.Tooltip("hi:Q", format=".1%")])]
-    try:
-        ladder, ladder_placeholder = load_ladder(RESULTS)
-        base = ladder[ladder["stage"].astype(str).str.match(r"^[12] ")].dropna(subset=["ft"])
-        base = base.assign(label=base["stage"] + (" (projected)" if ladder_placeholder else ""))
-    except ValueError:
-        base = pd.DataFrame()
+    base, _ = baselines()
     if len(base):
         layers.append(alt.Chart(base).mark_rule(strokeDash=[4, 4], color="gray").encode(
             y="ft:Q", tooltip=["label", alt.Tooltip("ft:Q", format=".1%")]))
@@ -370,25 +398,30 @@ def render_loop_tab() -> None:
 
     cap = DEFAULT_CAP if latest is None else float(latest["cap"])
     st.altair_chart(loop_chart(rounds, cap, tag), width="stretch")
+    base, base_projected = baselines()
+    dashed = ("Dashed lines: false-teen of the keyword baseline and the starter blend"
+              + (" (projected, from eval_placeholder.csv). " if base_projected else ". ")) if len(base) else ""
     st.caption(f"Shaded band: cap +/- {FT_CI * 100:.1f} pts (the plan's 95% CI at 15% false-teen on 450 adults). "
-               "Dashed lines: false-teen of the keyword baseline and the starter blend. Rates on the frozen test set.")
+               f"{dashed}Rates on the frozen test set.")
 
     st.subheader("Agents")
     by_round = sorted(decisions, key=lambda d: d["round"], reverse=True)
+    if data.is_placeholder:
+        st.caption("Hand-typed example outputs. No agent was called.")
     if not by_round:
         agent_row(None)
     else:
         st.caption(f"Round {by_round[0]['round']}")
-        agent_row(by_round[0])
+        agent_row(by_round[0], data.is_placeholder)
         for d in by_round[1:]:
             with st.expander(f"Round {d['round']}"):
-                agent_row(d)
+                agent_row(d, data.is_placeholder)
 
     st.subheader("Decision log")
     rows = rounds.set_index("round") if len(rounds) else None
     for d in by_round:
         row = rows.loc[d["round"]] if rows is not None and d["round"] in rows.index else None
-        st.text(log_line(d, row))
+        st.text(log_line(d, row, tag))
     if not by_round:
         st.caption("No decisions yet.")
 

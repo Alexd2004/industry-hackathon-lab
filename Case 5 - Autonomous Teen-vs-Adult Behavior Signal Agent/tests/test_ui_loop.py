@@ -6,7 +6,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from softsignal import ui_loop
-from softsignal.metrics import ROUNDS_COLS
+from softsignal.metrics import EVAL_COLS, ROUNDS_COLS
 from softsignal.ui_loop import (
     BANNER, DECISIONS_PLACEHOLDER, ROUNDS_PLACEHOLDER, diff_table, load_loop, log_line, read_complete_lines,
     valid_decision,
@@ -49,7 +49,7 @@ def real_dir(tmp_path, monkeypatch):
 
 def row(run="20261003T150000Z", rnd=0, **kw) -> dict:
     base = dict(run=run, round=rnd, mode="SHADOW", action="hold", applied_source="rule", cap=0.15, t_soft="",
-                t_verify=0.5, n_verify=0, n_labels=0, n_audit_adults=0, audit_ft="", psi="", prec=0.7, rec=0.8,
+                t_verify=0.5, n_flagged=0, n_verify=0, n_labels=0, n_audit_adults=0, audit_ft="", psi="", prec=0.7, rec=0.8,
                 ft=0.3, mt=0.2, auc=0.85, refit_s="")
     return base | kw
 
@@ -99,8 +99,10 @@ def test_rounds_placeholder_matches_eval_placeholder_loop_rows():
 def test_rounds_placeholder_follows_the_spec_path():
     df = pd.read_csv(RESULTS / ROUNDS_PLACEHOLDER).set_index("round")
     assert df["n_labels"].tolist() == [120 * r for r in range(8)]
-    assert df["n_audit_adults"].tolist() == [30 * r for r in range(8)]
-    assert df.loc[[1, 2, 3], "action"].eq("hold").all() and df.loc[4, "action"] == "re-tune"
+    # seed 42 audit adults (Oracle.from_split): 119 at R4 is one short of the 120 floor, so R4 holds
+    assert df["n_audit_adults"].tolist() == [0, 27, 57, 89, 119, 156, 183, 213]
+    assert df.loc[[1, 2, 3, 4], "action"].eq("hold").all() and df.loc[5, "action"] == "re-tune"
+    assert (df.loc[1:, "n_flagged"] > df.loc[1:, "n_verify"]).all()  # the 25% budget cuts the band every round
     assert df.loc[6, "action"] == "promote" and df.loc[5, "mode"] == "SHADOW" and df.loc[6, "mode"] == "ACTIVE"
     assert df["refit_s"].isna().all()  # no latency until measured
     assert df["rec"].is_monotonic_increasing and df["ft"].is_monotonic_decreasing
@@ -184,7 +186,7 @@ def test_read_complete_lines_drops_only_an_unterminated_tail(tmp_path):
 
 def test_bad_json_and_invalid_records_are_skipped_and_counted(tmp_path):
     bad = [decision(rnd=1) | {"rec": 0.9},  # test metrics never belong in decisions.jsonl
-           {k: v for k, v in decision(rnd=2).items() if k != "a4"},
+           decision(rnd=2) | {"rule_decision": {"cutoff": 0.5, "auc": 0.9}},  # nor nested in a decision block
            decision(rnd=3, a2={"status": "MAYBE", "output": None, "fallback_reason": None}),
            decision(rnd=4) | {"applied": {"decision": {}, "source": "A9"}}]
     write_decisions(tmp_path, [decision(rnd=0)] + bad, tail="not json\n")
@@ -272,7 +274,8 @@ def test_chart_skips_baselines_when_ladder_is_unreadable(placeholder_only):
 def test_placeholder_shows_fallback_badge_and_a2_diff_row(placeholder_only):
     at = AppTest.from_function(render).run()
     md = markdowns(at)
-    assert ":green-badge[LIVE]" in md and ":orange-badge[FALLBACK]" in md
+    assert ":green-badge[LIVE (placeholder)]" in md and ":orange-badge[FALLBACK (placeholder)]" in md
+    assert ":green-badge[LIVE]" not in md  # hand-typed outputs never wear a bare LIVE badge
     assert any("Fallback reason: timeout" in c.value for c in at.caption)
     diffs = [df.value.set_index("field") for df in at.dataframe]
     assert any(t.loc["cutoff", "changed"] == "YES" and t.loc["cutoff", "A2"] == "0.58" for t in diffs)
@@ -331,3 +334,98 @@ def test_live_crew_and_replay_are_disabled_stubs(placeholder_only):
     at = AppTest.from_function(render).run()
     assert at.button[0].label == "Run live crew" and at.button[0].disabled
     assert at.toggle[0].label == "Replay" and at.toggle[0].disabled
+
+
+def test_placeholder_log_lines_tag_test_metrics_as_projected(placeholder_only):
+    at = AppTest.from_function(render).run()
+    log = [t.value for t in at.text]
+    assert log and all(ln.endswith("(projected).") for ln in log)
+    assert any("No agent was called" in c.value for c in at.caption)
+
+
+def test_real_cards_wear_plain_live_badge(real_dir):
+    write_decisions(real_dir, [decision()])
+    at = AppTest.from_function(render).run()
+    assert ":green-badge[LIVE]" in markdowns(at) and not any("(projected)" in t.value for t in at.text)
+
+
+def test_insufficient_data_shows_neutral_note(placeholder_only):
+    at = AppTest.from_function(render).run()  # R0: A1 drift and A3 output are insufficient_data
+    notes = [c.value for c in at.caption if c.value.startswith("insufficient_data")]
+    assert len(notes) == 2
+
+
+@pytest.mark.parametrize("kw", [
+    {"a3": agent(output={"patterns": "abc"})},
+    {"a3": agent(output={"patterns": ["x"], "suggested_param_changes": ["y"]})},
+    {"a5": agent(output=[{"verdict": ["x"]}, "y"])},
+    {"applied": {"decision": {"cap": "15%", "action": "hold"}, "source": "A2"}},
+])
+def test_malformed_agent_output_does_not_crash_the_tab(real_dir, kw):
+    write_decisions(real_dir, [decision(**kw)])
+    at = AppTest.from_function(render).run()
+    assert not at.exception and any(FOOTER in c.value for c in at.caption)
+
+
+def test_cap_band_follows_each_round_and_is_floored_at_zero():
+    rounds = pd.DataFrame([row(rnd=0, cap=0.15), row(rnd=2, cap=0.02)])
+    band = ui_loop.loop_chart(rounds, 0.02, "").layer[0].data.set_index("round")
+    assert band.index.tolist() == list(range(8))  # always spans R0..R7
+    assert band.loc[1, "cap"] == 0.15 and band.loc[2, "cap"] == 0.02 and band.loc[7, "cap"] == 0.02
+    assert band.loc[0, "lo"] == pytest.approx(0.15 - ui_loop.FT_CI) and band.loc[0, "hi"] == pytest.approx(0.15 + ui_loop.FT_CI)
+    assert band.loc[2, "lo"] == 0.0
+
+
+def test_baselines_use_test_rows_of_a_real_ladder(real_dir):
+    (real_dir / "eval.csv").write_text("stage,eval_set,prec,rec,ft,mt,f1,auc\n"
+                                       "1 keyword baseline,nested_cv,,0.5,0.40,,,\n"
+                                       "1 keyword baseline,test,,0.5,0.31,,,\n"
+                                       "2 starter blend,test,,0.8,0.35,,,\n"
+                                       "3 something else,test,,0.8,0.20,,,\n")
+    base, projected = ui_loop.baselines()
+    assert not projected and sorted(base["ft"]) == [0.31, 0.35]
+    at = AppTest.from_function(render).run()
+    assert not any("projected, from eval_placeholder" in c.value for c in at.caption)
+
+
+def test_projected_baselines_are_labelled_next_to_real_loop(real_dir):
+    write_rounds(real_dir, [row()])
+    at = AppTest.from_function(render).run()
+    assert any("starter blend (projected, from eval_placeholder.csv)" in c.value for c in at.caption)
+
+
+# integration fixes (round 1 review)
+
+def test_placeholder_audit_adults_match_the_real_oracle():
+    from softsignal.oracle import Oracle
+    o, got = Oracle.from_split(), [0]
+    for b in o:
+        o.reveal(b, [])
+        got.append(o.audit_counts()["adults"])
+    assert pd.read_csv(RESULTS / ROUNDS_PLACEHOLDER)["n_audit_adults"].tolist() == got
+
+
+def test_missing_agent_keys_count_as_not_run():
+    d = decision(rnd=1)
+    del d["a4"], d["a5"]  # e.g. a three-agent crew record
+    assert ui_loop.valid_decision(d)
+
+
+@pytest.mark.parametrize("where", ["rule_decision", "applied", "diff"])
+def test_test_metrics_rejected_inside_decision_blocks(where):
+    d = decision(rnd=1)
+    if where == "applied":
+        d["applied"]["decision"]["rec"] = 0.9
+    else:
+        d[where] = {**d.get(where, {}), "ft": 0.1}
+    assert not ui_loop.valid_decision(d)
+
+
+def test_baselines_match_real_eval_stage_names(tmp_path, monkeypatch):
+    rows = [["keyword_baseline", "test", 0.6, 0.47, 0.32, 0.53, 0.53, 0.58],
+            ["starter_blend_w0.45_cut0.5", "test", 0.69, 0.8, 0.36, 0.2, 0.74, 0.82],
+            ["alt_blend_w0.75_cut0.5", "test", 0.76, 0.82, 0.26, 0.18, 0.79, 0.84]]
+    pd.DataFrame(rows, columns=EVAL_COLS).to_csv(tmp_path / "eval.csv", index=False)
+    monkeypatch.setattr(ui_loop, "RESULTS", tmp_path)
+    base, projected = ui_loop.baselines()
+    assert sorted(base["stage"]) == ["keyword_baseline", "starter_blend_w0.45_cut0.5"] and not projected
