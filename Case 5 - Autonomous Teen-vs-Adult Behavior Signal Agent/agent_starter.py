@@ -58,6 +58,11 @@ def main() -> None:
     print(f"\nStored best before tuning: {prior if prior else 'none'}")
     tuned = tune(train, test)
     print(f"\nTune picks (train, {len(tuned['grid'])} grid points): {tuned['picks']}")
+    pt = tuned["picks"]["cap_best"]
+    if pt is not None:
+        cv = tuned["cv"]
+        fold = cv[(cv["w"] == pt["w"]) & (cv["cutoff"] == pt["cutoff"])].iloc[0]
+        print(f"cap_best over 5 train folds: mean rec {fold['rec']:.3f}, mean ft {fold['ft']:.3f}, worst-fold ft {fold['ft_max']:.3f}")
     print(f"Picked points on test ({len(test)} rows):")
     print(tuned["test"].round(3).to_string(index=False))
     print(f"Checkpoint written: {tuned['checkpoint_written']}")

@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from softsignal.data import cv_folds
 from softsignal.features import FEATURE_COLS, ID_COL, N_TEST, SEED, TARGET
 from softsignal.metrics import f1, prf
 
@@ -118,12 +119,12 @@ def sweep_grid(df: pd.DataFrame, w_grid: list[float] = W_GRID, cutoffs: list[flo
     return pd.concat(parts, ignore_index=True)
 
 
-def pick_points(grid: pd.DataFrame, cap: float = CAP) -> dict[str, dict | None]:
-    """cap_best: max recall with ft <= cap, ties to lower ft, then lower w, then lower cutoff.
+def pick_points(grid: pd.DataFrame, cap: float = CAP, cap_col: str = "ft") -> dict[str, dict | None]:
+    """cap_best: max recall with grid[cap_col] <= cap, ties to lower ft, then lower w, then lower cutoff.
 
     f1_best: max f1, ties to lower w, then lower cutoff. cap_best is None when nothing meets the cap.
     """
-    under = grid[grid["ft"] <= cap]
+    under = grid[grid[cap_col] <= cap]
     cap_row = (
         under.sort_values(["rec", "ft", "w", "cutoff"], ascending=[False, True, True, True], kind="stable").iloc[0]
         if len(under) else None
@@ -135,6 +136,21 @@ def pick_points(grid: pd.DataFrame, cap: float = CAP) -> dict[str, dict | None]:
     }
 
 
+def cv_summary(train: pd.DataFrame, k: int = 5) -> pd.DataFrame:
+    """Per (w, cutoff), over k stratified folds of train (validation part of each fold).
+
+    rec, ft, f1 are fold means. ft_max is the worst fold's ft, rec_min the worst fold's rec.
+    The rules have no fitted parameters, so each fold is simply a different slice of train rows.
+    """
+    folds = [sweep_grid(train.iloc[val].reset_index(drop=True)) for _, val in cv_folds(train, k)]
+    out = folds[0][["w", "cutoff"]].copy()
+    for col in ("prec", "rec", "ft", "mt", "f1"):
+        out[col] = np.mean([f[col].to_numpy() for f in folds], axis=0)
+    out["ft_max"] = np.max([f["ft"].to_numpy() for f in folds], axis=0)
+    out["rec_min"] = np.min([f["rec"].to_numpy() for f in folds], axis=0)
+    return out
+
+
 def eval_point(df: pd.DataFrame, w: float, cutoff: float) -> dict:
     """Metrics of one (w, cutoff) point on df."""
     pred = flag(blend(style_score(df), activity_score(df), w), cutoff)
@@ -144,7 +160,7 @@ def eval_point(df: pd.DataFrame, w: float, cutoff: float) -> dict:
 
 def rules_id() -> str:
     """Short hash of the scoring code and grids, so a checkpoint is tied to the code that made it."""
-    parts = (style_score, activity_score, blend, flag, sweep_cutoffs, prf, f1)
+    parts = (style_score, activity_score, blend, flag, sweep_cutoffs, sweep_grid, pick_points, cv_summary, prf, f1)
     text = "".join(inspect.getsource(fn) for fn in parts) + repr(W_GRID) + repr(CUTOFFS)
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
@@ -172,7 +188,10 @@ def save_best(
     rules: str | None = None,
     data: str | None = None,
 ) -> bool:
-    """Write the cap-best point. Under the same cap, split, data and scoring rules, overwrite only on strictly higher train recall."""
+    """Write the cap-best point. Under the same cap, split, data and scoring rules, overwrite only on strictly higher train recall.
+
+    train_metrics are the 5-fold means on train (rec, ft, ft_max, rec_min), see tune().
+    """
     new = {"w": point["w"], "cutoff": point["cutoff"], "cap": cap, "seed": SEED, "n_test": N_TEST,
            "n_train": n_train, "rules": rules or rules_id(), "data": data, "train": train_metrics}
     if path.exists():
@@ -191,9 +210,15 @@ def save_best(
 
 
 def tune(train: pd.DataFrame, test: pd.DataFrame, cap: float = CAP, checkpoint: Path = CHECKPOINT) -> dict:
-    """Grid w x cutoff on train, pick under the cap on train, evaluate each pick once on test."""
+    """Grid w x cutoff on train, pick on train, evaluate each pick once on test.
+
+    cap_best needs ft <= cap in every one of the 5 train folds (worst fold), and maximizes mean fold recall.
+    f1_best is the unconstrained F1 maximum on all of train. The cap is a train-fold guarantee only.
+    """
     grid = sweep_grid(train)
+    cv = cv_summary(train)
     picks = pick_points(grid, cap)
+    picks["cap_best"] = pick_points(cv, cap, cap_col="ft_max")["cap_best"]
     rows = []
     for name, pt in picks.items():
         if pt is None:
@@ -203,6 +228,7 @@ def tune(train: pd.DataFrame, test: pd.DataFrame, cap: float = CAP, checkpoint: 
     test_df["cap_ok"] = test_df["ft"] <= cap
     written = False
     if picks["cap_best"] is not None:
-        at = eval_point(train, picks["cap_best"]["w"], picks["cap_best"]["cutoff"])
-        written = save_best(picks["cap_best"], at, cap, len(train), checkpoint, data=data_id(train))
-    return {"grid": grid, "picks": picks, "test": test_df, "checkpoint_written": written}
+        at = cv[(cv["w"] == picks["cap_best"]["w"]) & (cv["cutoff"] == picks["cap_best"]["cutoff"])].iloc[0]
+        train_metrics = {k: float(at[k]) for k in ("rec", "ft", "ft_max", "rec_min")}
+        written = save_best(picks["cap_best"], train_metrics, cap, len(train), checkpoint, data=data_id(train))
+    return {"grid": grid, "cv": cv, "picks": picks, "test": test_df, "checkpoint_written": written}

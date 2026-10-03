@@ -4,7 +4,7 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.tier1 import (
-    CUTOFFS, W_GRID, activity_score, blend, data_id, eval_point, load_best, pick_points, rules_id, save_best,
+    CUTOFFS, W_GRID, activity_score, blend, cv_summary, data_id, eval_point, load_best, pick_points, rules_id, save_best,
     style_score, style_sweep_report, sweep_cutoffs, sweep_grid, tune,
 )
 
@@ -39,13 +39,42 @@ def test_pick_points_tie_break_and_cap():
     assert pick_points(grid, cap=0.01)["cap_best"] is None
 
 
-def test_cap_best_respects_cap_on_train(tmp_path):
+def test_cap_best_respects_cap_in_every_train_fold(tmp_path):
     train, test = load_data()
     out = tune(train, test, checkpoint=tmp_path / "best_params.json")
     pt = out["picks"]["cap_best"]
-    row = out["grid"][(out["grid"]["w"] == pt["w"]) & (out["grid"]["cutoff"] == pt["cutoff"])].iloc[0]
-    assert row["ft"] <= 0.15
-    assert row["rec"] == out["grid"][out["grid"]["ft"] <= 0.15]["rec"].max()
+    cv = out["cv"]
+    row = cv[(cv["w"] == pt["w"]) & (cv["cutoff"] == pt["cutoff"])].iloc[0]
+    assert row["ft_max"] <= 0.15
+    assert row["rec"] == cv[cv["ft_max"] <= 0.15]["rec"].max()
+
+
+def test_cv_summary_matches_per_fold_metrics():
+    train, _ = load_data()
+    cv = cv_summary(train)
+    assert len(cv) == len(W_GRID) * len(CUTOFFS)
+    assert (cv["ft_max"] >= cv["ft"]).all() and (cv["rec_min"] <= cv["rec"]).all()
+    from softsignal.data import cv_folds
+    _, val = cv_folds(train)[0]
+    first = eval_point(train.iloc[val].reset_index(drop=True), 0.75, 0.6)
+    row = cv[(cv["w"] == 0.75) & (cv["cutoff"] == 0.6)].iloc[0]
+    assert row["ft_max"] >= first["ft"] and row["rec_min"] <= first["rec"]
+
+
+def test_tune_without_a_feasible_cap_pick_writes_nothing(tmp_path):
+    train, test = load_data()
+    path = tmp_path / "best_params.json"
+    out = tune(train, test, cap=0.001, checkpoint=path)
+    assert out["picks"]["cap_best"] is None and out["checkpoint_written"] is False and not path.exists()
+    assert list(out["test"]["pick"]) == ["f1_best"]
+
+
+def test_tune_writes_the_checkpoint_once_then_keeps_it(tmp_path):
+    train, test = load_data()
+    path = tmp_path / "best_params.json"
+    assert tune(train, test, checkpoint=path)["checkpoint_written"] is True
+    assert tune(train, test, checkpoint=path)["checkpoint_written"] is False
+    assert load_best(path)["train"]["ft_max"] <= 0.15
 
 
 def test_tune_scores_test_once_per_pick_and_matches_eval_point(tmp_path):
@@ -64,20 +93,20 @@ def test_picks_use_train_only(tmp_path):
     assert tune(train, flipped, checkpoint=tmp_path / "best_params.json")["picks"] == base
 
 
-def test_blend_pick_recall_not_below_the_step3_style_only_pick(tmp_path):
+def test_blend_pick_recall_not_below_the_style_only_points_under_the_same_rule(tmp_path):
     train, test = load_data()
     out = tune(train, test, checkpoint=tmp_path / "best_params.json")
-    step3 = style_sweep_report(train, test)["picks"]["cap_best"]
-    g = out["grid"]
-    w0 = g[(g["w"] == 0.0) & (g["cutoff"] == step3)]["rec"].iloc[0]
-    best = g[(g["w"] == out["picks"]["cap_best"]["w"]) & (g["cutoff"] == out["picks"]["cap_best"]["cutoff"])]["rec"].iloc[0]
-    assert best >= w0
+    cv = out["cv"]
+    style_only = cv[(cv["w"] == 0.0) & (cv["ft_max"] <= 0.15)]["rec"].max()
+    pt = out["picks"]["cap_best"]
+    best = cv[(cv["w"] == pt["w"]) & (cv["cutoff"] == pt["cutoff"])]["rec"].iloc[0]
+    assert best >= style_only
 
 
 def test_save_best_overwrites_only_on_strictly_higher_recall(tmp_path):
     path = tmp_path / "ck" / "best_params.json"
     pt = {"w": 0.5, "cutoff": 0.6}
-    tm = lambda rec: {"prec": 0.7, "rec": rec, "ft": 0.14, "mt": 0.3, "f1": 0.6}
+    tm = lambda rec: {"rec": rec, "ft": 0.14, "ft_max": 0.14, "rec_min": rec}
     assert save_best(pt, tm(0.60), 0.15, 2100, path) is True
     assert save_best({"w": 0.6, "cutoff": 0.6}, tm(0.60), 0.15, 2100, path) is False  # equal: keep
     assert save_best({"w": 0.6, "cutoff": 0.6}, tm(0.55), 0.15, 2100, path) is False  # lower: keep
