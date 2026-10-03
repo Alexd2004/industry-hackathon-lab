@@ -10,11 +10,9 @@ import pandas as pd
 
 from softsignal.data import cv_folds
 from softsignal.features import FEATURE_COLS, ID_COL, N_TEST, SEED, TARGET
-from softsignal.metrics import f1, prf
+from softsignal.metrics import DEFAULT_CAP, f1, prf
 
-# Max false-teen rate (adults wrongly called teen), 15% cap from the Combined Plan.
-# Move to policy.yaml cap_false_teen when it exists.
-CAP = 0.15
+CAP = DEFAULT_CAP  # max false-teen rate, shared with baselines; move to policy.yaml cap_false_teen when it exists
 CUTOFFS = [round(0.10 + 0.05 * i, 2) for i in range(17)]  # 0.10 .. 0.90
 
 W_GRID = [round(0.05 * i, 2) for i in range(21)]  # weight on activity, 0.00 .. 1.00
