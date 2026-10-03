@@ -1,0 +1,13 @@
+stage,eval_set,prec,rec,ft,mt,f1,auc
+1 keyword baseline,projected,,0.50,0.32,,,
+2 starter blend w=0.45 cut=0.50,projected,,0.82,0.34,,,
+4 tune() under 15% cap,projected,,0.72,0.15,,,
+5 tabular LR 16 columns,projected,,0.82,0.15,,,0.899
+6 TF-IDF text only,projected,,0.80,0.17,,,0.888
+7 SoftSignal stack at 15% cap,projected,,0.92,0.15,,,0.955
+8 SoftSignal at 10% cap,projected,,0.88,0.10,,,
+8 SoftSignal at 5% cap,projected,,0.74,0.06,,,
+9 loop R0,projected,,0.82,0.34,,,
+9 loop R7,projected,,0.87,0.14,,,
+10 regulator missed-teen <= 10% (frozen 600),projected,0.861,0.913,0.160,0.087,,0.955
+10 regulator missed-teen <= 3% (frozen 600),projected,0.738,0.974,0.375,0.026,,0.955
