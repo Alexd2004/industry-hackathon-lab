@@ -1,4 +1,6 @@
 """Allowed model inputs (Tier 1, step 1). Everything else in the CSV is off limits."""
+SEED = 42
+N_TEST = 900
 TARGET = "label_teen"
 ID_COL = "blogger_id"
 

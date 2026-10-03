@@ -3,16 +3,14 @@ import json
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
-from softsignal.features import FEATURE_COLS, ID_COL, TARGET
+from softsignal.features import FEATURE_COLS, ID_COL, N_TEST, SEED, TARGET
 
 ROOT = Path(__file__).resolve().parents[1]
 JOINED = ROOT / "data" / "teen_adult_joined.csv"
 SPLIT_FILE = ROOT / "results" / "split.json"
-SEED = 42
-TEST_FRACTION = 0.30
 
 
 def check_frame(df: pd.DataFrame) -> None:
@@ -23,21 +21,16 @@ def check_frame(df: pd.DataFrame) -> None:
         raise ValueError(f"{TARGET} must be 0 or 1 in every row (no NaN or other values)")
 
 
-def make_split(df: pd.DataFrame, seed: int = SEED, test_fraction: float = TEST_FRACTION) -> dict:
+def make_split(df: pd.DataFrame, seed: int = SEED, n_test: int = N_TEST) -> dict:
     """Split by blogger_id, stratified on label_teen, so each account is in exactly one set."""
     check_frame(df)
-    rng = np.random.default_rng(seed)
-    test_ids: list[str] = []
-    for label in sorted(df[TARGET].unique()):
-        group = np.sort(df.loc[df[TARGET] == label, ID_COL].to_numpy())
-        n_test = int(round(len(group) * test_fraction))
-        test_ids.extend(rng.permutation(group)[:n_test].tolist())
-    test_set = set(test_ids)
-    train_ids = sorted(i for i in df[ID_COL] if i not in test_set)
-    is_test = df[ID_COL].isin(test_set)
+    train_df, test_df = train_test_split(
+        df[[ID_COL, TARGET]], test_size=n_test, stratify=df[TARGET], random_state=seed
+    )
+    train_ids, test_ids = sorted(train_df[ID_COL]), sorted(test_df[ID_COL])
+    is_test = df[ID_COL].isin(set(test_ids))
     return {
         "seed": seed,
-        "test_fraction": test_fraction,
         "split_by": ID_COL,
         "stratify_on": TARGET,
         "n_train": len(train_ids),
@@ -47,7 +40,7 @@ def make_split(df: pd.DataFrame, seed: int = SEED, test_fraction: float = TEST_F
             "test": {str(k): int(v) for k, v in df.loc[is_test, TARGET].value_counts().sort_index().items()},
         },
         "train_ids": train_ids,
-        "test_ids": sorted(test_ids),
+        "test_ids": test_ids,
     }
 
 
@@ -56,7 +49,7 @@ def load_data(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (train, test). Reads the shared split file, or creates it if missing.
 
-    The file wins over SEED / TEST_FRACTION. If they differ from the file, on_param_mismatch
+    The file wins over SEED / N_TEST. If they differ from the file, on_param_mismatch
     is "warn" (use the file, warn) or "error" (raise). The file is never regenerated here.
     """
     if on_param_mismatch not in ("warn", "error"):
@@ -70,8 +63,8 @@ def load_data(
         split_file.parent.mkdir(parents=True, exist_ok=True)
         split_file.write_text(json.dumps(split, indent=2) + "\n")
 
-    stored = {"seed": split.get("seed"), "test_fraction": split.get("test_fraction")}
-    current = {"seed": SEED, "test_fraction": TEST_FRACTION}
+    stored = {"seed": split.get("seed"), "n_test": split.get("n_test")}
+    current = {"seed": SEED, "n_test": N_TEST}
     if stored != current:
         msg = (
             f"{split_file.name} was made with {stored} but the code has {current}; "
@@ -87,8 +80,8 @@ def load_data(
             f"{split_file} does not match {path.name}; delete it to regenerate the split"
         )
     for label, grp in df.groupby(TARGET):
-        expected = int(round(len(grp) * split["test_fraction"]))
-        if grp[ID_COL].isin(test_ids).sum() != expected:
+        expected = len(grp) * split["n_test"] / len(df)
+        if abs(grp[ID_COL].isin(test_ids).sum() - expected) > 1:
             raise ValueError(
                 f"{split_file} is not stratified on {TARGET} for {path.name}; "
                 "delete it to regenerate the split"
