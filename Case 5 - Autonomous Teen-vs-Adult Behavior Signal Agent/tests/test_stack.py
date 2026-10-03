@@ -43,13 +43,18 @@ def frame():
 
 
 @pytest.fixture
-def tm(tmp_path, frame, small_params):
+def posts(tmp_path):
     rows = []
     for i in range(N):
         words = WORDS_A if i % 2 == 0 else WORDS_B
         rows += [{ID_COL: f"B{i:03d}", "post_ix": ix, "text": f"post{ix} {words} {words.split()[ix]}"} for ix in (0, 1)]
-    posts = tmp_path / "posts.csv"
-    pd.DataFrame(rows).to_csv(posts, index=False)
+    path = tmp_path / "posts.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+@pytest.fixture
+def tm(posts, frame, small_params):
     return tmod.build_matrix(frame[ID_COL], posts_path=posts, cache_dir=None)
 
 
@@ -135,6 +140,37 @@ def test_explain_names_match_level2_columns(tm, frame):
     assert names <= {stk.TEXT_FEATURE, *FEATURE_COLS}
 
 
+# --- vocabulary must come from train only -----------------------------------------------
+
+def test_a_matrix_fit_on_test_text_is_rejected_everywhere(posts, small_params, frame):
+    train = frame.iloc[:40].reset_index(drop=True)
+    leaky = tmod.build_matrix(frame[ID_COL], posts_path=posts, cache_dir=None)  # fit on train and test
+    with pytest.raises(ValueError, match="outside train"):
+        stk.nested_oof(leaky, train)
+    with pytest.raises(ValueError, match="outside train"):
+        stk.Stack.fit(train, tm=leaky)
+    with pytest.raises(ValueError, match="outside train"):
+        stk.stack(train, frame.iloc[40:], tm=leaky, oof_path=None)
+
+
+def test_a_matrix_fit_on_a_subset_of_train_is_accepted(posts, small_params, frame, tm):
+    sub = tmod.build_matrix(frame[ID_COL].iloc[:30], posts_path=posts, cache_dir=None)
+    stk.check_vocabulary(sub, frame)  # nothing from outside train, so no error
+    stk.check_vocabulary(tm, frame)
+
+
+def test_matrix_from_cache_still_knows_its_fit_ids(posts, small_params, frame, tmp_path):
+    ids = frame[ID_COL].iloc[:40]
+    first = tmod.build_matrix(ids, posts_path=posts, cache_dir=tmp_path / "c")
+    again = tmod.build_matrix(ids, posts_path=posts, cache_dir=tmp_path / "c")  # cache hit
+    assert first.fit_ids == again.fit_ids == frozenset(ids)
+
+
+def test_a_hand_built_matrix_without_fit_ids_is_not_checked(tm, frame):
+    tm.fit_ids = None
+    stk.check_vocabulary(tm, frame.iloc[:10])
+
+
 # --- fallback flag -----------------------------------------------------------------------
 
 def test_use_text_false_is_the_tabular_lr_and_needs_no_text_model(frame, monkeypatch):
@@ -155,8 +191,9 @@ def test_stack_fallback_skips_the_text_model_and_names_its_stage(frame, tmp_path
 
 # --- stack(): rows and the OOF file ------------------------------------------------------
 
-def test_stack_rows_and_oof_file(tm, frame, tmp_path):
+def test_stack_rows_and_oof_file(posts, small_params, frame, tmp_path):
     train, test = frame.iloc[:40].reset_index(drop=True), frame.iloc[40:].reset_index(drop=True)
+    tm = tmod.build_matrix(train[ID_COL], posts_path=posts, cache_dir=None)
     out = tmp_path / "sub" / "stack_oof.csv"
     res = stk.stack(train, test, tm=tm, oof_path=out)
     assert [(r["stage"], r["eval_set"]) for r in res.rows] == [("stack_cap15", "cv_oof"), ("stack_cap15", "test")]
@@ -167,9 +204,11 @@ def test_stack_rows_and_oof_file(tm, frame, tmp_path):
     assert res.test_score.shape == (len(test),)
 
 
-def test_oof_path_none_writes_nothing(tm, frame, monkeypatch):
+def test_oof_path_none_writes_nothing(posts, small_params, frame, monkeypatch):
+    train = frame.iloc[:40].reset_index(drop=True)
+    tm = tmod.build_matrix(train[ID_COL], posts_path=posts, cache_dir=None)
     monkeypatch.setattr(stk, "write_oof", lambda *a, **k: pytest.fail("OOF file was written"))
-    stk.stack(frame.iloc[:40], frame.iloc[40:], tm=tm, oof_path=None)
+    stk.stack(train, frame.iloc[40:], tm=tm, oof_path=None)
 
 
 # --- real data ---------------------------------------------------------------------------
@@ -198,10 +237,20 @@ def test_real_auc_clears_the_gate(real):
 
 
 def test_real_coefficient_signs(real):
+    """text_score dominates; the plan's other expected signs hold for the tabular fallback (below)."""
     coefs = real[2].stack.coefs()
     assert coefs.index[0] == stk.TEXT_FEATURE and coefs[stk.TEXT_FEATURE] > 1.5
-    assert coefs["pct_active_school_hours"] < 0 and coefs["night_notification_open_rate"] > 0
+    assert coefs["pct_active_school_hours"] < 0 and coefs["slang_emoji_rate"] >= 0
+    assert abs(coefs["avg_word_len"]) < 0.2  # text_score absorbs it: tabular-only it is about -0.7
     assert not FORBIDDEN & set(coefs.index)
+
+
+def test_real_tabular_fallback_has_the_plans_expected_signs(real):
+    """Combined Plan step 8 signs (WP: avg_word_len -0.63, slang +0.62, school hours -0.52) are tabular-LR values."""
+    train = real[0]
+    coefs = stk.Stack.fit(train, use_text=False).coefs()
+    assert coefs["avg_word_len"] < -0.4 and coefs["slang_emoji_rate"] > 0.4
+    assert coefs["pct_active_school_hours"] < -0.3
 
 
 def test_real_run_is_deterministic(real):

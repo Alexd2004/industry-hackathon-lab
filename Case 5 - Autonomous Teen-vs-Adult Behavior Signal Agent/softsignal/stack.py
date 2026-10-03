@@ -52,8 +52,24 @@ def _fit_level2(X: pd.DataFrame, y) -> Pipeline:
     return make_tabular_lr().fit(X, np.asarray(y))
 
 
+def check_vocabulary(tm: TextMatrix, train: pd.DataFrame) -> None:
+    """Raise if the TF-IDF vocabulary was fit on any account outside train (e.g. on test text).
+
+    A TextMatrix built by hand has fit_ids None and is not checked; build_matrix always sets it.
+    """
+    if tm.fit_ids is None:
+        return
+    outside = tm.fit_ids - set(train[ID_COL].astype(str))
+    if outside:
+        raise ValueError(
+            f"the text matrix vocabulary was fit on {len(outside)} account(s) outside train, "
+            f"e.g. {sorted(outside)[:3]}; build it with build_matrix(train[ID_COL])"
+        )
+
+
 def nested_oof(tm: TextMatrix, train: pd.DataFrame, k: int = 5) -> np.ndarray:
     """One level-2 score per train row, each from models that never saw that row (nested k x k)."""
+    check_vocabulary(tm, train)
     ids, y = train[ID_COL].to_numpy(), train[TARGET].to_numpy()
     out = np.full(len(train), np.nan)
     for fit_idx, val_idx in cv_folds(train, k=k):
@@ -80,6 +96,7 @@ class Stack:
         if not use_text:
             return cls(level2=_fit_level2(stack_features(train), y), use_text=False)
         tm = tm if tm is not None else build_matrix(train[ID_COL])
+        check_vocabulary(tm, train)
         level2 = _fit_level2(stack_features(train, oof_text_score(tm, train)), y)
         return cls(level2=level2, use_text=True, text_model=fit_text_model(tm, train[ID_COL], y), tm=tm)
 

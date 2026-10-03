@@ -83,6 +83,7 @@ class TextMatrix:
     ids: np.ndarray
     feature_names: np.ndarray
     key: str
+    fit_ids: frozenset | None = None  # accounts the vocabulary was fit on; set by build_matrix, not cached
 
     def __post_init__(self) -> None:
         self._pos = pd.Series(np.arange(len(self.ids)), index=self.ids)
@@ -176,7 +177,9 @@ def build_matrix(
 ) -> TextMatrix:
     """TF-IDF for every account, vocabulary fit on fit_ids' text only. Cached when cache_dir is set."""
     key = cache_key(posts_path, fit_ids, mask_digits)
+    fit_set = frozenset(map(str, fit_ids))  # the key already covers these ids, so a cache hit has the same set
     if cache_dir is not None and (tm := _load_cache(Path(cache_dir), key)) is not None:
+        tm.fit_ids = fit_set
         return tm
     docs = load_docs(posts_path, mask_digits)
     fit_docs = docs.reindex(pd.Index(fit_ids).astype(str))
@@ -188,6 +191,7 @@ def build_matrix(
         ids=docs.index.to_numpy(dtype=object),
         feature_names=vec.get_feature_names_out().astype(object),
         key=key,
+        fit_ids=fit_set,
     )
     if cache_dir is not None:
         _save_cache(Path(cache_dir), tm)
