@@ -13,9 +13,12 @@ PLACEHOLDER_CSV = RESULTS / "eval_placeholder.csv"
 NUMERIC_COLS = [c for c in EVAL_COLS if c not in ("stage", "eval_set")]
 
 BANNER = "PLACEHOLDER, projected, not measured. These are Combined Plan section 7 numbers, not results from this repo."
-REC_CI, FT_CI = 0.025, 0.033  # 95% CI half-widths on 900 test accounts (Combined Plan section 7)
+REC_CI, FT_CI = 0.025, 0.033  # the plan's 95% CI half-widths: recall at 0.92 on 450 teens, false-teen at 0.15 on 450 adults
 CI_NOTE = (
-    f"95% CI on 900 test accounts: recall +/- {REC_CI * 100:.1f} pts, false-teen +/- {FT_CI * 100:.1f} pts. "
+    f"95% CI (Combined Plan section 7): recall +/- {REC_CI * 100:.1f} pts at 92% on 450 teens, "
+    f"false-teen +/- {FT_CI * 100:.1f} pts at 15% on 450 adults (the 900 test accounts). "
+    "The width changes with the rate, so it is only exact at those points. "
+    "Rows marked frozen 600 were scored on a different set and are not covered. "
     "The cap is a band, not a line."
 )
 FOOTER = (
@@ -93,7 +96,7 @@ def render_results_tab() -> None:
         c1.caption(str(best["stage"]))
         c2.metric(f"False-teen at that row{tag}", _pct(best["ft"]))
     c3.metric("Cap", _pct(cap))
-    c3.caption(f"Band: {_pct(max(cap - FT_CI, 0.0))} to {_pct(cap + FT_CI)} (95% CI)")
+    c3.caption(f"Band: {_pct(max(cap - FT_CI, 0.0))} to {_pct(cap + FT_CI)} (the plan's CI at 15%)")
     if best is not None:
         c2.caption("Point estimate. A value on the cap is inside its CI band.")
 

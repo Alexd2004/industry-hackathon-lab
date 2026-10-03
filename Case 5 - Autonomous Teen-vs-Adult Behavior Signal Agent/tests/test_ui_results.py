@@ -129,8 +129,8 @@ def test_placeholder_regulator_rows_match_winning_plan_pdf():
     # Case5-Winning-Plan.pdf ladder table, "Regulator framing" rows (frozen 600 in the PDF)
     df = pd.read_csv(PLACEHOLDER_CSV).set_index("stage")
     for stage, want in {
-        "10 regulator missed-teen <= 10%": (0.861, 0.913, 0.160, 0.087, 0.955),
-        "10 regulator missed-teen <= 3%": (0.738, 0.974, 0.375, 0.026, 0.955),
+        "10 regulator missed-teen <= 10% (frozen 600)": (0.861, 0.913, 0.160, 0.087, 0.955),
+        "10 regulator missed-teen <= 3% (frozen 600)": (0.738, 0.974, 0.375, 0.026, 0.955),
     }.items():
         got = df.loc[stage, ["prec", "rec", "ft", "mt", "auc"]].tolist()
         assert got == pytest.approx(want)
@@ -153,3 +153,14 @@ def test_tab_shows_error_when_eval_csv_is_a_folder(tmp_path, monkeypatch):
     at = AppTest.from_function(render).run()
     assert not at.exception
     assert any("Cannot show results" in e.value for e in at.error)
+
+
+def test_placeholder_stage_names_state_cap_and_test_set():
+    # PDF: the 6% in the plan is the measured false-teen at a 5% cap; regulator rows use a frozen 600 set
+    stages = pd.read_csv(PLACEHOLDER_CSV)["stage"].tolist()
+    assert "8 SoftSignal at 5% cap" in stages and not any("6% cap" in s for s in stages)
+    assert sum("(frozen 600)" in s for s in stages) == 2 and all("regulator" in s for s in stages if "frozen 600" in s)
+
+
+def test_ci_note_names_its_basis_and_scope():
+    assert "450 adults" in CI_NOTE and "450 teens" in CI_NOTE and "frozen 600" in CI_NOTE
