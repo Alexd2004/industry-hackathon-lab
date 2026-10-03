@@ -28,3 +28,7 @@ JUDGE_GUIDE_PRIVATE.md
 
 # Agent per-call timing log (regenerated every run)
 **/results/agent_calls.jsonl
+
+# Tuning outputs and caches (regenerated)
+checkpoints/
+cache/

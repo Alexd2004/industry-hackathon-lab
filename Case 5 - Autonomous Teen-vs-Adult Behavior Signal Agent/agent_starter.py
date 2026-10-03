@@ -6,7 +6,9 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.metrics import prf
-from softsignal.tier1 import activity_score, style_score, style_sweep_report
+from softsignal.tier1 import (
+    K_FOLDS, activity_score, blend, is_current, load_best, style_score, style_sweep_report, tune,
+)
 
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
 
@@ -39,7 +41,7 @@ def main() -> None:
     # Higher evening / short-video / night opens, lower school-hour activity -> more teen-like.
     activity = activity_score(df)
     blend_w = 0.45  # weight on activity; change this and re-run
-    blended = (1.0 - blend_w) * style + blend_w * activity
+    blended = blend(style, activity, blend_w)
     v2 = (blended >= 0.50).astype(int).to_numpy()
     report(f"Revise blend w={blend_w}", y, v2)
 
@@ -53,9 +55,22 @@ def main() -> None:
     print(rep["test"].round(3).to_string(index=False))
     print(f"Flag-everyone F1 on test (reference): {rep['flag_all_f1']:.3f}")
 
+    # --- Step 4: grid blend weight x cutoff on train under the 15% cap, picks scored once on test ---
+    prior = load_best()
+    stale = "" if prior is None or is_current(prior, train) else " (stale: made under a different cap, rules or data)"
+    print(f"\nStored best before tuning: {prior if prior else 'none'}{stale}")
+    tuned = tune(train, test)
+    print(f"Tune picks (train, {len(tuned['cv'])} grid points, {K_FOLDS}-fold): {tuned['picks']}")
+    fold = tuned["cv_cap_best"]
+    if fold is not None:
+        print(f"cap_best over {K_FOLDS} train folds: mean rec {fold['rec']:.3f}, mean ft {fold['ft']:.3f}, worst-fold ft {fold['ft_max']:.3f}")
+    print(f"Picked points on test ({len(test)} rows):")
+    print(tuned["test"].round(3).to_string(index=False))
+    print(f"Checkpoint written: {tuned['checkpoint_written']}")
+
     flipped = int((v1 != v2).sum())
     print(f"\nAccounts that flipped v1->revise: {flipped}/{len(df)}")
-    print("Next: raise blend_w toward activity, or train LogisticRegression on the numeric columns.")
+    print("Next: train LogisticRegression on the numeric columns.")
     print("Honesty: posts are 2004 blogs; activity columns are synthetic_calibrated_demo.")
 
 
