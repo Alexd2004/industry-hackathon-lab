@@ -10,6 +10,10 @@ JOINED = ROOT / "data" / "teen_adult_joined.csv"
 SPLIT_FILE = ROOT / "results" / "split.json"
 SEED = 42
 TEST_FRACTION = 0.30
+TARGET = "label_teen"
+ID_COL = "blogger_id"
+# age and is_teen encode the target directly; never use them as model inputs.
+LEAK_COLS = ["age", "is_teen"]
 
 
 def make_split(df: pd.DataFrame, seed: int = SEED, test_fraction: float = TEST_FRACTION) -> dict:
@@ -54,3 +58,9 @@ def load_data(
     train = df[df["blogger_id"].isin(train_ids)].reset_index(drop=True)
     test = df[df["blogger_id"].isin(test_ids)].reset_index(drop=True)
     return train, test
+
+
+def split_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """Return (X, y) with the target, id and target-leaking columns removed from X."""
+    X = df.drop(columns=[TARGET, ID_COL, *LEAK_COLS])
+    return X, df[TARGET]
