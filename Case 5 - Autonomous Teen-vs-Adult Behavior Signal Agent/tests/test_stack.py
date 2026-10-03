@@ -9,7 +9,7 @@ import pytest
 
 import softsignal.stack as stk
 import softsignal.text_model as tmod
-from softsignal.baselines import make_tabular_lr
+from softsignal.baselines import make_tabular_lr, oof_scores
 from softsignal.data import cv_folds, load_data
 from softsignal.features import FEATURE_COLS, FORBIDDEN, ID_COL, TARGET
 from softsignal.metrics import auc
@@ -155,6 +155,33 @@ def test_explain_names_match_level2_columns(tm, frame):
     assert names <= {stk.TEXT_FEATURE, *FEATURE_COLS}
 
 
+# --- level 2 must not see the rows it scores --------------------------------------------
+
+def test_nested_oof_level2_is_fit_only_on_the_outer_fit_rows(tm, frame, monkeypatch):
+    fits = []
+    real = stk._fit_level2
+
+    def spy(X, y):
+        fits.append((X, np.asarray(y)))
+        return real(X, y)
+    monkeypatch.setattr(stk, "_fit_level2", spy)
+    stk.nested_oof(tm, frame, k=5)
+    assert len(fits) == 5
+    rows = lambda d: {tuple(r) for r in d[FEATURE_COLS].round(9).to_numpy()}  # noqa: E731  (rows are unique)
+    for (X, y), (fit_idx, val_idx) in zip(fits, cv_folds(frame, k=5)):
+        assert len(X) == len(y) == len(fit_idx)
+        assert np.array_equal(y, frame[TARGET].to_numpy()[fit_idx])
+        assert not rows(X) & rows(frame.iloc[val_idx])
+
+
+def test_tabular_fallback_oof_is_the_out_of_fold_score_not_an_in_sample_one(frame, tmp_path):
+    train, test = frame.iloc[:40].reset_index(drop=True), frame.iloc[40:].reset_index(drop=True)
+    res = stk.stack(train, test, use_text=False, oof_path=tmp_path / "o.csv")
+    assert np.array_equal(res.oof, oof_scores(train))
+    in_sample = stk.Stack.fit(train, use_text=False).score(train)
+    assert not np.allclose(res.oof, in_sample)
+
+
 # --- vocabulary must come from train only -----------------------------------------------
 
 def test_a_matrix_fit_on_test_text_is_rejected_everywhere(posts, small_params, frame):
@@ -290,3 +317,45 @@ def test_real_run_is_deterministic(real):
     train, test, res, _ = real
     again = stk.Stack.fit(train, tm=res.stack.tm).score(test)
     assert np.allclose(again, res.test_score)
+
+
+# --- guard messages and warning locations ------------------------------------------------
+
+def test_the_error_for_a_smaller_frame_names_train_ids(tm, frame):
+    with pytest.raises(ValueError, match="train_ids="):
+        stk.nested_oof(tm, frame.iloc[:40].reset_index(drop=True))
+
+
+def test_stack_accepts_train_ids_for_a_smaller_frame(tm, frame, tmp_path):
+    train, test = frame.iloc[:40].reset_index(drop=True), frame.iloc[40:].reset_index(drop=True)
+    with pytest.raises(ValueError, match="outside train"):
+        stk.stack(train, test, tm=tm, oof_path=None)
+    res = stk.stack(train, test, tm=tm, oof_path=None, train_ids=frame[ID_COL])
+    assert len(res.oof) == 40 and np.isfinite(res.oof).all()
+
+
+@pytest.mark.parametrize("call", ["check", "nested_oof", "fit", "stack"])
+def test_missing_fit_ids_warning_points_at_the_callers_line_once(tm, frame, call):
+    tm.fit_ids = None
+    calls = {
+        "check": lambda: stk.check_vocabulary(tm, frame[ID_COL]),
+        "nested_oof": lambda: stk.nested_oof(tm, frame),
+        "fit": lambda: stk.Stack.fit(frame, tm=tm),
+        "stack": lambda: stk.stack(frame.iloc[:40].reset_index(drop=True), frame.iloc[40:], tm=tm,
+                                   oof_path=None, train_ids=frame[ID_COL]),
+    }
+    with pytest.warns(UserWarning, match="no fit_ids") as rec:
+        calls[call]()
+    got = [w for w in rec if "no fit_ids" in str(w.message)]
+    assert len(got) == 1 and got[0].filename == __file__
+
+
+def test_main_explains_why_test_false_teen_can_exceed_the_cap(capsys, monkeypatch):
+    class Fake:
+        rows, oof, test_score, threshold, cap = [], np.array([0.5]), np.array([0.5]), 0.4, 0.15
+        stack = type("S", (), {"coefs": staticmethod(lambda: pd.Series({"a": 1.0}))})()
+    monkeypatch.setattr(stk, "load_data", lambda **k: (pd.DataFrame({TARGET: [0, 1]}), pd.DataFrame({TARGET: [0, 1]})))
+    monkeypatch.setattr(stk, "stack", lambda *a, **k: Fake)
+    monkeypatch.setattr(stk, "auc", lambda *a: 0.9)
+    stk.main()
+    assert "test false-teen can land above it" in capsys.readouterr().out

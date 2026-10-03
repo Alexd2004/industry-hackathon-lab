@@ -53,22 +53,24 @@ def _fit_level2(X: pd.DataFrame, y) -> Pipeline:
     return make_tabular_lr().fit(X, np.asarray(y))
 
 
-def check_vocabulary(tm: TextMatrix, train_ids) -> None:
+def check_vocabulary(tm: TextMatrix, train_ids, stacklevel: int = 2) -> None:
     """Raise if the TF-IDF vocabulary was fit on any account outside the train set (e.g. on test text).
 
     train_ids is the whole train set. A frame smaller than train (a subsample, or the revealed
     labels of a loop refit) is fine as long as the matrix was fit inside train. A matrix with
     no fit_ids (hand-built) cannot be checked, so it only warns; build_matrix always sets them.
+    stacklevel is where a warning is attributed: 2 is the caller of this function.
     """
     if tm.fit_ids is None:
         warnings.warn("the text matrix has no fit_ids, so its vocabulary cannot be checked as train-only",
-                      stacklevel=3)
+                      stacklevel=stacklevel)
         return
     outside = tm.fit_ids - set(pd.Index(train_ids).astype(str))
     if outside:
         raise ValueError(
             f"the text matrix vocabulary was fit on {len(outside)} account(s) outside train, "
-            f"e.g. {sorted(outside)[:3]}; build it with build_matrix(train[ID_COL])"
+            f"e.g. {sorted(outside)[:3]}; build it with build_matrix(train[ID_COL]), or if the frame is "
+            "only part of train, pass the whole train set as train_ids="
         )
 
 
@@ -79,7 +81,7 @@ def nested_oof(tm: TextMatrix, train: pd.DataFrame, k: int = 5, train_ids=None) 
     The vocabulary was fit once on all those rows (no labels), so it has seen each outer-val
     row's text but never its label.
     """
-    check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids)
+    check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids, stacklevel=3)
     ids, y = train[ID_COL].to_numpy(), train[TARGET].to_numpy()
     out = np.full(len(train), np.nan)
     for fit_idx, val_idx in cv_folds(train, k=k):
@@ -108,7 +110,7 @@ class Stack:
         if not use_text:
             return cls(level2=_fit_level2(stack_features(train), y), use_text=False)
         tm = tm if tm is not None else build_matrix(train[ID_COL])
-        check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids)
+        check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids, stacklevel=3)
         level2 = _fit_level2(stack_features(train, oof_text_score(tm, train)), y)
         return cls(level2=level2, use_text=True, text_model=fit_text_model(tm, train[ID_COL], y), tm=tm)
 
@@ -164,16 +166,24 @@ def stack(
     tm: TextMatrix | None = None,
     use_text: bool = True,
     oof_path: Path | None = STACK_OOF,
+    train_ids=None,
 ) -> StackResult:
-    """Ladder row 7: nested OOF on train, cutoff at the cap from that OOF, test scored once."""
+    """Ladder row 7: nested OOF on train, cutoff at the cap from that OOF, test scored once.
+
+    train_ids: the whole train set when `train` is only part of it (see check_vocabulary).
+    """
     y_tr, y_te = train[TARGET].to_numpy(), test[TARGET].to_numpy()
     if use_text:
         tm = tm if tm is not None else build_matrix(train[ID_COL])
-        oof = nested_oof(tm, train)
+        check_vocabulary(tm, train[ID_COL] if train_ids is None else train_ids, stacklevel=3)
+        with warnings.catch_warnings():  # already reported above, at the caller's line
+            warnings.filterwarnings("ignore", message="the text matrix has no fit_ids")
+            oof = nested_oof(tm, train, train_ids=train_ids)
+            model = Stack.fit(train, tm=tm, train_ids=train_ids)
     else:
         oof = oof_scores(train)
+        model = Stack.fit(train, use_text=False)
     t = cap_threshold(oof, y_tr, cap)
-    model = Stack.fit(train, tm=tm, use_text=use_text)
     p_te = model.score(test)
     if oof_path is not None:
         write_oof(train, oof, oof_path)
@@ -194,6 +204,8 @@ def main() -> None:
     print(f"test AUC (full-train stack): {auc(test[TARGET], res.test_score):.4f}")
     print("go/no-go gate AUC >= 0.94, target >= 0.95")
     print(f"\nstack cutoff at {cap_label(res.cap)}% cap (from nested OOF): {res.threshold:.3f}")
+    print("train false-teen meets the cap by construction (the cutoff comes from these nested OOF scores);")
+    print("test applies that cutoff to the model refit on all of train, so test false-teen can land above it.")
     print(f"wrote {len(res.oof)} OOF scores to {STACK_OOF}")
     print("standardized level-2 coefficients:")
     print(res.stack.coefs().round(2).to_string())
