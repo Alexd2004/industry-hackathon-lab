@@ -7,7 +7,7 @@ import pandas as pd
 from softsignal.data import load_data
 from softsignal.metrics import prf
 from softsignal.tier1 import (
-    K_FOLDS, activity_score, blend, is_current, load_best, style_score, style_sweep_report, tune,
+    EVAL_TIER1, K_FOLDS, activity_score, blend, evaluate_blend, is_current, load_best, style_score, style_sweep_report, tune,
 )
 
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
@@ -67,6 +67,13 @@ def main() -> None:
     print(f"Picked points on test ({len(test)} rows):")
     print(tuned["test"].round(3).to_string(index=False))
     print(f"Checkpoint written: {tuned['checkpoint_written']}")
+
+    # --- Step 5: starter vs one alternate blend_w vs the tuned point, on test, in the eval.csv schema ---
+    ladder = evaluate_blend(test, tuned["picks"]["cap_best"])
+    EVAL_TIER1.parent.mkdir(parents=True, exist_ok=True)
+    ladder.to_csv(EVAL_TIER1, index=False)
+    print(f"\nBlend weight comparison on test ({len(test)} rows), written to {EVAL_TIER1.name}:")
+    print(ladder.round(3).to_string(index=False))
 
     flipped = int((v1 != v2).sum())
     print(f"\nAccounts that flipped v1->revise: {flipped}/{len(df)}")
