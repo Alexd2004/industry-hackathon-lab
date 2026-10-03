@@ -5,7 +5,7 @@ import pandas as pd
 from softsignal.features import TARGET
 from softsignal.metrics import f1, prf
 
-CAP = 0.15  # max false-teen rate (adults wrongly called teen), from policy.yaml cap_false_teen
+CAP = 0.15  # max false-teen rate (adults wrongly called teen), 15% cap from the Combined Plan; move to policy.yaml cap_false_teen when it exists
 CUTOFFS = [round(0.10 + 0.05 * i, 2) for i in range(17)]  # 0.10 .. 0.90
 
 
@@ -62,6 +62,12 @@ def best_cutoffs(sweep: pd.DataFrame, cap: float = CAP) -> dict[str, float | Non
     return {"f1_best": float(f1_best), "cap_best": None if cap_best is None else float(cap_best)}
 
 
+def flag_all_f1(df: pd.DataFrame) -> float:
+    """F1 of calling every account a teen. Reference line: a pick below this adds nothing."""
+    prec, rec, _, _ = prf(df[TARGET].to_numpy(), np.ones(len(df), dtype=int))
+    return f1(prec, rec)
+
+
 def style_sweep_report(train: pd.DataFrame, test: pd.DataFrame, cap: float = CAP) -> dict:
     """Sweep on train, pick the two cutoffs on train, evaluate each once on test."""
     sweep = sweep_cutoffs(train, style_score(train))
@@ -74,6 +80,12 @@ def style_sweep_report(train: pd.DataFrame, test: pd.DataFrame, cap: float = CAP
         pred = flag(test_score, cut)
         prec, rec, ft, mt = prf(test[TARGET].to_numpy(), pred)
         test_rows.append(
-            {"pick": name, "cutoff": cut, "prec": prec, "rec": rec, "ft": ft, "mt": mt, "f1": f1(prec, rec)}
+            {"pick": name, "cutoff": cut, "prec": prec, "rec": rec, "ft": ft, "mt": mt,
+             "f1": f1(prec, rec), "cap_ok": ft <= cap}
         )
-    return {"train_sweep": sweep, "picks": picks, "test": pd.DataFrame(test_rows)}
+    return {
+        "train_sweep": sweep,
+        "picks": picks,
+        "test": pd.DataFrame(test_rows),
+        "flag_all_f1": flag_all_f1(test),
+    }

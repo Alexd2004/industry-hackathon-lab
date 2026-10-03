@@ -3,7 +3,9 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.metrics import f1, prf
-from softsignal.tier1 import CUTOFFS, best_cutoffs, flag, style_score, style_sweep_report, sweep_cutoffs
+from softsignal.tier1 import (
+    CUTOFFS, activity_score, best_cutoffs, flag, flag_all_f1, style_score, style_sweep_report, sweep_cutoffs,
+)
 
 
 def test_grid_is_17_cutoffs_from_010_to_090():
@@ -59,3 +61,31 @@ def test_report_picks_on_train_and_scores_test_once():
     for _, r in rep["test"].iterrows():
         pred = flag(style_score(test), r["cutoff"])
         assert (r["prec"], r["rec"], r["ft"], r["mt"]) == prf(test["label_teen"].to_numpy(), pred)
+
+
+def test_activity_score_matches_the_starter_rule():
+    train, _ = load_data()
+    expected = (
+        0.25 * (train["pct_active_school_hours"] < 0.25).astype(float)
+        + 0.25 * (train["pct_active_evening"] > 0.35).astype(float)
+        + 0.20 * (train["share_short_video_views"] > 0.40).astype(float)
+        + 0.15 * (train["night_notification_open_rate"] > 0.22).astype(float)
+        + 0.15 * (train["weekend_weekday_session_ratio"] > 1.2).astype(float)
+    )
+    pd.testing.assert_series_equal(activity_score(train), expected)
+
+
+def test_picks_use_train_only():
+    train, test = load_data()
+    base = style_sweep_report(train, test)
+    flipped = test.copy()
+    flipped["label_teen"] = 1 - flipped["label_teen"]
+    assert style_sweep_report(train, flipped)["picks"] == base["picks"]
+
+
+def test_cap_ok_and_flag_all_reference():
+    train, test = load_data()
+    rep = style_sweep_report(train, test)
+    assert (rep["test"]["cap_ok"] == (rep["test"]["ft"] <= 0.15)).all()
+    assert abs(rep["flag_all_f1"] - flag_all_f1(test)) < 1e-12
+    assert abs(flag_all_f1(pd.DataFrame({"label_teen": [1, 0]})) - 2 / 3) < 1e-12

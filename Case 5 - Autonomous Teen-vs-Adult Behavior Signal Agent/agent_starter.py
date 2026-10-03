@@ -6,7 +6,7 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.metrics import prf
-from softsignal.tier1 import style_sweep_report
+from softsignal.tier1 import activity_score, style_score, style_sweep_report
 
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
 
@@ -24,31 +24,20 @@ def main() -> None:
     df = pd.read_csv(JOINED)
     y = df["label_teen"].to_numpy()
 
+    # Starter rows below use all rows (train + test), so they are not held-out results.
     # --- Baseline: school/birthday keyword flag from posts ---
     baseline = df["keyword_teen_flag"].to_numpy()
     report("Baseline keywords", y, baseline)
 
     # --- v1: writing-style score (no activity yet) ---
     # Teens in this corpus tend toward shorter words, more first-person, more bangs/slang.
-    style = (
-        0.35 * (df["avg_word_len"] < 4.4).astype(float)
-        + 0.25 * (df["first_person_rate"] > 0.06).astype(float)
-        + 0.20 * (df["exclaim_rate"] > 0.008).astype(float)
-        + 0.15 * (df["slang_emoji_rate"] > 0.002).astype(float)
-        + 0.20 * (df["school_token_rate"] > 0).astype(float)
-    )
+    style = style_score(df)
     v1 = (style >= 0.55).astype(int).to_numpy()
     report("v1 style score>=0.55", y, v1)
 
     # --- Revise: blend style with Meta-like activity soft signals ---
     # Higher evening / short-video / night opens, lower school-hour activity -> more teen-like.
-    activity = (
-        0.25 * (df["pct_active_school_hours"] < 0.25).astype(float)
-        + 0.25 * (df["pct_active_evening"] > 0.35).astype(float)
-        + 0.20 * (df["share_short_video_views"] > 0.40).astype(float)
-        + 0.15 * (df["night_notification_open_rate"] > 0.22).astype(float)
-        + 0.15 * (df["weekend_weekday_session_ratio"] > 1.2).astype(float)
-    )
+    activity = activity_score(df)
     blend_w = 0.45  # weight on activity; change this and re-run
     blended = (1.0 - blend_w) * style + blend_w * activity
     v2 = (blended >= 0.50).astype(int).to_numpy()
@@ -62,6 +51,7 @@ def main() -> None:
     print(f"Picks (train): {rep['picks']}")
     print(f"\nPicked cutoffs on test ({len(test)} rows):")
     print(rep["test"].round(3).to_string(index=False))
+    print(f"Flag-everyone F1 on test (reference): {rep['flag_all_f1']:.3f}")
 
     flipped = int((v1 != v2).sum())
     print(f"\nAccounts that flipped v1->revise: {flipped}/{len(df)}")
