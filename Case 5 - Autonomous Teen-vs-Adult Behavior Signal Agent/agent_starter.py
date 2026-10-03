@@ -6,7 +6,7 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.metrics import prf
-from softsignal.tier1 import activity_score, style_score, style_sweep_report
+from softsignal.tier1 import activity_score, style_score, style_sweep_report, tune
 
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
 
@@ -52,6 +52,13 @@ def main() -> None:
     print(f"\nPicked cutoffs on test ({len(test)} rows):")
     print(rep["test"].round(3).to_string(index=False))
     print(f"Flag-everyone F1 on test (reference): {rep['flag_all_f1']:.3f}")
+
+    # --- Step 4: grid blend weight x cutoff on train under the 15% cap, picks scored once on test ---
+    tuned = tune(train, test)
+    print(f"\nTune picks (train, {len(tuned['grid'])} grid points): {tuned['picks']}")
+    print(f"Picked points on test ({len(test)} rows):")
+    print(tuned["test"].round(3).to_string(index=False))
+    print(f"Checkpoint written: {tuned['checkpoint_written']}")
 
     flipped = int((v1 != v2).sum())
     print(f"\nAccounts that flipped v1->revise: {flipped}/{len(df)}")
