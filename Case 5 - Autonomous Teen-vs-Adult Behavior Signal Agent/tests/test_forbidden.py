@@ -16,8 +16,8 @@ def test_allow_list_columns_exist_in_csv():
 
 
 @pytest.mark.parametrize("which", [0, 1])
-def test_split_xy_returns_only_allowed_columns(which):
-    X, y = split_xy(load_data()[which])
+def test_split_xy_returns_only_allowed_columns(which, tmp_path):
+    X, y = split_xy(load_data(split_file=tmp_path / "split.json")[which])
     assert list(X.columns) == FEATURE_COLS
     assert not FORBIDDEN & set(X.columns)
     assert len(X) == len(y)
