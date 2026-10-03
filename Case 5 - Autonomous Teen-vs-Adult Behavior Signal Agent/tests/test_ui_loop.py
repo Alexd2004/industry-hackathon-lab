@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -148,6 +149,8 @@ def test_no_files_at_all_is_an_empty_state(tmp_path):
     (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(mode="LIVE")[c]) for c in ROUNDS_COLS) + "\n", "mode must be"),
     (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(applied_source="x")[c]) for c in ROUNDS_COLS) + "\n", "applied_source"),
     (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(ft=34)[c]) for c in ROUNDS_COLS) + "\n", "ft has rates outside"),
+    (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(n_flagged=-1)[c]) for c in ROUNDS_COLS) + "\n", "n_flagged must be whole"),
+    (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(n_flagged=1.5)[c]) for c in ROUNDS_COLS) + "\n", "n_flagged must be whole"),
 ])
 def test_bad_rounds_file_raises_clear_error(tmp_path, content, msg):
     (tmp_path / "rounds.csv").write_text(content)
@@ -429,3 +432,64 @@ def test_baselines_match_real_eval_stage_names(tmp_path, monkeypatch):
     monkeypatch.setattr(ui_loop, "RESULTS", tmp_path)
     base, projected = ui_loop.baselines()
     assert sorted(base["stage"]) == ["keyword_baseline", "starter_blend_w0.45_cut0.5"] and not projected
+
+
+# round 2 review
+
+def test_placeholder_rounds_and_decisions_agree():
+    rounds = pd.read_csv(RESULTS / ROUNDS_PLACEHOLDER).set_index("round")
+    recs = [json.loads(ln) for ln in (RESULTS / DECISIONS_PLACEHOLDER).read_text().splitlines()]
+    assert [d["round"] for d in recs] == rounds.index.tolist()
+    for d in recs:
+        r, applied, src = rounds.loc[d["round"]], d["applied"]["decision"], d["applied"]["source"]
+        assert (applied["action"], applied["cutoff"], applied["cap"], src) == \
+            (r["action"], r["t_verify"], r["cap"], r["applied_source"]), d["round"]
+        a2, rule = d["a2"]["output"], d["rule_decision"]
+        if isinstance(a2, dict):
+            assert d["diff"] == {k: [rule[k], a2[k]] for k in ("cutoff", "cap", "action") if a2[k] != rule[k]}
+            if src == "A2":
+                assert {k: a2[k] for k in ("cutoff", "cap", "action")} == applied
+            for n in re.findall(r"(\d+) audit adults", a2["reason"]):  # cards quote the scoreboard count
+                assert int(n) == r["n_audit_adults"], d["round"]
+        for ev in d["a1"]["output"].get("evidence", []):
+            assert ev["field"] != "psi" or ev["value"] == r["psi"]
+
+
+def test_tab_shows_only_the_selected_run_and_its_tiles(real_dir):
+    old, new = "20261003T140000Z", "20261003T150000Z"
+    write_rounds(real_dir, [row(run=old, rnd=0, psi=0.3), row(run=old, rnd=1, psi=0.3),
+                            row(run=new, rnd=0, cap=0.2, t_verify=0.62)])
+    write_decisions(real_dir, [decision(run=old, rnd=0), decision(run=old, rnd=1), decision(run=new, rnd=0)])
+    at = AppTest.from_function(render).run()
+    assert not at.exception and at.selectbox[0].value == new
+    assert [t.value.split(":")[0] for t in at.text] == ["R0"]  # the old run's log never mixes in
+    tiles = {m.label: m.value for m in at.metric}
+    assert tiles["Round"] == "0" and tiles["Cutoff (t_verify)"] == "0.62" and tiles["PSI"] == "n/a"
+    assert any(f"Run {new}. Round 0 of 7, cap 20%." == c.value for c in at.caption)
+
+
+def test_three_agent_record_shows_not_run_cards(real_dir):
+    d = decision(rnd=1)
+    del d["a4"], d["a5"]
+    write_decisions(real_dir, [d])
+    at = AppTest.from_function(render).run()
+    assert not at.exception
+    assert sum(c.value.startswith("Not run (no such agent") for c in at.caption) == 2
+    assert not any(c.value == "working..." for c in at.caption)
+
+
+def test_duplicate_rows_warning_is_shown(real_dir):
+    write_rounds(real_dir, [row(rnd=0), row(rnd=0)])
+    at = AppTest.from_function(render).run()
+    assert any("repeated (run, round) rows" in w.value for w in at.warning)
+
+
+@pytest.mark.parametrize("kw", [{"round": True}, {"diff": ["cutoff"]}])
+def test_bool_round_and_non_dict_diff_are_invalid(kw):
+    assert not valid_decision(decision() | kw)
+
+
+def test_diff_table_flags_a2_vs_rule_even_without_a_diff_entry():
+    d = decision(diff={})  # loop.py forgot the diff entry; the table still compares A2 with the rule
+    d["a2"]["output"]["action"] = "re-tune"
+    assert diff_table(d).set_index("field").loc["action", "changed"] == "YES"

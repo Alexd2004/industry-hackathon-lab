@@ -29,6 +29,7 @@ REVIEW_BUDGET = 0.25  # max share of a batch in the verify band
 LABEL_COLS = [ID_COL, TARGET, "in_verify", "in_audit"]
 REVEALED_COLS = ["round", *LABEL_COLS]
 LABEL_DTYPES = {TARGET: "int64", "in_verify": bool, "in_audit": bool}
+# Log counts are for that round only. rounds.csv's n_audit_adults is cumulative: take it from audit_counts().
 LOG_KEYS = ["round", "verify_ids", "audit_ids", "n_verify", "n_audit", "n_overlap", "n_labels", "n_audit_adults"]
 
 

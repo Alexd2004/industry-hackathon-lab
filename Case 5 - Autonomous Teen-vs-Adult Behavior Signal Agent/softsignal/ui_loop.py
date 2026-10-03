@@ -31,7 +31,7 @@ BADGE_COLOR = {"LIVE": "green", "FALLBACK": "orange", "REPLAY": "gray", "PLACEHO
                "SHADOW": "gray", "ACTIVE": "blue"}
 NUMERIC = [c for c in ROUNDS_COLS if c not in ("run", "mode", "action", "applied_source")]
 BLANK_OK = {"t_soft", "audit_ft", "psi", "refit_s"}
-INTS = {"round", "n_verify", "n_labels", "n_audit_adults"}
+INTS = {"round", "n_flagged", "n_verify", "n_labels", "n_audit_adults"}
 RATES = {"cap", "audit_ft", "prec", "rec", "ft", "mt", "auc"}
 TEST_METRIC_KEYS = {"prec", "rec", "ft", "mt", "f1", "auc"}  # never allowed in decisions.jsonl
 DIFF_ROWS = ("blend_w", "cutoff", "cap", "action")
@@ -147,9 +147,7 @@ def load_decisions(path: Path) -> tuple[list, int]:
         if not valid_decision(rec):
             skipped += 1
             continue
-        rec.setdefault("diff", {})
-        for k in AGENTS:
-            rec.setdefault(k, None)
+        rec.setdefault("diff", {})  # a missing agent key stays missing: "not run", unlike null ("working")
         by_key[(rec["run"], rec["round"])] = rec
     return [by_key[k] for k in sorted(by_key)], skipped
 
@@ -179,7 +177,7 @@ def for_run(data: LoopData, run: str | None) -> tuple[pd.DataFrame, list]:
 
 
 def statuses(decisions: list) -> list:
-    return [d[a]["status"] for d in decisions for a in AGENTS if d[a] is not None]
+    return [d[a]["status"] for d in decisions for a in AGENTS if d.get(a) is not None]
 
 
 def run_badge(decisions: list, is_placeholder: bool) -> str:
@@ -196,7 +194,8 @@ def _fmt(v) -> str:
 
 def diff_table(decision: dict) -> pd.DataFrame:
     """A2 vs the rule: rows blend_w/cutoff/cap/action; columns rule/A2/applied/changed."""
-    a2 = decision["a2"]["output"] if decision["a2"] and isinstance(decision["a2"]["output"], dict) else {}
+    out = (decision.get("a2") or {}).get("output")
+    a2 = out if isinstance(out, dict) else {}
     rule, applied = decision["rule_decision"], decision["applied"]["decision"]
     rows = []
     for k in DIFF_ROWS:
@@ -223,7 +222,7 @@ def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
                             for k, v in decision["diff"].items())
         parts.append(f"A2 differs from the rule on {changes}")
     fallbacks = [f"{a.upper()} ({decision[a]['fallback_reason'] or 'no reason'})" for a in AGENTS
-                 if decision[a] is not None and decision[a]["status"] == "FALLBACK"]
+                 if decision.get(a) is not None and decision[a]["status"] == "FALLBACK"]
     if fallbacks:
         parts.append("Fallback: " + ", ".join(fallbacks))
     if round_row is not None:
@@ -269,6 +268,9 @@ def agent_card(key: str, decision: dict | None, placeholder: bool = False) -> No
         st.markdown(f"**{AGENT_NAMES[key]}**")
         if decision is None:
             st.caption("Waiting for a run.")
+            return
+        if key not in decision:
+            st.caption("Not run (no such agent in this crew).")
             return
         block = decision[key]
         if block is None:
