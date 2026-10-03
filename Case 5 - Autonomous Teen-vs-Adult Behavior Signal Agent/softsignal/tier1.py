@@ -10,13 +10,16 @@ import pandas as pd
 
 from softsignal.data import cv_folds
 from softsignal.features import FEATURE_COLS, ID_COL, N_TEST, SEED, TARGET
-from softsignal.metrics import DEFAULT_CAP, f1, prf
+from softsignal.metrics import DEFAULT_CAP, EVAL_COLS, eval_row, f1, prf
 
 CAP = DEFAULT_CAP  # max false-teen rate, shared with baselines; move to policy.yaml cap_false_teen when it exists
 CUTOFFS = [round(0.10 + 0.05 * i, 2) for i in range(17)]  # 0.10 .. 0.90
 
 W_GRID = [round(0.05 * i, 2) for i in range(21)]  # weight on activity, 0.00 .. 1.00
 K_FOLDS = 5  # stratified train folds used to pick cap_best and f1_best
+STARTER_W, STARTER_CUT = 0.45, 0.50  # the organizers' starter blend
+ALT_BLEND_W = 0.75  # case step 5 "change it once": starter + 0.30, toward activity. Fixed before any test result was viewed.
+EVAL_TIER1 = Path(__file__).resolve().parents[1] / "results" / "eval_tier1.csv"
 CHECKPOINT = Path(__file__).resolve().parents[1] / "checkpoints" / "best_params.json"
 
 
@@ -155,6 +158,26 @@ def eval_point(df: pd.DataFrame, w: float, cutoff: float) -> dict:
     pred = flag(blend(style_score(df), activity_score(df), w), cutoff)
     prec, rec, ft, mt = prf(df[TARGET].to_numpy(), pred)
     return {"prec": prec, "rec": rec, "ft": ft, "mt": mt, "f1": f1(prec, rec)}
+
+
+def evaluate_blend(test: pd.DataFrame, cap_best: dict | None = None, eval_set: str = "test") -> pd.DataFrame:
+    """eval.csv rows (frozen schema) for the starter blend, the alternate weight and the tune() cap-best point.
+
+    The alternate row keeps the starter cutoff and is not tuned. AUC comes from the continuous blend score.
+    """
+    style, activity = style_score(test), activity_score(test)
+    y = test[TARGET].to_numpy()
+    points = [
+        (f"starter_blend_w{STARTER_W}_cut{STARTER_CUT}", STARTER_W, STARTER_CUT),
+        (f"alt_blend_w{ALT_BLEND_W}_cut{STARTER_CUT}", ALT_BLEND_W, STARTER_CUT),
+    ]
+    if cap_best is not None:
+        points.append((f"tune_cap_best_w{cap_best['w']}_cut{cap_best['cutoff']}", cap_best["w"], cap_best["cutoff"]))
+    rows = []
+    for stage, w, cut in points:
+        score = blend(style, activity, w)
+        rows.append(eval_row(stage, eval_set, y, flag(score, cut), score=score.to_numpy()))
+    return pd.DataFrame(rows, columns=EVAL_COLS)
 
 
 def rules_id() -> str:
