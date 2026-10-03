@@ -21,3 +21,8 @@ def test_split_xy_returns_only_allowed_columns(which, tmp_path):
     assert list(X.columns) == FEATURE_COLS
     assert not FORBIDDEN & set(X.columns)
     assert len(X) == len(y)
+
+
+def test_committed_split_matches_csv():
+    train, test = load_data(on_param_mismatch="error")
+    assert (len(train), len(test), int(test["label_teen"].sum())) == (2100, 900, 450)

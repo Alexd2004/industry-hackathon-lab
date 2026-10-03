@@ -90,7 +90,8 @@ def test_load_data_rejects_unstratified_split_file(csv_path, tmp_path):
     test_ids = zeros[:N_TEST]
     train_ids = sorted(set(df[ID_COL]) - set(test_ids))
     split_file.write_text(json.dumps(
-        {"seed": SEED, "n_test": N_TEST, "train_ids": train_ids, "test_ids": sorted(test_ids)}
+        {"seed": SEED, "n_test": N_TEST, "train_ids": train_ids, "test_ids": sorted(test_ids),
+         "label_counts": {"test": {"0": N_TEST}}}
     ))
     with pytest.raises(ValueError, match="not stratified"):
         load_data(csv_path, split_file)
@@ -168,3 +169,36 @@ def test_load_data_reads_numeric_looking_ids_as_str(tmp_path):
 def test_cv_folds_requires_target_column():
     with pytest.raises(ValueError, match=TARGET):
         cv_folds(make_df(2100).drop(columns=[TARGET]))
+
+
+def test_load_data_split_file_without_n_test_still_loads_with_warning(csv_path, tmp_path):
+    split_file = tmp_path / "split.json"
+    load_data(csv_path, split_file)
+    split = json.loads(split_file.read_text())
+    del split["n_test"]
+    split_file.write_text(json.dumps(split))
+    with pytest.warns(UserWarning):
+        train, test = load_data(csv_path, split_file)
+    assert len(test) == N_TEST
+
+
+def test_load_data_invalid_json_is_value_error(csv_path, tmp_path):
+    split_file = tmp_path / "split.json"
+    split_file.write_text('{"seed": 42, "train_ids": [')
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_data(csv_path, split_file)
+
+
+def test_load_data_rejects_changed_labels(csv_path, tmp_path):
+    split_file = tmp_path / "split.json"
+    load_data(csv_path, split_file)
+    df = pd.read_csv(csv_path)
+    df.loc[df[TARGET] == 0, TARGET] = 1
+    df.to_csv(csv_path, index=False)
+    with pytest.raises(ValueError, match="label counts"):
+        load_data(csv_path, split_file)
+
+
+def test_load_data_leaves_no_tmp_file(csv_path, tmp_path):
+    load_data(csv_path, tmp_path / "split.json")
+    assert [p.name for p in tmp_path.glob("split*")] == ["split.json"]

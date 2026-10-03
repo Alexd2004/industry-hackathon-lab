@@ -1,5 +1,6 @@
 """Shared data loading and the frozen train/test split (Tier 1, step 1)."""
 import json
+import os
 import warnings
 from pathlib import Path
 
@@ -58,7 +59,10 @@ def load_data(
     df = pd.read_csv(path, dtype={ID_COL: str})
     check_frame(df)
     if split_file.exists():
-        split = json.loads(split_file.read_text())
+        try:
+            split = json.loads(split_file.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{split_file} is not valid JSON; delete it to regenerate the split") from e
     else:
         split = make_split(df)
         split_file.parent.mkdir(parents=True, exist_ok=True)
@@ -77,14 +81,22 @@ def load_data(
 
     try:
         train_ids, test_ids = set(split["train_ids"]), set(split["test_ids"])
+        stored_counts = split["label_counts"]["test"]
     except KeyError as e:
         raise ValueError(f"{split_file} has no {e}; delete it to regenerate the split") from e
     if train_ids & test_ids or (train_ids | test_ids) != set(df[ID_COL]):
         raise ValueError(
             f"{split_file} does not match {path.name}; delete it to regenerate the split"
         )
+    is_test = df[ID_COL].isin(test_ids)
+    actual = {str(k): int(v) for k, v in df.loc[is_test, TARGET].value_counts().sort_index().items()}
+    if actual != stored_counts:
+        raise ValueError(
+            f"{split_file} label counts {stored_counts} do not match {path.name} {actual}; "
+            "delete it to regenerate the split"
+        )
     for label, grp in df.groupby(TARGET):
-        expected = len(grp) * split["n_test"] / len(df)
+        expected = len(grp) * len(test_ids) / len(df)
         if abs(grp[ID_COL].isin(test_ids).sum() - expected) > 1:
             raise ValueError(
                 f"{split_file} is not stratified on {TARGET} for {path.name}; "
@@ -109,4 +121,4 @@ def cv_folds(train: pd.DataFrame, k: int = 5, seed: int = SEED) -> list[tuple[np
     if TARGET not in train.columns:
         raise ValueError(f"cv_folds needs the train frame with a {TARGET} column")
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
-    return list(skf.split(train, train[TARGET]))
+    return list(skf.split(np.zeros(len(train)), train[TARGET]))
