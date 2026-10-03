@@ -142,3 +142,29 @@ def test_cv_folds_same_seed_same_folds():
     train = make_df(2100)
     a, b = cv_folds(train), cv_folds(train)
     assert all((x[1] == y[1]).all() for x, y in zip(a, b))
+
+
+@pytest.mark.parametrize("missing", ["train_ids", "test_ids"])
+def test_load_data_split_file_missing_ids_raises_value_error(csv_path, tmp_path, missing):
+    split_file = tmp_path / "split.json"
+    load_data(csv_path, split_file)
+    split = json.loads(split_file.read_text())
+    del split[missing]
+    split_file.write_text(json.dumps(split))
+    with pytest.raises(ValueError, match="delete it to regenerate"):
+        load_data(csv_path, split_file)
+
+
+def test_load_data_reads_numeric_looking_ids_as_str(tmp_path):
+    df = make_df()
+    df[ID_COL] = np.arange(1000, 1000 + len(df))
+    path = tmp_path / "numeric.csv"
+    df.to_csv(path, index=False)
+    train, test = load_data(path, tmp_path / "split.json")
+    assert len(train) + len(test) == len(df)
+    assert train[ID_COL].map(type).eq(str).all()
+
+
+def test_cv_folds_requires_target_column():
+    with pytest.raises(ValueError, match=TARGET):
+        cv_folds(make_df(2100).drop(columns=[TARGET]))

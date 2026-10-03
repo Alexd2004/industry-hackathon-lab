@@ -55,7 +55,7 @@ def load_data(
     """
     if on_param_mismatch not in ("warn", "error"):
         raise ValueError('on_param_mismatch must be "warn" or "error"')
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, dtype={ID_COL: str})
     check_frame(df)
     if split_file.exists():
         split = json.loads(split_file.read_text())
@@ -75,7 +75,10 @@ def load_data(
             raise ValueError(msg)
         warnings.warn(msg, stacklevel=2)
 
-    train_ids, test_ids = set(split["train_ids"]), set(split["test_ids"])
+    try:
+        train_ids, test_ids = set(split["train_ids"]), set(split["test_ids"])
+    except KeyError as e:
+        raise ValueError(f"{split_file} has no {e}; delete it to regenerate the split") from e
     if train_ids & test_ids or (train_ids | test_ids) != set(df[ID_COL]):
         raise ValueError(
             f"{split_file} does not match {path.name}; delete it to regenerate the split"
@@ -103,5 +106,7 @@ def cv_folds(train: pd.DataFrame, k: int = 5, seed: int = SEED) -> list[tuple[np
     Pick cutoffs, blend weights and other settings with these folds. Never use the
     test set for that: touch it once, for the final report.
     """
+    if TARGET not in train.columns:
+        raise ValueError(f"cv_folds needs the train frame with a {TARGET} column")
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
     return list(skf.split(train, train[TARGET]))

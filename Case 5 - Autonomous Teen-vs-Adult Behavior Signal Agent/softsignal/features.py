@@ -26,7 +26,8 @@ TEXT_COLS = [
 ]
 FEATURE_COLS = ACTIVITY_COLS + TEXT_COLS
 
-# Typed age, the label, self-declared profile fields and birthday proxies.
+# Typed age, the label, self-declared profile fields and account-level proxies.
+# birthday_token_rate is allowed on purpose: it comes from post text, not the typed birthday.
 # gender and job are kept in the CSV for fairness monitoring only.
 FORBIDDEN = {
     "age",
