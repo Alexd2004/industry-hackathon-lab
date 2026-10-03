@@ -38,7 +38,9 @@ def oof_scores(train: pd.DataFrame, k: int = 5) -> np.ndarray:
     return out
 
 
-def nested_fold(train: pd.DataFrame, fit_idx, val_idx, cap: float = DEFAULT_CAP, k: int = 5):
+def nested_fold(
+    train: pd.DataFrame, fit_idx, val_idx, cap: float = DEFAULT_CAP, k: int = 5
+) -> tuple[np.ndarray, np.ndarray]:
     """(scores, preds) for one outer fold: cutoff from inner OOF on fit_idx rows only."""
     inner = train.iloc[fit_idx].reset_index(drop=True)
     X_in, y_in = split_xy(inner)

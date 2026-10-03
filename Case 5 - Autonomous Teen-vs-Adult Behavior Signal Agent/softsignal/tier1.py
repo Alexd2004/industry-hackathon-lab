@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 
 from softsignal.features import TARGET
-from softsignal.metrics import f1, prf
+from softsignal.metrics import DEFAULT_CAP, f1, prf
 
-CAP = 0.15  # max false-teen rate (adults wrongly called teen), 15% cap from the Combined Plan; move to policy.yaml cap_false_teen when it exists
+CAP = DEFAULT_CAP  # max false-teen rate, shared with baselines; move to policy.yaml cap_false_teen when it exists
 CUTOFFS = [round(0.10 + 0.05 * i, 2) for i in range(17)]  # 0.10 .. 0.90
 
 

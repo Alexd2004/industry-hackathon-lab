@@ -30,7 +30,7 @@ def confusion(y_true, y_pred) -> tuple[int, int, int, int]:
 
 
 def prf(y_true, y_pred) -> tuple[float, float, float, float]:
-    """precision, recall, false-teen rate, missed-teen rate (same as agent_starter.py)."""
+    """precision, recall, false-teen rate, missed-teen rate; a rate with an empty denominator is 0.0."""
     tp, fp, fn, tn = confusion(y_true, y_pred)
     prec = tp / (tp + fp) if (tp + fp) else 0.0
     rec = tp / (tp + fn) if (tp + fn) else 0.0
