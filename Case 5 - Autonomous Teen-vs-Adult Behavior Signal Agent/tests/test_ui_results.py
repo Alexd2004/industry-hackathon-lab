@@ -17,6 +17,13 @@ def render():  # AppTest.from_function runs this in the script thread
     ui_results.render_results_tab()
 
 
+@pytest.fixture
+def placeholder_only(tmp_path, monkeypatch):
+    """Point the app at a folder holding only the placeholder, so tests do not depend on results/eval.csv."""
+    (tmp_path / "eval_placeholder.csv").write_text(PLACEHOLDER_CSV.read_text())
+    monkeypatch.setattr(ui_results, "RESULTS", tmp_path)
+
+
 def test_placeholder_has_frozen_schema_and_projected_label():
     df = pd.read_csv(PLACEHOLDER_CSV)
     assert list(df.columns) == EVAL_COLS
@@ -48,7 +55,7 @@ def test_best_under_cap_picks_highest_recall_within_cap():
     assert best_under_cap(df, 0.05) is None
 
 
-def test_app_shows_both_tabs_banner_and_footer():
+def test_app_shows_both_tabs_banner_and_footer(placeholder_only):
     at = AppTest.from_file(APP).run()
     assert not at.exception
     assert [t.label for t in at.tabs] == ["Results", "Loop"]
@@ -101,7 +108,7 @@ def test_real_file_tile_ignores_non_test_rows(tmp_path, monkeypatch):
     assert not any(BANNER in w.value for w in at.warning)
 
 
-def test_placeholder_labels_tile_as_projected():
+def test_placeholder_labels_tile_as_projected(placeholder_only):
     at = AppTest.from_function(render).run()
     assert not at.exception
     assert "(projected)" in at.metric[0].label
@@ -111,7 +118,7 @@ def test_ci_note_matches_constants():
     assert f"{REC_CI * 100:.1f}" in CI_NOTE and f"{FT_CI * 100:.1f}" in CI_NOTE
 
 
-def test_cap_band_shown_around_cap():
+def test_cap_band_shown_around_cap(placeholder_only):
     at = AppTest.from_function(render).run()
     assert not at.exception
     assert any("Band: 11.7% to 18.3%" in c.value for c in at.caption)
