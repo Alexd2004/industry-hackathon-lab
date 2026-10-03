@@ -13,7 +13,11 @@ PLACEHOLDER_CSV = RESULTS / "eval_placeholder.csv"
 NUMERIC_COLS = [c for c in EVAL_COLS if c not in ("stage", "eval_set")]
 
 BANNER = "PLACEHOLDER, projected, not measured. These are Combined Plan section 7 numbers, not results from this repo."
-CI_NOTE = "95% CI on 900 test accounts: recall +/- 2.5 pts, false-teen +/- 3.3 pts. The cap is a band, not a line."
+REC_CI, FT_CI = 0.025, 0.033  # 95% CI half-widths on 900 test accounts (Combined Plan section 7)
+CI_NOTE = (
+    f"95% CI on 900 test accounts: recall +/- {REC_CI * 100:.1f} pts, false-teen +/- {FT_CI * 100:.1f} pts. "
+    "The cap is a band, not a line."
+)
 FOOTER = (
     "Text: 2004 public blogs (self-reported ages, label noise possible). "
     "Activity: synthetic_calibrated_demo, ~12% contrarians. "
@@ -87,6 +91,9 @@ def render_results_tab() -> None:
         c1.caption(str(best["stage"]))
         c2.metric(f"False-teen at that row{tag}", _pct(best["ft"]))
     c3.metric("Cap", _pct(cap))
+    c3.caption(f"Band: {_pct(max(cap - FT_CI, 0.0))} to {_pct(cap + FT_CI)} (95% CI)")
+    if best is not None:
+        c2.caption("Point estimate. A value on the cap is inside its CI band.")
 
     points = shown.dropna(subset=["rec", "ft"])
     chart = (
@@ -98,8 +105,10 @@ def render_results_tab() -> None:
             tooltip=["stage", "eval_set", alt.Tooltip("rec:Q", format=".1%"), alt.Tooltip("ft:Q", format=".1%")],
         )
     )
-    cap_line = alt.Chart(pd.DataFrame({"cap": [cap]})).mark_rule(strokeDash=[4, 4]).encode(x="cap:Q")
-    st.altair_chart(chart + cap_line, use_container_width=True)
+    band = pd.DataFrame({"lo": [max(cap - FT_CI, 0.0)], "hi": [cap + FT_CI], "cap": [cap]})
+    cap_band = alt.Chart(band).mark_rect(opacity=0.15).encode(x="lo:Q", x2="hi:Q")
+    cap_line = alt.Chart(band).mark_rule(strokeDash=[4, 4]).encode(x="cap:Q")
+    st.altair_chart(cap_band + chart + cap_line, use_container_width=True)
 
     st.caption(CI_NOTE)
     st.divider()

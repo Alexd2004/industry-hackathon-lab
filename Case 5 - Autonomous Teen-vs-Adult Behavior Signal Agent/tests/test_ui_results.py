@@ -6,7 +6,7 @@ from streamlit.testing.v1 import AppTest
 
 from softsignal import ui_results
 from softsignal.metrics import EVAL_COLS
-from softsignal.ui_results import BANNER, FOOTER, PLACEHOLDER_CSV, best_under_cap, headline_rows, load_ladder
+from softsignal.ui_results import BANNER, FOOTER, PLACEHOLDER_CSV, CI_NOTE, FT_CI, REC_CI, best_under_cap, headline_rows, load_ladder
 
 APP = str(Path(__file__).resolve().parents[1] / "softsignal" / "app.py")
 
@@ -105,3 +105,14 @@ def test_placeholder_labels_tile_as_projected():
     at = AppTest.from_function(render).run()
     assert not at.exception
     assert "(projected)" in at.metric[0].label
+
+
+def test_ci_note_matches_constants():
+    assert f"{REC_CI * 100:.1f}" in CI_NOTE and f"{FT_CI * 100:.1f}" in CI_NOTE
+
+
+def test_cap_band_shown_around_cap():
+    at = AppTest.from_function(render).run()
+    assert not at.exception
+    assert any("Band: 11.7% to 18.3%" in c.value for c in at.caption)
+    assert any("Point estimate" in c.value for c in at.caption)
