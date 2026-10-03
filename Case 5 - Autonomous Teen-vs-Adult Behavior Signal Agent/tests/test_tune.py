@@ -213,3 +213,7 @@ def test_load_best_reads_the_stored_checkpoint(tmp_path):
     assert load_best(path) is None
     path.write_text('{"w": 0.5}')
     assert load_best(path) == {"w": 0.5}
+    path.write_text("[]")
+    assert load_best(path) is None  # valid JSON but not an object
+    path.write_bytes(bytes([0xFF, 0xFE, 0x00]))
+    assert load_best(path) is None  # not UTF-8

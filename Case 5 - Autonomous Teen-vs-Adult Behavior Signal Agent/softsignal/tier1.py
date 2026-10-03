@@ -174,11 +174,12 @@ def data_id(df: pd.DataFrame) -> str:
 
 
 def load_best(path: Path = CHECKPOINT) -> dict | None:
-    """The stored cap-best checkpoint, or None when it is missing or unreadable."""
+    """The stored cap-best checkpoint, or None when it is missing, unreadable or not a JSON object."""
     try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        stored = json.loads(path.read_text())
+    except (OSError, ValueError):  # ValueError covers JSONDecodeError and UnicodeDecodeError
         return None
+    return stored if isinstance(stored, dict) else None
 
 
 def is_current(stored: dict, train: pd.DataFrame, cap: float = CAP) -> bool:
