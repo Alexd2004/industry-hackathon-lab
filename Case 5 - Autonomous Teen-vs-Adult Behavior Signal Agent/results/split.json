@@ -3,6 +3,18 @@
   "test_fraction": 0.3,
   "split_by": "blogger_id",
   "stratify_on": "label_teen",
+  "n_train": 2100,
+  "n_test": 900,
+  "label_counts": {
+    "train": {
+      "0": 1050,
+      "1": 1050
+    },
+    "test": {
+      "0": 450,
+      "1": 450
+    }
+  },
   "train_ids": [
     "B1016560",
     "B1019622",
