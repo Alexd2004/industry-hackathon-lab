@@ -4,6 +4,10 @@ from sklearn.metrics import roc_auc_score
 
 # Frozen eval.csv columns (Combined Plan section 4).
 EVAL_COLS = ["stage", "eval_set", "prec", "rec", "ft", "mt", "f1", "auc"]
+# Frozen rounds.csv columns (loop scoreboard, one row per round; prec..auc on the frozen test set).
+# mode: SHADOW / ACTIVE; applied_source: A2 / rule / starter. t_soft, audit_ft, psi, refit_s may be blank.
+ROUNDS_COLS = ["run", "round", "mode", "action", "applied_source", "cap", "t_soft", "t_verify", "n_verify",
+               "n_labels", "n_audit_adults", "audit_ft", "psi", "prec", "rec", "ft", "mt", "auc", "refit_s"]
 DEFAULT_CAP = 0.15  # max false-teen rate when picking a cutoff
 
 
