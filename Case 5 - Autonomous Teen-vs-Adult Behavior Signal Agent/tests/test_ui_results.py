@@ -6,7 +6,7 @@ from streamlit.testing.v1 import AppTest
 
 from softsignal import ui_results
 from softsignal.metrics import EVAL_COLS
-from softsignal.ui_results import BANNER, FOOTER, PLACEHOLDER_CSV, best_under_cap, load_ladder
+from softsignal.ui_results import BANNER, FOOTER, PLACEHOLDER_CSV, best_under_cap, headline_rows, load_ladder
 
 APP = str(Path(__file__).resolve().parents[1] / "softsignal" / "app.py")
 
@@ -83,3 +83,25 @@ def test_tab_shows_error_not_traceback_on_bad_file(tmp_path, monkeypatch):
     at = AppTest.from_function(render).run()
     assert not at.exception
     assert any("Cannot show results" in e.value for e in at.error)
+
+
+def test_headline_rows_placeholder_keeps_all_real_keeps_test_only():
+    df = pd.DataFrame({"eval_set": ["test", "train", "projected", "test"], "rec": [1, 2, 3, 4]})
+    assert len(headline_rows(df, True)) == 4
+    assert headline_rows(df, False)["rec"].tolist() == [1, 4]
+
+
+def test_real_file_tile_ignores_non_test_rows(tmp_path, monkeypatch):
+    (tmp_path / "eval.csv").write_text(csv("good,test,,0.60,0.10,,,", "cv,cv,,0.95,0.05,,,", "proj,projected,,0.99,0.01,,,"))
+    monkeypatch.setattr(ui_results, "RESULTS", tmp_path)
+    at = AppTest.from_function(render).run()
+    assert not at.exception
+    assert at.metric[0].value == "60.0%"
+    assert any("marked projected" in w.value for w in at.warning)
+    assert not any(BANNER in w.value for w in at.warning)
+
+
+def test_placeholder_labels_tile_as_projected():
+    at = AppTest.from_function(render).run()
+    assert not at.exception
+    assert "(projected)" in at.metric[0].label

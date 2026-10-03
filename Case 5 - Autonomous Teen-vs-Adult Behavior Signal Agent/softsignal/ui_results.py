@@ -51,6 +51,11 @@ def best_under_cap(ladder: pd.DataFrame, cap: float = DEFAULT_CAP) -> pd.Series 
     return None if ok.empty else ok.loc[ok["rec"].idxmax()]
 
 
+def headline_rows(ladder: pd.DataFrame, is_placeholder: bool) -> pd.DataFrame:
+    """Rows the tile and chart may use: all placeholder rows (all projected), else held-out test rows only."""
+    return ladder if is_placeholder else ladder[ladder["eval_set"] == "test"]
+
+
 def _pct(x) -> str:
     return "n/a" if pd.isna(x) else f"{x:.1%}"
 
@@ -67,21 +72,31 @@ def render_results_tab() -> None:
 
     st.subheader("Results ladder")
     st.dataframe(ladder, hide_index=True, use_container_width=True)
+    if not is_placeholder and (ladder["eval_set"] == "projected").any():
+        st.warning("eval.csv contains rows marked projected. They are shown in the table but not in the tile or chart.")
 
+    tag = " (projected)" if is_placeholder else ""
+    shown = headline_rows(ladder, is_placeholder)
     cap = st.slider("False-teen cap (stub, not wired yet)", 0.05, 0.30, DEFAULT_CAP, 0.01, disabled=True)
-    best = best_under_cap(ladder, cap)
+    best = best_under_cap(shown, cap)
     c1, c2, c3 = st.columns(3)
     if best is None:
-        c1.metric("Best recall under cap", "n/a")
+        c1.metric(f"Best recall under cap{tag}", "n/a")
     else:
-        c1.metric("Best recall under cap", _pct(best["rec"]), help=str(best["stage"]))
-        c2.metric("False-teen at that row", _pct(best["ft"]))
-        c3.metric("Cap", _pct(cap))
+        c1.metric(f"Best recall under cap{tag}", _pct(best["rec"]))
+        c1.caption(str(best["stage"]))
+        c2.metric(f"False-teen at that row{tag}", _pct(best["ft"]))
+    c3.metric("Cap", _pct(cap))
 
+    points = shown.dropna(subset=["rec", "ft"])
     chart = (
-        alt.Chart(ladder.dropna(subset=["rec", "ft"]))
+        alt.Chart(points, title=f"Recall vs false-teen{tag}")
         .mark_circle(size=90)
-        .encode(x=alt.X("ft:Q", title="false-teen rate"), y=alt.Y("rec:Q", title="recall"), tooltip=["stage", "rec", "ft"])
+        .encode(
+            x=alt.X("ft:Q", title="false-teen rate"),
+            y=alt.Y("rec:Q", title="recall"),
+            tooltip=["stage", "eval_set", alt.Tooltip("rec:Q", format=".1%"), alt.Tooltip("ft:Q", format=".1%")],
+        )
     )
     cap_line = alt.Chart(pd.DataFrame({"cap": [cap]})).mark_rule(strokeDash=[4, 4]).encode(x="cap:Q")
     st.altair_chart(chart + cap_line, use_container_width=True)
