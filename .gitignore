@@ -25,3 +25,6 @@ Thumbs.db
 
 # Private judges guide - local only, never commit or push
 JUDGE_GUIDE_PRIVATE.md
+
+# Agent per-call timing log (regenerated every run)
+**/results/agent_calls.jsonl
