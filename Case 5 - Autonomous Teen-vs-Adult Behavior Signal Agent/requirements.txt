@@ -2,3 +2,5 @@ pandas>=2.0
 numpy>=1.24
 scikit-learn>=1.3
 pytest>=7
+streamlit>=1.30
+altair>=5
