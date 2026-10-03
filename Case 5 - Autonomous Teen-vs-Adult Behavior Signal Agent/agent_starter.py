@@ -6,7 +6,9 @@ import pandas as pd
 
 from softsignal.data import load_data
 from softsignal.metrics import prf
-from softsignal.tier1 import activity_score, blend, load_best, style_score, style_sweep_report, tune
+from softsignal.tier1 import (
+    K_FOLDS, activity_score, blend, is_current, load_best, style_score, style_sweep_report, tune,
+)
 
 JOINED = Path(__file__).parent / "data" / "teen_adult_joined.csv"
 
@@ -55,14 +57,13 @@ def main() -> None:
 
     # --- Step 4: grid blend weight x cutoff on train under the 15% cap, picks scored once on test ---
     prior = load_best()
-    print(f"\nStored best before tuning: {prior if prior else 'none'}")
+    stale = "" if prior is None or is_current(prior, train) else " (stale: made under a different cap, rules or data)"
+    print(f"\nStored best before tuning: {prior if prior else 'none'}{stale}")
     tuned = tune(train, test)
-    print(f"\nTune picks (train, {len(tuned['grid'])} grid points): {tuned['picks']}")
-    pt = tuned["picks"]["cap_best"]
-    if pt is not None:
-        cv = tuned["cv"]
-        fold = cv[(cv["w"] == pt["w"]) & (cv["cutoff"] == pt["cutoff"])].iloc[0]
-        print(f"cap_best over 5 train folds: mean rec {fold['rec']:.3f}, mean ft {fold['ft']:.3f}, worst-fold ft {fold['ft_max']:.3f}")
+    print(f"Tune picks (train, {len(tuned['cv'])} grid points, {K_FOLDS}-fold): {tuned['picks']}")
+    fold = tuned["cv_cap_best"]
+    if fold is not None:
+        print(f"cap_best over {K_FOLDS} train folds: mean rec {fold['rec']:.3f}, mean ft {fold['ft']:.3f}, worst-fold ft {fold['ft_max']:.3f}")
     print(f"Picked points on test ({len(test)} rows):")
     print(tuned["test"].round(3).to_string(index=False))
     print(f"Checkpoint written: {tuned['checkpoint_written']}")
