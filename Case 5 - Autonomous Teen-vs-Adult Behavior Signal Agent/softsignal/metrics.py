@@ -2,6 +2,8 @@
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
+from softsignal.features import ID_COL
+
 # Frozen eval.csv columns (Combined Plan section 4).
 EVAL_COLS = ["stage", "eval_set", "prec", "rec", "ft", "mt", "f1", "auc"]
 # Frozen rounds.csv columns (loop scoreboard, one row per (run, round); prec..auc on the frozen test set).
@@ -18,8 +20,12 @@ DEFAULT_CAP = 0.15  # max false-teen rate when picking a cutoff
 # Frozen ranked.csv columns (explain.py, the "likely teen" list; no labels). c1..c3 are readable
 # chips like "quiet in school hours +0.82"; f1..f3 their level-2 feature keys and v1..v3 the signed
 # logit contributions as numbers (for A3/A4). words: the account's teen-leaning words, "im, lol".
-RANKED_COLS = ["rank", "blogger_id", "score", "band", "action", "c1", "c2", "c3", "f1", "f2", "f3",
+RANKED_COLS = ["rank", ID_COL, "score", "band", "action", "c1", "c2", "c3", "f1", "f2", "f3",
                "v1", "v2", "v3", "words", "reason"]
+# Frozen contrib.csv columns (explain.py, the account detail card): long format, one row per
+# (account, level-2 feature). raw: the feature's input value; z: standardized; contrib: coef x z.
+# Per account, intercept + sum(contrib) == logit(score).
+CONTRIB_COLS = [ID_COL, "score", "intercept", "feature", "raw", "z", "contrib"]
 
 
 def as_binary(a) -> np.ndarray:
@@ -65,6 +71,17 @@ def auc(y_true, score) -> float:
     if len(np.unique(y)) < 2:
         return float("nan")
     return float(roc_auc_score(y, np.asarray(score, dtype=float)))
+
+
+def top_share_cutoff(scores, share: float) -> float:
+    """Lowest cutoff t such that (score >= t) selects at most floor(share x n) accounts.
+
+    A budget rule, not a label rule: no labels are involved (it is cap_threshold with every
+    account counted). Ties never push the selection over the share; with share x n < 1, nobody
+    is selected.
+    """
+    scores = np.asarray(scores, dtype=float)
+    return cap_threshold(scores, np.zeros(len(scores), dtype=int), share)
 
 
 def top_k_precision(y_true, score, k: int) -> float:

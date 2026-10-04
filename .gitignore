@@ -32,3 +32,7 @@ JUDGE_GUIDE_PRIVATE.md
 # Tuning outputs and caches (regenerated)
 checkpoints/
 cache/
+
+# Ranked list and contributions from interim thresholds; commit once policy.py sets the bands
+**/results/ranked.csv
+**/results/contrib.csv

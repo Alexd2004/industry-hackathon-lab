@@ -128,13 +128,23 @@ class Stack:
         coef = pd.Series(self.level2[-1].coef_[0], index=self.level2.feature_names_in_)
         return coef.reindex(coef.abs().sort_values(ascending=False).index)
 
+    def contributions(self, df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, float]:
+        """(X, z, contrib, intercept): level-2 input, its transformed values, coef x z, and the intercept.
+
+        logit(score(df)) == intercept + contrib.sum(axis=1), exactly. Every step before the final
+        LR is applied (level2[:-1]), so this stays right if the pipeline gains a step.
+        """
+        X = self._features(df)
+        z = np.asarray(self.level2[:-1].transform(X), dtype=float)
+        lr = self.level2[-1]
+        return X, z, z * lr.coef_[0], float(lr.intercept_[0])
+
     def explain(self, df: pd.DataFrame, n: int = 3) -> list[list[tuple[str, float]]]:
         """Per account, its n largest signed contributions (coef x standardized value) to the logit.
 
         Positive pushes toward teen, negative toward adult. Feature names are level-2 columns.
         """
-        X = self._features(df)
-        contrib = self.level2[0].transform(X) * self.level2[-1].coef_[0]
+        X, _, contrib, _ = self.contributions(df)
         names = np.asarray(X.columns)
         out = []
         for row in contrib:

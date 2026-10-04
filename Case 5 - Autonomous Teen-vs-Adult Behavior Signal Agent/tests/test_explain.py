@@ -3,6 +3,9 @@
 Real-data tests fit the full-train stack once per module (TF-IDF cached to tmp_path, never
 the repo's cache/). Thresholds here are fixed numbers: band policy belongs to policy.py.
 """
+import os
+import stat
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,11 +13,12 @@ import pytest
 import softsignal.explain as ex
 from softsignal.data import load_data
 from softsignal.features import ACTIVITY_COLS, FEATURE_COLS, FORBIDDEN, ID_COL, TARGET
-from softsignal.metrics import RANKED_COLS, top_k_precision
+from softsignal.metrics import CONTRIB_COLS, RANKED_COLS, top_k_precision, top_share_cutoff
 from softsignal.stack import TEXT_FEATURE, Stack, logit
 from softsignal.text_model import account_top_words, build_matrix
 
 T_SOFT, T_VERIFY = 0.3, 0.6
+PHRASE_TEEN, PHRASE_ADULT = ex.PHRASES[TEXT_FEATURE]
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +40,19 @@ def test_contributions_add_up_to_the_score(fitted):
     _, test, model = fitted
     exp = ex.contributions(model, test)
     assert np.allclose(exp.intercept + exp.contrib.sum(axis=1), logit(model.score(test)), atol=1e-6)
+    assert np.allclose(exp.score, model.score(test), rtol=0, atol=1e-12)  # the ranked score IS the model score
+
+
+def test_stack_contributions_apply_every_pipeline_step_before_the_lr(fitted):
+    """If level 2 gains a step (e.g. a clipper), contributions must still add up to the score."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import FunctionTransformer
+    _, test, model = fitted
+    lv = model.level2
+    extra = Pipeline([("shift", FunctionTransformer(lambda X: X)), ("scale", lv[0]), ("lr", lv[-1])])
+    wrapped = Stack(level2=extra, use_text=True, text_model=model.text_model, tm=model.tm)
+    exp = ex.contributions(wrapped, test.iloc[:50])
+    assert np.allclose(exp.score, model.score(test.iloc[:50]), atol=1e-12)
 
 
 def test_top_terms_follow_stack_explain_order(fitted):
@@ -58,9 +75,16 @@ def test_chip_phrase_follows_the_accounts_side_of_average(z, expected):
 
 
 def test_text_chip_follows_the_text_score_not_the_average():
-    # a text score just above 0.5 (logit > 0) can sit below the training mean (z < 0)
-    assert ex.chip(TEXT_FEATURE, -0.05, z=-0.02, raw=0.1).startswith("writes like a teen")
-    assert ex.chip(TEXT_FEATURE, 0.05, z=0.02, raw=-0.1).startswith("writes like an adult")
+    assert ex.chip(TEXT_FEATURE, 0.40, z=0.2, raw=0.6) == "writes like a teen +0.40"
+    assert ex.chip(TEXT_FEATURE, -0.40, z=-0.2, raw=-0.6) == "writes like an adult -0.40"
+    # p just above 0.5 but below the training mean: phrase and sign would disagree -> neutral
+    assert ex.chip(TEXT_FEATURE, -0.05, z=-0.02, raw=0.03) == f"{ex.TEXT_NEUTRAL} -0.05"
+    assert ex.chip(TEXT_FEATURE, 0.05, z=0.02, raw=-0.03) == f"{ex.TEXT_NEUTRAL} +0.05"
+
+
+def test_text_chip_requires_the_raw_logit():
+    with pytest.raises(ValueError, match="raw"):
+        ex.chip(TEXT_FEATURE, 0.4, z=0.2)
 
 
 def test_no_text_chip_contradicts_the_text_score(ranked, fitted):
@@ -70,7 +94,9 @@ def test_no_text_chip_contradicts_the_text_score(ranked, fitted):
     for _, r in ranked.iterrows():
         for i in (1, 2, 3):
             if r[f"f{i}"] == TEXT_FEATURE:
-                assert r[f"c{i}"].startswith("writes like a teen") == (by_id[r[ID_COL]] >= 0.5)
+                c, teen, pos = r[f"c{i}"], by_id[r[ID_COL]] >= 0.5, r[f"v{i}"] >= 0
+                expected = ex.TEXT_NEUTRAL if teen != pos else PHRASE_TEEN if teen else PHRASE_ADULT
+                assert c.startswith(expected)
 
 
 # --- bands, reasons, re-banding ----------------------------------------------------------
@@ -163,6 +189,12 @@ def test_ranked_is_independent_of_the_frame_index(ranked, fitted):
     pd.testing.assert_frame_equal(ex.ranked(model, shuffled, T_SOFT, T_VERIFY), ranked)
 
 
+def test_ties_are_broken_by_account_id():
+    frame = pd.DataFrame({ID_COL: ["B3", "B1", "B2", "B0"], "score": [0.5, 0.5, 0.9, 0.5]})
+    assert ex.rank_order(frame)[ID_COL].tolist() == ["B2", "B0", "B1", "B3"]
+    assert ex.rank_order(frame.iloc[::-1])[ID_COL].tolist() == ["B2", "B0", "B1", "B3"]
+
+
 def test_empty_frame_raises_a_clear_error(fitted):
     _, test, model = fitted
     with pytest.raises(ValueError, match="no accounts"):
@@ -197,6 +229,16 @@ def test_write_ranked_round_trip_and_schema_check(ranked, tmp_path):
         ex.write_ranked(ranked.drop(columns="reason"), path)
 
 
+def test_written_files_are_readable_by_others(ranked, tmp_path):
+    path = tmp_path / "ranked.csv"
+    old = os.umask(0o022)
+    try:
+        ex.write_ranked(ranked, path)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644  # mkstemp alone would leave 0o600
+
+
 def test_failed_write_leaves_no_temp_file(ranked, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise OSError("disk full")
@@ -206,15 +248,36 @@ def test_failed_write_leaves_no_temp_file(ranked, tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_contrib_table_rebuilds_every_score(fitted, tmp_path):
+def test_contrib_table_is_long_exact_and_aligned(fitted, tmp_path):
     _, test, model = fitted
     table = ex.contrib_table(model, test)
-    assert list(table.columns[:2]) == [ID_COL, "intercept"]
-    assert set(table.columns[2:]) == set(FEATURE_COLS) | {TEXT_FEATURE}
-    assert np.allclose(table.iloc[:, 1:].sum(axis=1), logit(model.score(test)), atol=1e-6)
+    feats = set(FEATURE_COLS) | {TEXT_FEATURE}
+    assert list(table.columns) == CONTRIB_COLS and len(table) == len(test) * len(feats)
+    per = table.groupby(ID_COL, sort=False)
+    assert (per["feature"].apply(set) == feats).all()
+    rebuilt = per["intercept"].first() + per["contrib"].sum()
+    assert np.allclose(rebuilt.to_numpy(), logit(model.score(test)), atol=1e-6)
+    # each row belongs to its own account, whatever the input order (test is sorted by id, so shuffle it)
+    shuffled = test.sample(frac=1, random_state=5)
+    mixed = ex.contrib_table(model, shuffled).set_index([ID_COL, "feature"])
+    for i in (0, 37, 450):
+        one = shuffled.iloc[[i]]
+        exp = ex.contributions(model, one)
+        rows = mixed.loc[one[ID_COL].iloc[0]]
+        assert np.allclose(rows.loc[exp.contrib.columns, "contrib"], exp.contrib.iloc[0])
+        assert np.allclose(rows.loc[exp.raw.columns, "raw"], exp.raw.iloc[0].astype(float))
     ex.write_contrib(table, tmp_path / "contrib.csv")
-    with pytest.raises(ValueError, match="intercept"):
-        ex.write_contrib(table.drop(columns="intercept"), tmp_path / "contrib.csv")
+
+
+@pytest.mark.parametrize("damage", ["drop_col", "drop_feature_row", "duplicate_row"])
+def test_write_contrib_checks_the_full_schema(fitted, tmp_path, damage):
+    _, test, model = fitted
+    table = ex.contrib_table(model, test.iloc[:5])
+    bad = {"drop_col": table.drop(columns="z"),
+           "drop_feature_row": table.iloc[1:],
+           "duplicate_row": pd.concat([table, table.iloc[[0]]])}[damage]
+    with pytest.raises(ValueError):
+        ex.write_contrib(bad, tmp_path / "contrib.csv")
 
 
 # --- contrarians and interim thresholds --------------------------------------------------
@@ -232,11 +295,22 @@ def test_contrarians_are_caught_only_because_of_the_text(fitted):
     assert cands["activity_contrib"].is_monotonic_increasing
     # over all accounts: some pass the activity/text test but would verify without the text; none may appear
     every = ex.contrarian_candidates(model, test, T_VERIFY, n=len(test))
-    score = model.score(test)
+    exp = ex.contributions(model, test)
+    score, exact_logit = exp.score, exp.logit
     text, act = contrib[TEXT_FEATURE].to_numpy(), contrib[ACTIVITY_COLS].sum(axis=1).to_numpy()
     loose = (score >= T_VERIFY) & (text > 0) & (act < 0)
-    strict = loose & (logit(score) - text < logit(T_VERIFY))
+    strict = loose & (exact_logit - text < logit(T_VERIFY))
     assert loose.sum() > strict.sum() and len(every) == strict.sum()
+
+
+def test_interim_soft_never_sits_above_the_cap_cutoff():
+    # plan t_soft (10% quantile of teen scores) above the cap cutoff, as on the real data
+    y = np.repeat([0, 1], 100)
+    oof = np.concatenate([np.linspace(0, 0.5, 100), np.linspace(0.45, 1, 100)])
+    t_soft, t_verify = ex.interim_thresholds(oof, y, np.linspace(0, 1, 50), cap=0.15)
+    t_cap = ex.cap_threshold(oof, y, 0.15)
+    assert np.quantile(oof[y == 1], 0.10) > t_cap  # the case this test is about
+    assert t_soft == pytest.approx(t_cap)  # every account over the cap cutoff is at least soft
 
 
 def test_interim_thresholds_follow_the_plan_and_the_budget():
@@ -248,7 +322,13 @@ def test_interim_thresholds_follow_the_plan_and_the_budget():
     t_cap = ex.cap_threshold(oof, y, 0.15)
     assert t_soft == pytest.approx(min(np.quantile(oof[y == 1], 0.10), t_cap))
     assert t_verify >= t_cap and (scores >= t_verify).sum() <= 100  # the budget wins
-    assert ((oof >= t_soft) & (y == 0)).sum() / 500 >= ((oof >= t_cap) & (y == 0)).sum() / 500
+
+
+def test_top_share_cutoff():
+    s = np.array([0.9, 0.8, 0.8, 0.8, 0.1, 0.2, 0.3, 0.4])
+    assert (s >= top_share_cutoff(s, 0.25)).sum() == 1  # floor(2) = 2 allowed, but a 3-way tie cannot split
+    assert (s >= top_share_cutoff(s, 0.5)).sum() == 4
+    assert (np.array([0.5, 0.9, 0.7]) >= top_share_cutoff([0.5, 0.9, 0.7], 0.25)).sum() == 0  # < 4 accounts
 
 
 # --- metrics.top_k_precision ---------------------------------------------------------------
