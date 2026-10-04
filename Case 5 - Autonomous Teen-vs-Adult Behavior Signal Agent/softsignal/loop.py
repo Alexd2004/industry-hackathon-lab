@@ -11,6 +11,11 @@ candidate, the promoted one is the one refit on this round's labels too. A round
 the streak with at least PROMOTE_MIN_ADULTS audit adults, and a promote is refused (action re-tune,
 mode stays SHADOW) when the new candidate's thresholds carry an INSUFFICIENT_* flag.
 
+PSI. Each round is compared with the scores the live rule gave earlier batches when they arrived
+(state.live_scores), never re-scored, so a refit model is not measured on rows it was fit on. The
+history restarts on a promote (starter and stack scores are on different scales), so the round after a
+promote has no psi. Once ACTIVE the live rule changes every refit, so the history mixes successive models.
+
 Hold rule (enforced here, from policy.yaml): no refit and no new thresholds until the cumulative
 revealed audit adults reach min_audit_adults. Until then the starter stays live and action is "hold".
 
@@ -97,6 +102,8 @@ class State:
     streak: int = 0  # consecutive SHADOW rounds with the candidate within cap + slack
     round: int = 0
     seen: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[ID_COL, *FEATURE_COLS]))
+    # each earlier round's scores as the live rule gave them when the batch arrived (never re-scored)
+    live_scores: np.ndarray = field(default_factory=lambda: np.empty(0))
 
 
 @dataclass
@@ -271,13 +278,15 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     # state moves only once the reveal has succeeded; refit reads state.seen with this round in it
     state.seen = pd.concat([prior, rows], ignore_index=True) if len(prior) else rows.copy()
     state.round = batch.round
+    ref_scores = state.live_scores
+    state.live_scores = np.concatenate([ref_scores, live_s])
 
     # 3. this round's audit slice, scored BEFORE the refit, so these false-teen rates are never in-sample
     audit_ft = false_teen(y_audit, live_s[a_idx], state.live.th.t_verify)
     cand_ft = None
     if state.candidate is not None:
         cand_ft = false_teen(y_audit, state.candidate.score(rows)[a_idx], state.candidate.th.t_verify)
-    psi_val = psi(state.live.score(prior), live_s) if len(prior) else None
+    psi_val = psi(ref_scores, live_s) if len(ref_scores) else None
 
     # 4. decision: streak first, then the rule
     if state.mode == SHADOW:
@@ -298,6 +307,7 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
                 rule_dec = {**rule_dec, "action": RETUNE}  # refused: try again next round
             else:
                 state.mode = ACTIVE
+                state.live_scores = np.empty(0)  # the starter's scores are not on the stack's scale
         if state.mode == ACTIVE:
             state.live = state.candidate
     decision = _decision_block(rule_dec, state.live)

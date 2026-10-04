@@ -195,7 +195,9 @@ def test_no_test_id_reaches_the_oracle(full):
 def test_audit_ft_and_psi_are_blank_only_where_undefined(full):
     _, _, rounds, _, _ = full
     r = rounds[rounds["round"] > 0]
-    assert r["audit_ft"].notna().all() and r["psi"].iloc[1:].notna().all() and np.isnan(r["psi"].iloc[0])
+    after_promote = set(r.loc[r["action"] == "promote", "round"] + 1)  # the history restarts on a new scorer
+    assert r["audit_ft"].notna().all() and np.isnan(r["psi"].iloc[0])
+    assert r.loc[~r["round"].isin(after_promote) & (r["round"] > 1), "psi"].notna().all()
     assert np.isnan(rounds.loc[0, "audit_ft"]) and np.isnan(rounds.loc[0, "psi"])
 
 
@@ -303,3 +305,13 @@ def test_a_failed_reveal_leaves_the_state_untouched(split, tmp_path, monkeypatch
     with pytest.raises(OracleError):
         lp.run_round(st, batch, env)
     assert len(st.seen) == seen and st.round == rnd
+
+
+def test_psi_compares_against_stored_scores_and_restarts_after_a_promote(split, tmp_path, monkeypatch):
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 4)
+    assert rounds["action"].tolist()[:2] == [lp.RETUNE, lp.PROMOTE]
+    psis = rounds["psi"].tolist()
+    assert np.isnan(psis[0]) and psis[1] >= 0.0  # round 1 has no reference, round 2 has the starter's scores
+    assert np.isnan(psis[2])  # promoted in round 2: no scores from the new live rule yet
+    assert psis[3] == 0.0  # round 4 against round 3, both all-zero scores
+    assert 0 < len(st.live_scores) < len(st.seen)  # only rounds 3 and 4 are kept after the restart
