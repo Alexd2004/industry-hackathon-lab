@@ -12,7 +12,6 @@ import httpx2
 import numpy as np
 import pandas as pd
 import pytest
-from pydantic import ValidationError
 
 from softsignal.agent_timer import AgentTimer, load_records, round_agent_summary
 from softsignal.agents import base
@@ -20,8 +19,8 @@ from softsignal.agents.a4_triage import (
     SYSTEM, fallback_output, run_a4, user_message, validate_output,
 )
 from softsignal.agents.base import (
-    API_ERROR, CONNECTION, FALLBACK, INSUFFICIENT, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL, TIMEOUT,
-    UNKNOWN_FIELD, merge_block, numbers_in, numbers_not_in_input,
+    AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, INSUFFICIENT, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL,
+    TIMEOUT, UNKNOWN_FIELD, age_claims, merge_block, numbers_in, numbers_not_in_input,
 )
 from softsignal.agents.contracts import (
     A4_COLS, LABEL_KEYS, TEST_METRIC_KEYS, BarrierError, a4_input, check_barrier, frozen_test_ids,
@@ -29,7 +28,7 @@ from softsignal.agents.contracts import (
 from softsignal.agents.schemas import A4_MAX_NOTE_CHARS, A4Output
 from softsignal.data import load_data
 from softsignal.features import ID_COL, TARGET
-from softsignal.ui_loop import valid_decision
+from softsignal.ui_loop import plain, valid_decision
 
 REQ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 CHIPS = [("logit_text_score", "writes like a teen"), ("night_notification_open_rate", "opens notifications at night"),
@@ -67,32 +66,40 @@ def good_output(payload) -> dict:
 
 
 class FakeClient:
-    """Stands in for anthropic.Anthropic: messages.parse returns `reply` (or raises it) and records each call."""
+    """Stands in for anthropic.Anthropic: messages.create returns `reply` (or raises it); calls and the options
+    the agent set (timeout, retries) are recorded."""
 
     def __init__(self, reply=None, raises=None):
-        self.calls, self.reply, self.raises = [], reply, raises
-        self.messages = SimpleNamespace(parse=self._parse)
+        self.calls, self.options, self.reply, self.raises = [], [], reply, raises
+        self.messages = SimpleNamespace(create=self._create)
 
-    def _parse(self, **kw):
+    def with_options(self, **kw):
+        self.options.append(kw)
+        return self
+
+    def _create(self, **kw):
         self.calls.append(kw)
         if self.raises is not None:
             raise self.raises
         return self.reply
 
 
-def reply(output=None, stop_reason="end_turn", parsed=True):
+def reply(output=None, stop_reason="end_turn", text=None):
+    """A Message-like reply: one text block holding output as JSON (or the given raw text)."""
+    body = text if text is not None else (json.dumps(output) if output is not None else "")
     return SimpleNamespace(stop_reason=stop_reason, stop_details=None,
-                           parsed_output=A4Output(**output) if (parsed and output) else output,
+                           content=[SimpleNamespace(type="text", text=body)] if body else [],
                            usage=SimpleNamespace(input_tokens=1200, output_tokens=80, cache_creation_input_tokens=None,
                                                  cache_read_input_tokens=None))
 
 
 # --- contract and information barrier -------------------------------------------------------------
 
-def test_input_copies_only_the_contract_fields(payload):
-    assert set(payload) == {"agent", "round", "band", "n_accounts", "score_min", "score_max", "signals", "top_words",
-                            "accounts"}
-    assert set(payload["accounts"][0]) == {"rank", "score", "signals", "words"}
+def test_input_is_a_batch_summary_only(payload):
+    assert set(payload) == {"agent", "round", "band", "n_accounts", "score_min", "score_median", "score_max",
+                            "signals", "top_words"}  # no per-account rows: no ranks 1..n, no single-account values
+    assert set(payload["signals"][0]) == {"feature", "signal", "n_accounts", "share_pct", "mean_contribution",
+                                          "n_leading"}
     text = json.dumps(payload)
     assert "T000" not in text  # no account ids
     for key in (TARGET, "age", "in_audit", "reason", "action"):  # label and extra frame columns
@@ -136,14 +143,17 @@ def test_input_needs_verify_band_accounts_from_the_frame():
 def test_input_aggregates_are_counts_of_the_same_fields(payload):
     df = frame()
     v = df[df["band"] == "verify"]
-    assert payload["n_accounts"] == len(v) == len(payload["accounts"])
-    assert [a["rank"] for a in payload["accounts"]] == list(range(1, len(v) + 1))
-    assert [a["score"] for a in payload["accounts"]] == sorted(round(x, 2) for x in v["score"])[::-1]
+    assert payload["n_accounts"] == len(v)
+    assert (payload["score_min"], payload["score_median"], payload["score_max"]) == (
+        round(v["score"].min(), 2), round(v["score"].median(), 2), round(v["score"].max(), 2))
+    assert sum(s["n_leading"] for s in payload["signals"]) == len(v)  # every account has one largest signal
     for s in payload["signals"]:
         cells = [(r[f"v{k}"]) for _, r in v.iterrows() for k in (1, 2, 3)
                  if r[f"f{k}"] == s["feature"] and r[f"c{k}"].rsplit(" ", 1)[0] == s["signal"]]
         assert s["n_accounts"] == len(cells) and s["mean_contribution"] == round(float(np.mean(cells)), 2)
         assert s["share_pct"] == round(100 * len(cells) / len(v))
+        assert s["n_leading"] == sum(r["f1"] == s["feature"] and r["c1"].rsplit(" ", 1)[0] == s["signal"]
+                                     for _, r in v.iterrows())
     counts = [w["n_accounts"] for w in payload["top_words"]]
     assert counts == sorted(counts, reverse=True)
     assert [s["n_accounts"] for s in payload["signals"]] == sorted((s["n_accounts"] for s in payload["signals"]), reverse=True)
@@ -163,7 +173,7 @@ def test_test_metric_keys_match_the_loop_tab():
 
 def test_empty_verify_band_gives_no_accounts():
     p = a4_input(frame(), [], 0, test_ids=[])
-    assert p["n_accounts"] == 0 and p["accounts"] == [] and p["score_min"] is None
+    assert p["n_accounts"] == 0 and p["signals"] == [] and p["score_min"] is None
 
 
 # --- numbers in input ------------------------------------------------------------------------------
@@ -191,7 +201,8 @@ def test_valid_output_passes(payload):
 @pytest.mark.parametrize("change, reason", [
     ({"based_on": ["age"]}, UNKNOWN_FIELD),
     ({"based_on": ["logit_text_score", "logit_text_score"]}, UNKNOWN_FIELD),
-    ({"batch_reason": "Most are 15 years old."}, NUMBER_NOT_IN_INPUT),
+    ({"batch_reason": "Exactly 987654 accounts."}, NUMBER_NOT_IN_INPUT),
+    ({"batch_reason": "Most are 15 years old."}, AGE_CLAIM),
 ])
 def test_bad_outputs_are_rejected(payload, change, reason):
     got, errors = validate_output(good_output(payload) | change, payload)
@@ -216,20 +227,53 @@ def test_fallback_note_stays_under_the_limit_with_long_signals(payload):
     assert len(out["batch_reason"]) <= A4_MAX_NOTE_CHARS and validate_output(out, p) == (None, [])
 
 
-def test_fallback_on_the_real_model_and_data():
+@pytest.fixture(scope="module")
+def real_band(tmp_path_factory):
+    """75 verify-band accounts of a real train batch, scored by a stack fit on the rest of train."""
     from softsignal.explain import apply_bands, explain_frame
     from softsignal.stack import Stack
     from softsignal.text_model import build_matrix
 
     train, _ = load_data(on_param_mismatch="error")
     rest, batch = train.iloc[300:], train.iloc[:300]
-    model = Stack.fit(rest, tm=build_matrix(train[ID_COL]), train_ids=train[ID_COL])
-    f = apply_bands(explain_frame(model, batch.drop(columns=TARGET)), 0.4, 0.9)
-    ids = f.loc[f["band"] == "verify", ID_COL].head(75)
-    p = a4_input(f, ids, 1)
+    tm = build_matrix(train[ID_COL], cache_dir=tmp_path_factory.mktemp("cache"))
+    model = Stack.fit(rest, tm=tm, train_ids=train[ID_COL])
+    f = apply_bands(explain_frame(model, batch.drop(columns=TARGET)), 0.4, 0.6)
+    ids = f.loc[f["band"] == "verify"].sort_values("score", ascending=False)[ID_COL].head(75)
+    return f, ids, a4_input(f, ids, 1)
+
+
+def test_fallback_on_the_real_model_and_data(real_band):
+    _, ids, p = real_band
     out = fallback_output(p)
-    assert p["n_accounts"] == len(ids) > 0 and validate_output(out, p) == (None, [])
+    assert p["n_accounts"] == len(ids) == 75 and validate_output(out, p) == (None, [])
     assert set(out["based_on"]) <= {s["feature"] for s in p["signals"]}
+
+
+def test_invented_batch_figures_are_rejected_on_real_data(real_band):
+    # review finding 1: with per-account ranks in the input, every count 1..75 passed the check
+    f, ids, p = real_band
+    allowed = set(numbers_in(json.dumps(p)))
+    free_count = next(k for k in range(2, 75) if k not in allowed)
+    free_pct = next(k for k in range(5, 95) if k not in allowed)
+    one_value = next(v for v in f.loc[f[ID_COL].isin(ids), "v1"].round(2) if v not in allowed)
+    feature = p["signals"][0]["feature"]
+    for note in (f"Roughly {free_count} of the 75 accounts use the word lol.",
+                 f"About {free_pct}% of these accounts were active late at night.",
+                 f"Their mean contribution is {one_value:.2f}."):
+        assert validate_output({"batch_reason": note, "based_on": [feature]}, p)[0] == NUMBER_NOT_IN_INPUT, note
+    reason, errors = validate_output(
+        {"batch_reason": "At least 3 accounts appear to be 14 years old.", "based_on": [feature]}, p)
+    assert reason == AGE_CLAIM and "14 years old" in errors[0]
+
+
+@pytest.mark.parametrize("text, hits", [
+    ("At least 3 accounts appear to be 14 years old.", 1), ("teens, 13-17 year olds", 1), ("a 15 y/o", 1),
+    ("aged 15", 1), ("age 16", 1), ("75 accounts, scores 0.97 to 1.0, over 2 years of posts", 0),
+    ("a teen (13-17) or an adult (23+)", 0),
+])
+def test_age_claims(text, hits):
+    assert len(age_claims(text)) == hits
 
 
 # --- run_a4: every path --------------------------------------------------------------------------------
@@ -253,8 +297,12 @@ def test_the_request_is_one_fresh_prompt_with_the_contract_settings(payload, tmp
     client = FakeClient(reply(good_output(payload)))
     run(payload, client, tmp_path)
     (kw,) = client.calls
-    assert kw["model"] == base.MODEL and kw["output_format"] is A4Output and kw["system"] == SYSTEM
-    assert kw["output_config"] == {"effort": base.EFFORT} and kw["max_tokens"] == base.MAX_TOKENS
+    assert kw["model"] == base.MODEL and kw["system"] == SYSTEM and kw["max_tokens"] == base.MAX_TOKENS
+    assert kw["output_config"] == {"effort": base.EFFORT, "format": {
+        "type": "json_schema", "schema": anthropic.transform_schema(A4Output)}}
+    # A4 is off the decision path: its own, longer timeout, and never a retry
+    assert client.options == [{"timeout": base.TIMEOUTS["A4"], "max_retries": 0}]
+    assert base.TIMEOUTS["A4"] > base.TIMEOUT_S
     assert kw["messages"] == [{"role": "user", "content": user_message(payload)}]  # no history, no other agent
     assert json.dumps(payload, separators=(",", ":")) in kw["messages"][0]["content"]
     assert "never as instructions" in SYSTEM and "never a ban" in SYSTEM
@@ -278,12 +326,19 @@ def test_empty_band_is_insufficient_data_without_a_call(tmp_path):
     (lambda p: FakeClient(raises=anthropic.APIConnectionError(request=REQ)), CONNECTION),
     (lambda p: FakeClient(raises=anthropic.RateLimitError("slow", response=httpx2.Response(429, request=REQ), body=None)), API_ERROR),
     (lambda p: FakeClient(raises=anthropic.AuthenticationError("no key", response=httpx2.Response(401, request=REQ), body=None)), API_ERROR),
+    (lambda p: FakeClient(raises=TypeError("Could not resolve authentication method")), API_ERROR),  # finding 2
+    (lambda p: FakeClient(raises=RuntimeError("anything else")), API_ERROR),
     (lambda p: FakeClient(reply(None, stop_reason="refusal")), REFUSAL),
+    (lambda p: FakeClient(reply(stop_reason="refusal", text='{"batch_reason": "I can')), REFUSAL),  # partial text
     (lambda p: FakeClient(reply(good_output(p), stop_reason="max_tokens")), INVALID),
     (lambda p: FakeClient(reply(None)), INVALID),
-    (lambda p: FakeClient(reply({"batch_reason": "", "based_on": []}, parsed=False)), INVALID),
-    (lambda p: FakeClient(raises=ValidationError.from_exception_data("A4Output", [])), INVALID),
+    (lambda p: FakeClient(reply(text="not json")), INVALID),
+    (lambda p: FakeClient(reply({"batch_reason": "", "based_on": []})), INVALID),
+    (lambda p: FakeClient(reply({"batch_reason": "x" * 700, "based_on": ["logit_text_score"]})), INVALID),
+    (lambda p: FakeClient(reply(good_output(p) | {"extra": 1})), INVALID),
+    (lambda p: FakeClient(SimpleNamespace(stop_reason="end_turn")), INVALID),  # a malformed reply object
     (lambda p: FakeClient(reply(good_output(p) | {"batch_reason": "About 999 teens here."})), NUMBER_NOT_IN_INPUT),
+    (lambda p: FakeClient(reply(good_output(p) | {"batch_reason": "They seem 15 years old."})), AGE_CLAIM),
     (lambda p: FakeClient(reply(good_output(p) | {"based_on": ["gender"]})), UNKNOWN_FIELD),
 ])
 def test_every_failure_falls_back_to_the_template(payload, tmp_path, make, reason):
@@ -295,6 +350,22 @@ def test_every_failure_falls_back_to_the_template(payload, tmp_path, make, reaso
     assert records[-1]["status"] == FALLBACK and records[-1]["step"] == "fallback"
     assert all(r["status"] == FALLBACK for r in records)  # a rejected model reply is not logged LIVE
     assert round_agent_summary(records, 3, "test-run")["A4"]["status"] == FALLBACK
+
+
+def test_a_rejected_note_is_kept_for_review_but_not_used(payload, tmp_path):
+    bad = good_output(payload) | {"batch_reason": "About 999 teens here."}
+    result, _ = run(payload, FakeClient(reply(bad)), tmp_path)
+    assert result.output == fallback_output(payload) and json.loads(result.rejected) == bad
+    assert result.block()["rejected"] == result.rejected
+    ok, _ = run(payload, FakeClient(reply(good_output(payload))), tmp_path)
+    assert ok.rejected is None
+
+
+def test_numpy_round_ids_do_not_break_the_prompt(payload):
+    df = frame()
+    p = a4_input(df, df.loc[df["band"] == "verify", ID_COL], np.int64(4), test_ids=[])
+    assert p["round"] == 4 and type(p["round"]) is int
+    user_message(payload | {"round": np.int64(4)})  # review: json.dumps raised on numpy ints
 
 
 def test_real_sdk_request_through_a_mocked_transport(payload, tmp_path):
@@ -314,7 +385,7 @@ def test_real_sdk_request_through_a_mocked_transport(payload, tmp_path):
     assert (result.status, result.output) == (LIVE, out) and records[0]["tokens_in"] == 1500
     body = seen["body"]
     assert body["model"] == base.MODEL and body["output_config"]["effort"] == base.EFFORT
-    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert body["output_config"]["format"]["type"] == "json_schema" and body["max_tokens"] == base.MAX_TOKENS
     assert set(body["output_config"]["format"]["schema"]["properties"]) == {"batch_reason", "based_on"}
     assert "temperature" not in body and len(body["messages"]) == 1
 
@@ -324,8 +395,15 @@ def test_real_sdk_request_through_a_mocked_transport(payload, tmp_path):
 def test_make_client_is_offline_without_credentials(monkeypatch, tmp_path):
     for k in base.CREDENTIAL_ENV:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(base, "PROFILE_DIR", tmp_path / "no-profile")
+    monkeypatch.delenv("SOFTSIGNAL_OFFLINE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_CONFIG_DIR", str(tmp_path / "anthropic"))
     assert base.make_client() is None
+    creds = tmp_path / "anthropic" / "credentials"
+    creds.mkdir(parents=True)  # review finding 2: an empty CLI folder is not a login
+    assert not base.has_credentials() and base.make_client() is None
+    (creds / "default.json").write_text("{}")
+    assert base.has_credentials()
+    (creds / "default.json").unlink()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     client = base.make_client()
     assert client is not None and client.max_retries == 0 and client.timeout == base.TIMEOUT_S == 4.0
@@ -349,9 +427,9 @@ def test_block_is_a_valid_decisions_record_and_renders(payload, tmp_path):
 
     at = AppTest.from_function(card, kwargs={"rec": record}).run()
     assert not at.exception
-    assert any(good_output(payload)["batch_reason"] in c.value for c in at.caption)
+    assert any(plain(good_output(payload)["batch_reason"]) == c.value for c in at.caption)
     from softsignal.explain import FEATURE_NAMES
-    assert any(c.value == "Based on: " + FEATURE_NAMES[block["output"]["based_on"][0]] for c in at.caption)
+    assert any(c.value == "Based on: " + plain(FEATURE_NAMES[block["output"]["based_on"][0]]) for c in at.caption)
 
 
 def test_insufficient_a4_card_says_the_band_was_empty(tmp_path):
@@ -380,3 +458,20 @@ def test_merge_block_keeps_both_error_lists():
 def test_a4_cols_are_the_ranked_list_columns_it_needs():
     from softsignal.metrics import RANKED_COLS
     assert set(A4_COLS) <= set(RANKED_COLS)
+
+
+def test_model_text_is_shown_as_typed_not_rendered():
+    from streamlit.testing.v1 import AppTest
+
+    note = "See [this](http://evil.example) ![x](http://evil.example/a.png) $x$ **now**"
+    record = {"run": "r", "round": 1, "rule_decision": {}, "diff": {}, "applied": {"decision": {}, "source": "rule"},
+              "a4": {"status": LIVE, "output": {"batch_reason": note, "based_on": ["logit_text_score"]},
+                     "fallback_reason": None}}
+
+    def card(rec):
+        from softsignal import ui_loop
+        ui_loop.agent_card("a4", rec)
+
+    at = AppTest.from_function(card, kwargs={"rec": record}).run()
+    shown = next(c.value for c in at.caption if "evil" in c.value)
+    assert "](http" not in shown and r"\[this\]" in shown and r"\$x\$" in shown and r"\*\*now\*\*" in shown

@@ -4,11 +4,12 @@ Question: what should a human reviewer know about this batch's verify band? A4 w
 batch, after the round and off the decision path. It cannot change a score, a band or a label, and it never
 sees a label: in a real deployment the note is written before verification.
 
-Input: contracts.a4_input() (explain.py output for the accounts sent to verification, plus code-made
-aggregates; no ids, no labels, no test accounts). Output: schemas.A4Output {batch_reason, based_on}.
-Checks: the schema, based_on cites only features in the input, and every number in the note appears in the
-input. Fallback: the explain.py sentence template lifted to the batch (fallback_output), badged FALLBACK.
-An empty verify band returns insufficient_data without a model call.
+Input: contracts.a4_input() (explain.py output for the accounts sent to verification, summarised for the
+batch in code; no per-account rows, no ids, no labels, no test accounts). Output: schemas.A4Output
+{batch_reason, based_on}. Checks: the schema, based_on cites only features in the input, every number in the
+note appears in the input, and no numeric age claim. Fallback: the explain.py sentence template lifted to the
+batch (fallback_output), badged FALLBACK. An empty verify band returns insufficient_data without a model
+call. A4 runs off the decision path, so its timeout is longer than the decision agents' (base.TIMEOUTS).
 
 How loop.py calls it, after reveal (A4 needs the batch's rows and scores, not its labels):
 
@@ -25,8 +26,8 @@ import sys
 
 from softsignal.agent_timer import AgentTimer
 from softsignal.agents.base import (
-    FALLBACK, INSUFFICIENT, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, call_model,
-    input_hash, numbers_not_in_input,
+    AGE_CLAIM, FALLBACK, INSUFFICIENT, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, age_claims,
+    call_model, input_hash, numbers_not_in_input,
 )
 from softsignal.agents.contracts import a4_input
 from softsignal.agents.schemas import A4_MAX_NOTE_CHARS, A4Output
@@ -37,17 +38,17 @@ to a teen (13-17) or an adult (23+) from how the person writes and how they use 
 birthday or a photo. A human reviewer is about to verify the accounts in this batch's verify band. Write them \
 one short note about the batch.
 
-The input is JSON:
+The input is JSON, a summary of the batch made in code:
 - n_accounts: accounts sent to verification in this batch.
-- score_min, score_max: their model scores, p(teen) from 0 to 1.
+- score_min, score_median, score_max: their model scores, p(teen) from 0 to 1.
 - signals: the model's explanations, grouped. Each has a feature key, a readable signal, n_accounts (how many \
-accounts have it among their three largest contributions), share_pct (that as a percent of the batch) and \
-mean_contribution (its average signed contribution on the logit scale; positive pushes toward teen).
+accounts have it among their three largest contributions), share_pct (that as a percent of the batch), \
+mean_contribution (its average signed contribution on the logit scale; positive pushes toward teen) and \
+n_leading (how many accounts have it as their single largest contribution).
 - top_words: teen-leaning words that recur across accounts, with how many accounts use each.
-- accounts: per account, its rank, score, three largest signed contributions and teen-leaning words.
 
 Rules:
-- Use only the input. Do not guess ages, identities, or anything the input does not say.
+- Use only the input. Never state or guess an age, an identity, or anything the input does not say.
 - Every number you write must appear in the input exactly as written there. Do not compute new numbers: no \
 sums, differences, averages or percentages that are not given.
 - based_on: 1 to 5 feature keys copied exactly from signals[].feature, most important first.
@@ -62,7 +63,7 @@ app activity, and how strong the scores are.
 def user_message(payload: dict) -> str:
     """The fresh per-call prompt: the input JSON in a tagged block, nothing else (no history, no other agent)."""
     return (f"Verify band for round {payload['round']}. Write the reviewer note.\n"
-            f"<input>\n{json.dumps(payload, separators=(',', ':'))}\n</input>")
+            f"<input>\n{json.dumps(payload, separators=(',', ':'), default=str)}\n</input>")
 
 
 def fallback_output(payload: dict) -> dict:
@@ -88,7 +89,11 @@ def fallback_output(payload: dict) -> dict:
 
 
 def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]:
-    """(fallback reason or None, errors): based_on cites only input features, every number is in the input."""
+    """(fallback reason or None, errors): no numeric age claim, based_on cites only input features, and every
+    number in the note is in the input (the batch summary: every number there is a batch-level fact)."""
+    ages = age_claims(output["batch_reason"])
+    if ages:
+        return AGE_CLAIM, [f"states an age: {ages}"]
     known = {s["feature"] for s in payload["signals"]}
     cites = output["based_on"]
     unknown = [f for f in cites if f not in known]
@@ -101,7 +106,7 @@ def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]
 
 
 def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: AgentTimer | None,
-              round_id) -> AgentResult:
+              round_id, rejected: str | None = None) -> AgentResult:
     """The deterministic path, timed as a tool call so the round summary shows A4 as FALLBACK."""
     rnd = {} if round_id is None else {"round_id": round_id}
     if timer is None:
@@ -109,7 +114,7 @@ def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: Agen
     else:
         with timer.call(AGENT, "fallback", "tool", status=FALLBACK, **rnd):
             output = INSUFFICIENT if reason == INSUFFICIENT else fallback_output(payload)
-    return AgentResult(AGENT, FALLBACK, output, reason, h, errors)
+    return AgentResult(AGENT, FALLBACK, output, reason, h, errors, rejected)
 
 
 def run_a4(payload: dict, client=None, timer: AgentTimer | None = None, round_id=None) -> AgentResult:
@@ -123,7 +128,7 @@ def run_a4(payload: dict, client=None, timer: AgentTimer | None = None, round_id
                        schema=A4Output, check=lambda out: validate_output(out, payload), timer=timer,
                        round_id=round_id)
     if reply.fallback_reason is not None:
-        return _fallback(payload, h, reply.fallback_reason, reply.errors, timer, round_id)
+        return _fallback(payload, h, reply.fallback_reason, reply.errors, timer, round_id, reply.raw)
     return AgentResult(AGENT, LIVE, reply.output, None, h)
 
 
@@ -157,7 +162,8 @@ def demo_batch(round_id: int = 1):
     frame = apply_bands(explain_frame(model, batch.rows), th.t_soft, th.t_verify)
     t_send = review_cutoff(frame["score"], th.t_verify, pol["review_budget"])
     verify_ids = frame.loc[frame["score"] >= t_send, ID_COL].tolist()
-    assert len(verify_ids) <= oracle.verify_budget(batch)
+    if len(verify_ids) > oracle.verify_budget(batch):  # review_cutoff guarantees this; never send over budget
+        raise RuntimeError(f"{len(verify_ids)} verify ids exceed the budget of {oracle.verify_budget(batch)}")
     return frame, verify_ids, test[ID_COL].tolist()
 
 

@@ -4,11 +4,13 @@ Each builder copies only the fields its agent's contract allows (Combined Plan s
 a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
 Only A4 is built so far; each owner adds theirs here.
 
-A4 (verify-band triager) gets explain.py's output for the accounts sent to verification: score, band, the
-top 3 signed contributions (as chips, which carry the signed values) and the teen-leaning words. No account
-ids: the note is about the batch, and an id is not evidence. Code adds aggregates of those same fields
-(signal counts, shares, mean contributions, recurring words), so the note can cite real numbers and the
-numbers-in-input check leaves it something to say.
+A4 (verify-band triager) gets explain.py's output for the accounts sent to verification (score, band, the
+top 3 signed contributions, the teen-leaning words), summarised in code for the batch: score range and
+median, each signal's account count, share and mean contribution, how many accounts each signal leads, and
+the recurring words. No per-account rows and no account ids: the note is about the batch, an id is not
+evidence, and per-account numbers (ranks 1..n, one account's contribution) would let the numbers-in-input
+check pass an invented count or one account's value presented as a batch figure. Every number in the
+input is a batch-level fact, so every number A4 may cite is one too. It also keeps the prompt short.
 """
 import json
 from collections import Counter
@@ -82,32 +84,32 @@ def a4_input(frame: pd.DataFrame, verify_ids, round_id: int | None, test_ids=Non
         raise ValueError("every verify id must appear exactly once in the frame")
     if (rows["band"] != "verify").any():
         raise ValueError("every verify id must be in the verify band")
-    rows = rows.sort_values(["score", ID_COL], ascending=[False, True], kind="stable")
-
-    accounts, groups, words = [], {}, Counter()
-    for rank, r in enumerate(rows.itertuples(index=False), start=1):
-        chips = [c for c in (r.c1, r.c2, r.c3) if isinstance(c, str) and c]
-        account_words = [w for w in str(r.words).split(", ") if w] if isinstance(r.words, str) else []
-        accounts.append({"rank": rank, "score": round(float(r.score), 2), "signals": chips, "words": account_words})
-        for f, c, v in zip((r.f1, r.f2, r.f3), (r.c1, r.c2, r.c3), (r.v1, r.v2, r.v3)):
-            if isinstance(f, str) and f and isinstance(c, str) and c:
-                groups.setdefault((f, _phrase(c)), []).append(float(v))
-        words.update(set(account_words))
-    n = len(accounts)
+    groups, leads, words = {}, Counter(), Counter()
+    for r in rows.itertuples(index=False):
+        top = [(f, _phrase(c), float(v)) for f, c, v in zip((r.f1, r.f2, r.f3), (r.c1, r.c2, r.c3), (r.v1, r.v2, r.v3))
+               if isinstance(f, str) and f and isinstance(c, str) and c]
+        for f, p, v in top:
+            groups.setdefault((f, p), []).append(v)
+        if top:  # c1 is the account's largest contribution by size
+            leads[top[0][:2]] += 1
+        words.update({w for w in str(r.words).split(", ") if w} if isinstance(r.words, str) else set())
+    n = len(rows)
     signals = [{"feature": f, "signal": p, "n_accounts": len(v), "share_pct": round(100 * len(v) / n),
-                "mean_contribution": round(float(np.mean(v)), 2)} for (f, p), v in groups.items()]
+                "mean_contribution": round(float(np.mean(v)), 2), "n_leading": leads[(f, p)]}
+               for (f, p), v in groups.items()]
     signals.sort(key=lambda s: (-s["n_accounts"], -abs(s["mean_contribution"]), s["feature"], s["signal"]))
+    score = rows["score"].astype(float)
     payload = {
         "agent": "A4",
-        "round": round_id,
+        "round": None if round_id is None else int(round_id),
         "band": "verify",
         "n_accounts": n,
-        "score_min": round(float(rows["score"].min()), 2) if n else None,
-        "score_max": round(float(rows["score"].max()), 2) if n else None,
+        "score_min": round(float(score.min()), 2) if n else None,
+        "score_median": round(float(score.median()), 2) if n else None,
+        "score_max": round(float(score.max()), 2) if n else None,
         "signals": signals,
         "top_words": [{"word": w, "n_accounts": k}
                       for w, k in sorted(words.items(), key=lambda kv: (-kv[1], kv[0]))[:A4_TOP_WORDS]],
-        "accounts": accounts,
     }
     check_barrier(payload)
     return payload

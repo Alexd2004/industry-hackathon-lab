@@ -15,17 +15,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from softsignal.explain import ACTIONS, BANDS, FEATURE_NAMES, FRAME_COLS, apply_bands, chip
+from softsignal.explain import ACTIONS, BANDS, FEATURE_NAMES, FRAME_COLS, SLIDER_CAPS, apply_bands, chip
 from softsignal.features import ID_COL
 from softsignal.metrics import CONTRIB_COLS, DEFAULT_CAP, EVAL_COLS, POLICY_GRID_COLS, RANKED_COLS
-from softsignal.policy import SOFT_CAPPED, load_policy
+from softsignal.policy import POLICY_FILE, SOFT_CAPPED, load_policy
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 EVAL_CSV = RESULTS / "eval.csv"
 PLACEHOLDER_CSV = RESULTS / "eval_placeholder.csv"
 NUMERIC_COLS = [c for c in EVAL_COLS if c not in ("stage", "eval_set")]
+POLICY_PATH = POLICY_FILE  # read once per rerun (tests point it elsewhere)
 RANKED_FILE, GRID_FILE, CONTRIB_FILE = "ranked.csv", "policy_grid.csv", "contrib.csv"
-CAP_MIN_PCT, CAP_MAX_PCT = 8, 30  # the plan's cap clamp; policy_grid.csv holds one row per point
 N_SHOWN = 15
 VIEWS = ("Top of the list", "Around the verify cutoff")
 SENT, QUEUED = "sent now", "queued (over budget)"
@@ -233,29 +233,26 @@ def detail_chart(detail: pd.DataFrame) -> alt.Chart:
     )
 
 
-def _default_cap_pct() -> int:
+def read_policy() -> tuple[dict | None, str | None]:
+    """(policy.yaml, None), or (None, why) when it cannot be read: the tab then uses the default cap."""
     try:
-        cap = load_policy()["cap_false_teen"]
-    except (OSError, ValueError):
-        cap = DEFAULT_CAP
-    return min(max(round(cap * 100), CAP_MIN_PCT), CAP_MAX_PCT)
+        return load_policy(POLICY_PATH), None
+    except (OSError, ValueError) as e:
+        return None, str(e)
 
 
-def _budget() -> float | None:
-    try:
-        return load_policy()["review_budget"]
-    except (OSError, ValueError):
-        return None
+def slider_bounds(files: PolicyFiles | None) -> tuple[int, int]:
+    """Slider range in whole percent: the caps policy_grid.csv holds, else the caps explain.py writes."""
+    caps = files.grid["cap"] if files is not None else pd.Series(SLIDER_CAPS)
+    return round(caps.min() * 100), round(caps.max() * 100)
 
 
 # --- policy panel: render -----------------------------------------------------------------
 
-def render_policy_panel(cap: float) -> None:
+def render_policy_panel(cap: float, files: PolicyFiles | None, error: str | None, budget: float | None) -> None:
     st.subheader("Policy and ranked likely-teen list")
-    try:
-        files = load_policy_files()
-    except ValueError as e:
-        st.error(f"Cannot show the ranked list: {e}")
+    if error is not None:
+        st.error(f"Cannot show the ranked list: {error}")
         return
     if files is None:
         st.info(NO_FILES)
@@ -271,7 +268,6 @@ def render_policy_panel(cap: float) -> None:
                    "runs. Rerun python -m softsignal.explain.")
 
     n_queued = int(row["n_flagged"] - row["n_verify"])
-    budget = _budget()
     budget_txt = f"{budget:.0%} review budget" if budget is not None else "review budget"
     t1, t2, t3, t4 = st.columns(4)
     t1.metric("Flagged for verification", f"{int(row['n_flagged'])} ({row['flagged_share']:.0%})")
@@ -285,11 +281,12 @@ def render_policy_panel(cap: float) -> None:
     u1, u2, u3, u4 = st.columns(4)
     u1.metric("Sent to verification now", str(int(row["n_verify"])))
     u1.caption(f"{budget_txt}; score >= {row['t_budget']:.3f}")
-    u2.metric("Recall, sent now", _pct(row["rec_verify"]))
-    u3.metric("False-teen, sent now", _pct(row["ft_verify"]))
-    u4.metric("Precision, sent now", _pct(row["prec_verify"]))
+    u2.metric("Recall, sent now", _pct(row["rec_sent"]))
+    u3.metric("False-teen, sent now", _pct(row["ft_sent"]))
+    u4.metric("Precision, sent now", _pct(row["prec_sent"]))
     notes = [f"Rates on the {int(row['n'])} held-out test accounts (labels used for these totals only; "
-             "the list below carries none)."]
+             "the list below carries none). They are for reporting: the cap is a policy choice (policy.yaml), "
+             "never tuned on them."]
     if row["budget_binding"]:
         notes.append(f"The verify band is over the {budget_txt}: the top {int(row['n_verify'])} by score are sent "
                      f"now and the other {n_queued} stay flagged, queued for review (policy.py: the cap wins, "
@@ -360,7 +357,16 @@ def render_results_tab() -> None:
 
     tag = " (projected)" if is_placeholder else ""
     shown = headline_rows(ladder, is_placeholder)
-    cap_pct = st.slider("False-teen cap", CAP_MIN_PCT, CAP_MAX_PCT, _default_cap_pct(), 1, format="%d%%",
+    pol, pol_error = read_policy()
+    if pol_error is not None:
+        st.warning(f"policy.yaml cannot be used ({pol_error}); the slider starts at {DEFAULT_CAP:.0%}.")
+    try:
+        files, files_error = load_policy_files(), None
+    except ValueError as e:
+        files, files_error = None, str(e)
+    lo, hi = slider_bounds(files)
+    default = min(max(round((pol or {}).get("cap_false_teen", DEFAULT_CAP) * 100), lo), hi)
+    cap_pct = st.slider("False-teen cap", lo, hi, default, 1, format="%d%%",
                         key="cap_pct", help="The share of adults you accept sending to teen mode. Re-bands the list "
                         "below from policy_grid.csv; the ladder tile picks the best row within the cap.")
     cap = cap_pct / 100
@@ -394,6 +400,6 @@ def render_results_tab() -> None:
 
     st.caption(CI_NOTE)
     st.divider()
-    render_policy_panel(cap)
+    render_policy_panel(cap, files, files_error, (pol or {}).get("review_budget"))
     st.divider()
     st.caption(FOOTER)

@@ -241,13 +241,18 @@ def _readable_mode() -> int:
     return 0o666 & ~mask
 
 
-def _write_csv(df: pd.DataFrame, path: Path) -> None:
-    """Write via a temp file and rename, so the app never reads a half-written file."""
+CONTRIB_FLOAT_FORMAT = "%.12g"  # last-bit BLAS / sklearn noise does not rewrite the committed 1.8 MB file
+
+
+def _write_csv(df: pd.DataFrame, path: Path, float_format: str | None = None) -> None:
+    """Write via a temp file and rename, so the app never reads a half-written file.
+
+    float_format=None writes every float exactly (scores and cutoffs that sit 1 ulp apart must survive)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".csv.tmp")
     try:
         with os.fdopen(fd, "w", newline="") as f:
-            df.to_csv(f, index=False)
+            df.to_csv(f, index=False, float_format=float_format)
         os.chmod(tmp, _readable_mode())  # other readers (a container, CI, the demo account) need access
         os.replace(tmp, path)
     finally:
@@ -267,7 +272,7 @@ def write_contrib(df: pd.DataFrame, path: Path = CONTRIB) -> None:
     per_account = df.groupby(ID_COL, sort=False)["feature"].apply(frozenset)
     if per_account.nunique() != 1 or df.duplicated([ID_COL, "feature"]).any():
         raise ValueError("every account must have each level-2 feature exactly once")
-    _write_csv(df, path)
+    _write_csv(df, path, CONTRIB_FLOAT_FORMAT)  # display only: 12 digits keep the logit sum exact to ~1e-10
 
 
 def contrarian_candidates(model: Stack, df: pd.DataFrame, t_verify: float, n: int = 5,
@@ -317,16 +322,16 @@ def policy_grid(oof, y_oof, scores, y, soft_recall: float, budget: float,
         th = pick_thresholds(oof, y_oof, cap=cap, soft_recall=soft_recall)
         t_budget = review_cutoff(scores, th.t_verify, budget)
         sent = scores >= t_budget
-        flagged = band_summary(assign_bands(scores, th), budget, y)
+        flagged = band_summary(assign_bands(scores, th), budget, y)  # its *_verify keys = the verify band
         oof_flagged = band_summary(assign_bands(oof, th), budget, y_oof)
-        prec_v, rec_v, ft_v, _ = prf(y, sent.astype(int))
+        prec_s, rec_s, ft_s, _ = prf(y, sent.astype(int))
         rows.append({
             "cap": round(cap, 4), "t_verify": th.t_verify, "t_soft": th.t_soft, "t_budget": t_budget,
             "flags": ",".join(th.flags), "n": len(scores), "n_flagged": flagged["n_verify"],
             "n_verify": int(sent.sum()), "n_soft": flagged["n_soft"], "n_none": flagged["n_none"],
             "flagged_share": flagged["verify_share"], "budget_binding": flagged["budget_binding"],
-            "rec_flagged": flagged["rec_verify"], "ft_flagged": flagged["ft_verify"], "prec_verify": prec_v,
-            "rec_verify": rec_v, "ft_verify": ft_v, "rec_soft_up": flagged["rec_soft_up"],
+            "rec_flagged": flagged["rec_verify"], "ft_flagged": flagged["ft_verify"], "prec_sent": prec_s,
+            "rec_sent": rec_s, "ft_sent": ft_s, "rec_soft_up": flagged["rec_soft_up"],
             "ft_soft_up": flagged["ft_soft_up"], "oof_rec_flagged": oof_flagged["rec_verify"],
             "oof_ft_flagged": oof_flagged["ft_verify"],
         })
@@ -366,7 +371,7 @@ def main() -> None:
     print(f"review budget {budget:.0%}: {int(row['n_verify'])} of {int(row['n_flagged'])} flagged accounts "
           f"are sent to verification now (t_budget {row['t_budget']:.3f})")
     print(f"test (report only): flagged recall {row['rec_flagged']:.3f}, false-teen {row['ft_flagged']:.3f}; "
-          f"sent recall {row['rec_verify']:.3f}, false-teen {row['ft_verify']:.3f}, precision {row['prec_verify']:.3f}")
+          f"sent recall {row['rec_sent']:.3f}, false-teen {row['ft_sent']:.3f}, precision {row['prec_sent']:.3f}")
     by_id = test.set_index(ID_COL)[TARGET].reindex(out[ID_COL])
     print("top-k precision (test labels, report only):",
           ", ".join(f"top-{k} {top_k_precision(by_id, out['score'], k):.3f}" for k in (100, 200, 300)))

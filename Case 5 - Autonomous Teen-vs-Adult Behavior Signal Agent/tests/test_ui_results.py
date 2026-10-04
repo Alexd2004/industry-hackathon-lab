@@ -377,3 +377,22 @@ def test_words_show_only_for_flagged_accounts():
                          "action": ["Request verification", "No action"], "queue": [ui_results.SENT, ""],
                          "c1": ["x +1.00", "y -1.00"], "c2": ["", ""], "c3": ["", ""], "words": ["lol", "lol"]})
     assert ui_results.list_table(rows)["teen-leaning words"].tolist() == ["lol", ""]
+
+
+def test_malformed_policy_yaml_does_not_break_the_tab(placeholder_only, tmp_path, monkeypatch):
+    bad = tmp_path / "bad_policy.yaml"
+    bad.write_text("cap_false_teen: [0.15\n")
+    monkeypatch.setattr(ui_results, "POLICY_PATH", bad)
+    at = AppTest.from_function(render).run()
+    assert not at.exception and at.slider[0].value == 15  # the default cap
+    assert any("policy.yaml cannot be used" in w.value for w in at.warning)
+    assert any(FOOTER in c.value for c in at.caption)
+
+
+def test_slider_range_comes_from_the_grid(tmp_path):
+    from softsignal.explain import SLIDER_CAPS
+
+    assert ui_results.slider_bounds(None) == (round(min(SLIDER_CAPS) * 100), round(max(SLIDER_CAPS) * 100)) == (8, 30)
+    files = tiny_files(tmp_path, 0.95)
+    files.grid = pd.concat([files.grid.assign(cap=c) for c in (0.10, 0.15, 0.20)], ignore_index=True)
+    assert ui_results.slider_bounds(files) == (10, 20)

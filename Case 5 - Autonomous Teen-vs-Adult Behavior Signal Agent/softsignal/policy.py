@@ -48,9 +48,13 @@ SOFT_CAPPED = "soft_capped"
 
 
 def load_policy(path: Path = POLICY_FILE) -> dict:
-    """policy.yaml as a dict. Raises on missing or unknown keys, wrong types or out-of-range values."""
+    """policy.yaml as a dict. Raises ValueError on a YAML syntax error, missing or unknown keys, wrong types or
+    out-of-range values (OSError if the file cannot be read)."""
     with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+        try:
+            raw = yaml.safe_load(f)
+        except yaml.YAMLError as e:  # one error type for callers (the Results tab catches ValueError)
+            raise ValueError(f"{path} is not valid YAML: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must hold a mapping of policy keys")
     if set(raw) != set(POLICY_KEYS):

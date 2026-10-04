@@ -6,6 +6,7 @@ replay are stubs here.
 """
 import io
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -238,6 +239,14 @@ def _is_insufficient(block: dict) -> bool:
             or (isinstance(out, dict) and out.get("drift") == "insufficient_data"))
 
 
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$])")
+
+
+def plain(text) -> str:
+    """Model-written text shown as typed: Markdown, links, images and $math$ are escaped, never rendered."""
+    return _MD_SPECIAL.sub(r"\\\1", str(text))
+
+
 def _dicts(items) -> list[dict]:
     """The dict entries of a list; anything else (a model's malformed output) gives []."""
     return [x for x in items if isinstance(x, dict)] if isinstance(items, list) else []
@@ -246,23 +255,23 @@ def _dicts(items) -> list[dict]:
 def _card_body(key: str, block: dict, decision: dict) -> None:
     out = block["output"]
     if key == "a1" and isinstance(out, dict):
-        st.markdown(f"**Drift:** {out.get('drift', '?')}")
-        st.caption(str(out.get("reason", "")))
+        st.markdown(f"**Drift:** {plain(out.get('drift', '?'))}")
+        st.caption(plain(out.get("reason", "")))
     elif key == "a3" and isinstance(out, dict):
         pats = _dicts(out.get("patterns"))
-        st.markdown(f"**Top pattern:** {pats[0].get('description', '?')}" if pats else "No pattern found.")
+        st.markdown(f"**Top pattern:** {plain(pats[0].get('description', '?'))}" if pats else "No pattern found.")
         for ch in _dicts(out.get("suggested_param_changes")):
-            st.caption(f"Suggests {ch.get('param')} {ch.get('direction')}: {ch.get('reason', '')}")
+            st.caption(plain(f"Suggests {ch.get('param')} {ch.get('direction')}: {ch.get('reason', '')}"))
     elif key == "a2":
         if isinstance(out, dict):
-            st.markdown(f"**Action:** {out.get('action', '?')}")
-            st.caption(str(out.get("reason", "")))
+            st.markdown(f"**Action:** {plain(out.get('action', '?'))}")
+            st.caption(plain(out.get("reason", "")))
         st.dataframe(diff_table(decision), hide_index=True, width="stretch")
     elif key == "a4" and isinstance(out, dict):
-        st.caption(str(out.get("batch_reason", "")))  # no labels next to A4 notes
+        st.caption(plain(out.get("batch_reason", "")))  # no labels next to A4 notes
         cites = [FEATURE_NAMES.get(f, f) for f in out.get("based_on", []) if isinstance(f, str)]
         if cites:
-            st.caption("Based on: " + ", ".join(cites))
+            st.caption("Based on: " + plain(", ".join(cites)))
     elif key == "a5" and isinstance(out, list):
         verdicts = pd.Series([str(c.get("verdict")) for c in _dicts(out)]).value_counts()
         st.caption(", ".join(f"{n} {v}" for v, n in verdicts.items()) or "No claims checked.")

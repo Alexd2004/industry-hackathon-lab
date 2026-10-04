@@ -268,6 +268,12 @@ def test_contrib_table_is_long_exact_and_aligned(fitted, tmp_path):
         assert np.allclose(rows.loc[exp.contrib.columns, "contrib"], exp.contrib.iloc[0])
         assert np.allclose(rows.loc[exp.raw.columns, "raw"], exp.raw.iloc[0].astype(float))
     ex.write_contrib(table, tmp_path / "contrib.csv")
+    # written at 12 significant digits: still exact enough for the detail card's logit check (abs_tol 1e-9)
+    back = pd.read_csv(tmp_path / "contrib.csv", dtype={ID_COL: str}, float_precision="round_trip")
+    per = back.groupby(ID_COL, sort=False)
+    rebuilt = per["intercept"].first() + per["contrib"].sum()
+    score = per["score"].first()
+    assert np.abs(1 / (1 + np.exp(-rebuilt)) - score).max() < 1e-9
 
 
 @pytest.mark.parametrize("damage", ["drop_col", "drop_feature_row", "duplicate_row"])
@@ -351,7 +357,7 @@ def test_policy_grid_rows_follow_policy_py():
         assert row.t_budget == ex.review_cutoff(scores, th.t_verify, 0.25)
         assert row.n_verify == sent.sum() <= len(scores) // 4 and not (sent & (bands != "verify")).any()
         assert row.budget_binding == (row.n_flagged / row.n > 0.25)
-        assert (row.prec_verify, row.rec_verify, row.ft_verify) == pytest.approx(prf(y, sent.astype(int))[:3])
+        assert (row.prec_sent, row.rec_sent, row.ft_sent) == pytest.approx(prf(y, sent.astype(int))[:3])
         assert (row.rec_flagged, row.ft_flagged) == pytest.approx(prf(y, (bands == "verify").astype(int))[1:3])
         assert row.oof_ft_flagged <= row.cap + 1e-12  # the cap holds on the scores it was picked from
 
