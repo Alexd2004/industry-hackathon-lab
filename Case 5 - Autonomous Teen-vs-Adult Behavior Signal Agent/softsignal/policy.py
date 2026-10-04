@@ -6,6 +6,9 @@ verify: score >= t_verify, sent to a human. t_verify is the cutoff that keeps fa
 soft:   t_soft <= score < t_verify, softer action. t_soft is the (1 - soft_recall) quantile of teen
         scores (method="lower"), so the soft band and above reach at least soft_recall of teens.
 none:   below t_soft.
+An account with no score yet (NaN, a new account) is put in the soft band whatever the thresholds are,
+so when SOFT_CAPPED has emptied that band the soft band holds only unscored accounts; band_summary
+cannot tell them apart from scored ones, so its soft_up rates include them.
 
 Thresholds come from honest out-of-fold scores only (cache/stack_oof.csv, written by stack.py), never
 from test. Decisions: the cap wins over review_budget (the verify band is never truncated, budget_binding
@@ -38,6 +41,7 @@ POLICY_KEYS = {
 }
 MIN_CLASS = 5  # fewer audit adults (or teens) than this: keep the prior threshold
 BANDS = ("verify", "soft", "none")
+LADDER_CAPS = (0.10, 0.05)  # reported next to the policy cap by main(); the ladder rows use these
 INSUFFICIENT_ADULTS = "insufficient_adults"
 INSUFFICIENT_TEENS = "insufficient_teens"
 SOFT_CAPPED = "soft_capped"
@@ -90,7 +94,8 @@ def load_audit_slice(train: pd.DataFrame, path: Path = STACK_OOF) -> pd.DataFram
     """
     try:
         meta = json.loads(meta_path(path).read_text(encoding="utf-8"))
-        stored = meta["cache_key"] if isinstance(meta, dict) and meta.get("use_text") is True else None
+        ok = isinstance(meta, dict) and meta.get("use_text") is True and meta.get("n") == len(train)
+        stored = meta["cache_key"] if ok else None
     except (OSError, ValueError, KeyError):
         stored = None
     if stored is None or stored != oof_cache_key(train, use_text=True):
@@ -117,8 +122,10 @@ def pick_thresholds(
     Flags: INSUFFICIENT_ADULTS (fewer than MIN_CLASS adults: the prior is returned as is, with this
     flag and the new counts, so its cap and margin stay the ones its cutoffs were picked for; prior is
     required); INSUFFICIENT_TEENS (t_soft is the prior's, else t_verify); SOFT_CAPPED (t_soft would sit
-    above t_verify, so it is lowered to t_verify and the soft band is empty; recall is then still at
-    least soft_recall, because that many teens already score above t_verify).
+    above t_verify, so it is lowered to t_verify and the soft band is empty). With enough teens,
+    SOFT_CAPPED still leaves recall at least soft_recall, because that many teens already score above
+    t_verify. With INSUFFICIENT_TEENS the prior's t_soft was not picked from these scores, so both flags
+    can appear together and soft_recall is not guaranteed.
     """
     scores, y = np.asarray(scores, dtype=float), as_binary(y)
     if scores.shape != y.shape:
@@ -171,6 +178,11 @@ def band_summary(bands, review_budget: float, y=None) -> dict:
     return out
 
 
+def caps_to_report(cap: float) -> list[float]:
+    """The policy cap and the ladder caps, largest first, each once."""
+    return sorted({cap, *LADDER_CAPS}, reverse=True)
+
+
 def main() -> None:
     pol = load_policy()
     train, test = load_data(on_param_mismatch="error")
@@ -180,18 +192,19 @@ def main() -> None:
     print(f"audit slice: {len(audit)} train accounts (nested OOF), review_budget {pol['review_budget']:.0%}, "
           f"soft_recall {pol['soft_recall']:.0%}")
     rows = []
-    for cap in (pol["cap_false_teen"], 0.10, 0.05):
+    for cap in caps_to_report(pol["cap_false_teen"]):
         th = pick_thresholds(oof, y, cap=cap, soft_recall=pol["soft_recall"])
-        for name, s, yy in (("oof", oof, y), ("test", p_te, y_te)):
-            rows.append({"cap": cap, "t_verify": th.t_verify, "t_soft": th.t_soft, "set": name,
-                         **band_summary(assign_bands(s, th), pol["review_budget"], yy), "flags": ",".join(th.flags)})
-    pd.set_option("display.width", 200)
-    cols = ["cap", "set", "t_verify", "t_soft", "ft_verify", "rec_verify", "rec_soft_up", "verify_share",
-            "budget_binding", "flags"]
+        for name, s, yy in (("oof_in_sample", oof, y), ("test", p_te, y_te)):
+            summary = band_summary(assign_bands(s, th), pol["review_budget"], yy)
+            rows.append({"cap": cap, "t_verify": th.t_verify, "t_soft": th.t_soft, "set": name, **summary,
+                         "ft_minus_cap": summary["ft_verify"] - cap, "flags": ",".join(th.flags)})
+    pd.set_option("display.width", 220)
+    cols = ["cap", "set", "t_verify", "t_soft", "ft_verify", "ft_minus_cap", "rec_verify", "rec_soft_up",
+            "verify_share", "budget_binding", "flags"]
     print(pd.DataFrame(rows)[cols].round(3).to_string(index=False))
-    print("OOF rows meet the cap by construction. Test applies the OOF cutoff to the full-train stack, so its")
-    print("false-teen can land above the cap (step 8 measured 0.176 at 15%). WP targets (to re-measure, different")
-    print("split): recall 92% at 15%, 88% at 10%, 74% at 6%.")
+    print("oof_in_sample rows meet the cap by construction: the thresholds were picked on those scores.")
+    print("test rows apply the OOF cutoff to the full-train stack, so ft_minus_cap above 0 means the cap was")
+    print("exceeded on held-out accounts.")
 
 
 if __name__ == "__main__":

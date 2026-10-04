@@ -4,6 +4,7 @@ Small tests use synthetic scores. The real-data tests read the committed results
 cache/stack_oof.csv. That cache is gitignored, so they skip when it is missing, unless the environment
 variable REQUIRE_STACK_CACHE is set (use it in CI), which turns the skip into a failure.
 """
+import json
 import os
 
 import numpy as np
@@ -162,6 +163,15 @@ def test_fewer_than_five_teens_keeps_prior_soft_threshold():
     assert pol.INSUFFICIENT_TEENS in th.flags and th.t_soft == min(prior.t_soft, th.t_verify)
 
 
+def test_fewer_than_five_teens_with_a_high_prior_soft_gives_both_flags_and_no_recall_guarantee():
+    s, y = scores_and_labels()
+    high = pol.Thresholds(t_verify=0.9, t_soft=0.95, cap=0.15, margin=0.0, n_adults=100, n_teens=100)
+    keep = np.r_[np.where(y == 0)[0], np.where(y == 1)[0][:3]]
+    th = pol.pick_thresholds(s[keep], y[keep], prior=high)
+    assert th.flags == (pol.INSUFFICIENT_TEENS, pol.SOFT_CAPPED)
+    assert th.t_soft == th.t_verify  # the soft band is empty, and its recall was not picked from these scores
+
+
 def test_fewer_than_five_teens_without_prior_uses_verify():
     s, y = scores_and_labels()
     keep = np.r_[np.where(y == 0)[0], np.where(y == 1)[0][:3]]
@@ -310,6 +320,24 @@ def test_audit_slice_rejects_a_tabular_only_cache(tmp_path):
 def test_audit_slice_accepts_a_matching_cache(tmp_path):
     train = make_train()
     assert len(pol.load_audit_slice(train, make_oof(tmp_path, train))) == 3
+
+
+def test_audit_slice_rejects_a_meta_file_with_the_wrong_row_count(tmp_path):
+    train = make_train()
+    p = make_oof(tmp_path, train)
+    meta = json.loads(meta_path(p).read_text())
+    meta["n"] += 1
+    meta_path(p).write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(train, p)
+
+
+# ---- caps reported by main ----
+def test_caps_to_report_is_the_policy_cap_and_the_ladder_caps_once_each():
+    assert pol.caps_to_report(0.15) == [0.15, 0.10, 0.05]
+    assert pol.caps_to_report(0.10) == [0.10, 0.05]
+    assert pol.caps_to_report(0.05) == [0.10, 0.05]
+    assert pol.caps_to_report(0.20) == [0.20, 0.10, 0.05]
 
 
 # ---- real data ----
