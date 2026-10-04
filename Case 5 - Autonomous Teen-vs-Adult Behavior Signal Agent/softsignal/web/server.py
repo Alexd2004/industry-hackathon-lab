@@ -15,6 +15,7 @@ otherwise they replay the committed recording or fall back, exactly as in crew.p
     GET /api/static   ranked list, cap grid, login heatmap, signal weights, test counts, latency
     GET /api/ladder   the results ladder (first call computes the keyword baseline and tabular LR, a few seconds)
     GET /api/job      the job status and the last lines of its log
+    GET /api/list?run=<source:run id>   that run's own likely-teen list (web/run_list.py), or rows null if it has none
     POST /api/review  {"account", "verdict": agree|disagree|null}: a reviewer's call, kept in results/reviews.json
                       (gitignored; never read by a model or the loop)
 """
@@ -96,8 +97,10 @@ def _loop_job(mode: str):
     def target(job: Job) -> None:
         from softsignal.agent_timer import DEFAULT_LOG, AgentTimer
         from softsignal.data import load_data
-        from softsignal.loop import DECISIONS_JSONL, ROUNDS_CSV, check_rounds_header, make_env, run_loop, write_run
+        from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, check_rounds_header, make_env, new_state, run_loop,
+                                     write_run)
         from softsignal.metrics import ROUNDS_COLS
+        from softsignal.web.run_list import final_list, live_path, write_list
 
         check_rounds_header(ROUNDS_CSV, ROUNDS_COLS)  # fail now, not after every refit
         timer = AgentTimer(DEFAULT_LOG)
@@ -106,6 +109,7 @@ def _loop_job(mode: str):
         job.log.append(f"run {timer.run} ({mode})")
         train, test = load_data(on_param_mismatch="error")
         env = make_env(train, test, timer=timer)
+        state = new_state(env.policy)  # read after the run: its final live rule scores the run's own list
         job.step = "round 0"
 
         def landed(row: dict) -> None:
@@ -124,8 +128,8 @@ def _loop_job(mode: str):
             replayer = None if client else Replayer.from_file(crew.DECISIONS_RECORDED)
             job.step = "crew rounds (each lands in rounds.csv as it ends)"
             # run_crew appends each round itself (write=True); the page reads the rounds from the file as they land
-            rounds, _ = crew.run_crew(env, client, None, True, ROUNDS_CSV, DECISIONS_JSONL, replayer=replayer,
-                                      apply_a2=True)
+            rounds, _ = crew.run_crew(env, client, None, True, ROUNDS_CSV, DECISIONS_JSONL, state=state,
+                                      replayer=replayer, apply_a2=True)
             for row in rounds.to_dict("records"):
                 landed(row)
         else:
@@ -136,7 +140,10 @@ def _loop_job(mode: str):
                           DECISIONS_JSONL)
                 landed(result.row)
 
-            run_loop(env, on_round=on_round)
+            run_loop(env, state=state, on_round=on_round)
+        job.step = "scoring the run's likely-teen list with its final model"
+        write_list(final_list(state, test), live_path(timer.run))
+        job.log.append(f"list: {state.mode}, {'stack' if state.live.model is not None else 'starter blend'}")
         job.step = "finished"
     return target
 
@@ -190,6 +197,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _query(self) -> dict:
+        from urllib.parse import parse_qs, urlsplit
+
+        return {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
+
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
@@ -213,6 +225,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_job.view())
             if path == "/api/reviews":
                 return self._json(read_reviews())
+            if path == "/api/list":
+                return self._json(payload.run_list(self._query().get("run", "")))
         except Exception as e:  # noqa: BLE001 - a bad file shows as an error on the page, not a dead server
             return self._json({"error": f"{type(e).__name__}: {e}"[:500]}, HTTPStatus.INTERNAL_SERVER_ERROR)
         self._static(path)

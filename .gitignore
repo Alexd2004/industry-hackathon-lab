@@ -41,3 +41,4 @@ cache/
 # Web console reviewer calls (local only)
 **/results/reviews.json
 **/results/reviews.tmp
+**/results/run_lists/

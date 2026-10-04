@@ -123,3 +123,33 @@ def test_bad_run_mode_is_refused(base_url):
     with pytest.raises(urllib.error.HTTPError) as e:
         call(base_url + "/api/run", {"mode": "both"})
     assert e.value.code == 400
+
+
+# --- each run's own list -------------------------------------------------------------------------------------------
+
+def test_starter_list_bands_at_the_cutoff_and_explains_with_fired_rules():
+    from softsignal.data import load_data
+    from softsignal.metrics import RANKED_COLS
+    from softsignal.web.run_list import starter_list
+
+    _, test = load_data()
+    out = starter_list(test, 0.5)
+    assert list(out.columns) == RANKED_COLS and len(out) == len(test)
+    assert set(out["band"]) <= {"verify", "none"}  # no soft band: t_soft == t_verify
+    assert ((out["score"] >= 0.5) == (out["band"] == "verify")).all()
+    assert out["score"].is_monotonic_decreasing and out["words"].fillna("").eq("").all()
+    top = out.iloc[0]
+    assert top["c1"].endswith("+0.19") and top["f1"] == "avg_word_len"  # 0.35 x (1 - 0.45), the heaviest rule
+
+
+def test_run_list_reads_the_file_for_the_source(tmp_path):
+    from softsignal.web.run_list import write_list
+    from softsignal.metrics import RANKED_COLS
+
+    row = {c: "" for c in RANKED_COLS} | {"rank": 1, "blogger_id": "B1", "score": 0.9, "band": "verify",
+                                          "f1": "logit_text_score", "v1": 1.0, "v2": None, "v3": None}
+    write_list(pd.DataFrame([row], columns=RANKED_COLS), tmp_path / "run_lists" / "r9.csv")
+    got = payload.run_list("live:r9", tmp_path)
+    assert got["model"] == "stack" and got["rows"][0]["blogger_id"] == "B1"
+    assert payload.run_list("rule:x", tmp_path)["rows"] is None  # no committed list for this source here
+    assert payload.run_list("nonsense", tmp_path)["rows"] is None

@@ -8,6 +8,9 @@ line (a writer mid-append) is skipped; for decisions the last line of a (run, ro
 Test metrics in rounds.csv are the live rule's on the frozen 900: while the loop is in SHADOW the starter blend
 is live, so recall and false-teen stay flat until a promote. The page shows that as it is.
 
+Lists. Each run has its own likely-teen list, scored by its final live rule (run_list.py); the page opens on no run
+and shows a run's list once the run has finished.
+
 Ladder. Rows come from eval_tier1.csv, eval_tier3.csv and the static stack at each slider cap (ranked.csv scores
 at policy_grid.csv's t_verify, scored against the test labels here, report only). The keyword baseline and the
 tabular LR have no results file, so they are computed once per process (baselines.py, a few seconds).
@@ -36,8 +39,8 @@ N_ROUNDS = 8  # R0 + 7 batches of 300 (oracle.BATCH_SIZE over 2,100 train accoun
 STATUS_ORDER = ("REPLAY", "LIVE", "FALLBACK")  # ui_loop.run_badge: REPLAY wins, never LIVE without a live call
 
 SOURCES = {
-    "recorded": ("rounds_recorded.csv", "decisions_recorded.jsonl", "Recorded crew run"),
-    "rule": ("rounds_rule.csv", None, "Rule-only loop"),
+    "recorded": ("rounds_recorded.csv", "decisions_recorded.jsonl", "Replay: recorded crew run"),
+    "rule": ("rounds_rule.csv", None, "Replay: rule-only run"),
     "live": ("rounds.csv", "decisions.jsonl", "Live run"),
 }
 
@@ -170,15 +173,26 @@ def _weight_rows(shares: dict) -> list[dict]:
 
 # ---- ranked list and cap grid ----
 def ranked_payload(results_dir: Path = RESULTS) -> dict:
-    ranked_path, grid_path = results_dir / "ranked.csv", results_dir / "policy_grid.csv"
-    if not ranked_path.exists() or not grid_path.exists():
-        return {"rows": [], "grid": [], "actions": ACTIONS}
-    ranked = pd.read_csv(ranked_path, dtype={ID_COL: str})
-    keep = ["rank", ID_COL, "score", "band", "c1", "c2", "c3", "words"]
+    grid_path = results_dir / "policy_grid.csv"
+    if not grid_path.exists():
+        return {"grid": [], "actions": ACTIONS}
     grid = pd.read_csv(grid_path)
     gcols = ["cap", "t_verify", "t_soft", "t_budget", "n_flagged", "n_verify", "n_soft", "n_none",
              "rec_flagged", "ft_flagged", "prec_sent", "rec_sent", "ft_sent"]
-    return {"rows": records(ranked[keep]), "grid": records(grid[gcols]), "actions": ACTIONS}
+    return {"grid": records(grid[gcols]), "actions": ACTIONS}  # the slider's readout; lists come per run
+
+
+def run_list(run_id: str, results_dir: Path = RESULTS) -> dict:
+    """A run's own list (web/run_list.py): committed runs have one file per source, live runs one per run id."""
+    source, _, run = run_id.partition(":")
+    names = {"recorded": "ranked_recorded.csv", "rule": "ranked_rule.csv"}
+    path = results_dir / "run_lists" / f"{run}.csv" if source == "live" else results_dir / names.get(source, "-")
+    if not run or not path.exists():
+        return {"run": run_id, "rows": None}
+    df = pd.read_csv(path, dtype={ID_COL: str})
+    keep = ["rank", ID_COL, "score", "band", "c1", "c2", "c3", "words"]
+    model = "stack" if (df["f1"].fillna("") == TEXT_FEATURE).any() else "starter"
+    return {"run": run_id, "model": model, "file": str(path.relative_to(results_dir)), "rows": records(df[keep])}
 
 
 # ---- login heatmap ----

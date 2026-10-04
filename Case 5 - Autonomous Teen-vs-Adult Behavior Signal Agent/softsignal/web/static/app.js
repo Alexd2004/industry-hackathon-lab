@@ -9,7 +9,7 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const S = {
   view: "dashboard",
   runs: [],
-  runId: null,
+  runId: null, // null: no run selected (the page opens empty)
   round: null, // null: follow the newest landed round
   cap: 15,
   stat: null,
@@ -22,6 +22,7 @@ const S = {
   node: "a5",
   replay: null,
   poll: null,
+  lists: {}, // run id -> its own list payload (fetched once the run has finished)
 };
 
 // ---------- helpers ----------
@@ -30,10 +31,6 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 const pct = (v, d = 0) => (isNum(v) ? `${(v * 100).toFixed(d)}%` : "–");
 const pts = (v) => Math.round(v * 1000) / 10;
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window */ } },
-};
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -57,7 +54,7 @@ function text(parent, x, y, s, attrs = {}) {
 }
 
 // ---------- run and round selection ----------
-function run() { return S.runs.find((r) => r.id === S.runId) || S.runs[0] || null; }
+function run() { return S.runs.find((r) => r.id === S.runId) || null; }
 function rounds() { return (run()?.rounds || []).slice().sort((a, b) => a.round - b.round); }
 function shownRound() {
   const rs = rounds();
@@ -93,15 +90,16 @@ function renderTop() {
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === S.view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${S.view}`));
   const sel = $("run-select");
-  const opts = S.runs.map((r) => {
+  const opts = `<option value="">No run selected</option>` + S.runs.map((r) => {
     const state = r.complete ? "" : (S.job?.running && S.job.run === r.run ? " · running" : " · partial");
     return `<option value="${esc(r.id)}">${esc(r.label)} · ${esc(r.badge)}${esc(state)}</option>`;
   }).join("");
   if (sel.innerHTML !== opts) sel.innerHTML = opts;
-  if (run()) sel.value = run().id;
+  sel.value = run() ? run().id : "";
   const row = shownRound();
   const total = N_ROUNDS - 1;
-  $("round-chip").textContent = row ? `Round ${row.round} of ${total}${row.round === total ? " complete" : ""}` : "No run yet";
+  $("round-chip").textContent = row ? `Round ${row.round} of ${total}${row.round === total ? " complete" : ""}`
+    : S.job?.running ? "Starting run…" : "No run yet";
 }
 
 // ---------- dashboard ----------
@@ -445,11 +443,14 @@ function renderBeforeAfter(r0, row) {
     <p class="caption">| marks the ${pct(cap)} cap. Round 0 was ${status(r0)}, round ${row.round} is ${status(row)}.</p>`;
 }
 
-function banded() {
-  const rp = S.stat?.ranked;
-  const g = gridRow(S.cap);
-  if (!rp || !g) return [];
-  return rp.rows.map((r) => ({ ...r, band: r.score >= g.t_verify ? "verify" : r.score >= g.t_soft ? "soft" : "none" }));
+function runList() { return run() ? S.lists[run().id] : null; }
+
+async function loadList() {
+  const r = run();
+  if (!r || !r.complete || S.lists[r.id] !== undefined || (S.job?.running && S.job.run === r.run)) return;
+  S.lists[r.id] = null; // in flight
+  try { S.lists[r.id] = await api(`/api/list?run=${encodeURIComponent(r.id)}`); } catch { delete S.lists[r.id]; }
+  render();
 }
 
 const ACTION_CHIP = { verify: "Request age verification", soft: "Teen-safe defaults", none: "No action" };
@@ -461,24 +462,34 @@ function why(r) {
 }
 
 function renderList() {
-  const rows = banded();
+  const r = run(), got = runList();
+  const rows = got?.rows || [];
   const n = { all: rows.length, verify: 0, soft: 0, none: 0 };
-  rows.forEach((r) => n[r.band]++);
+  rows.forEach((x) => n[x.band]++);
   const f = [["all", `All ${n.all.toLocaleString()}`], ["verify", `Request age verification ${n.verify}`], ["soft", `Teen-safe defaults ${n.soft}`], ["none", `No action ${n.none.toLocaleString()}`]];
-  $("r-filters").innerHTML = f.map(([k, label]) => `<button class="filter${S.filter === k ? " active" : ""}" data-filter="${k}">${esc(label)}</button>`).join("");
-  $("r-list-note").textContent = rows.length ? `Banded at the ${S.cap}% cap (set it on the Dashboard). ranked.csv: the stack fit on all 2,100 training accounts, scored on the 900 held-out.` : "";
-  const shown = rows.filter((r) => S.filter === "all" || r.band === S.filter);
-  const nReviewed = Object.keys(S.reviews).length;
-  $("r-reviewed").textContent = `Reviewer · ${nReviewed} reviewed`;
+  $("r-filters").innerHTML = rows.length ? f.map(([k, label]) => `<button class="filter${S.filter === k ? " active" : ""}" data-filter="${k}">${esc(label)}</button>`).join("") : "";
+  const cap = pct(capOf(shownRound()));
+  $("r-list-note").textContent = !rows.length ? "" : got.model === "stack"
+    ? `Scored by this run's final model (the stack it promoted), banded at its own ${cap}-cap thresholds. ${got.file}`
+    : `This run ended on the starter blend (no promote), so its list is the starter's: "why" is the rules that fired, with their weight in the score. ${got.file}`;
+  $("r-reviewed").textContent = `Reviewer · ${Object.keys(S.reviews).length} reviewed`;
   const body = $("r-list").querySelector("tbody");
-  if (!rows.length) { body.innerHTML = `<tr><td colspan="6" class="muted">No ranked list yet: run Rebuild models.</td></tr>`; $("r-more").hidden = true; return; }
-  body.innerHTML = shown.slice(0, S.listN).map((r) => {
-    const v = S.reviews[r.blogger_id];
-    return `<tr><td>${r.rank}</td><td>${esc(r.blogger_id)}</td>
-      <td><div class="score">${r.score.toFixed(2)}<div class="bar"><i style="width:${r.score * 100}%"></i></div></div></td>
-      <td><span class="action action-${r.band}">${ACTION_CHIP[r.band]}</span></td>
-      <td class="why">${esc(why(r))}</td>
-      <td><div class="review" data-account="${esc(r.blogger_id)}"><button data-verdict="agree" class="${v === "agree" ? "on-agree" : ""}">Agree</button><button data-verdict="disagree" class="${v === "disagree" ? "on-disagree" : ""}">Disagree</button></div></td></tr>`;
+  $("r-more").hidden = true;
+  if (!rows.length) {
+    const msg = !r.complete ? "The list appears when the run finishes, scored by the run's final model."
+      : got === null || got === undefined ? "Loading the run's list…"
+      : "No list for this run: its final model was not saved. Start a rule-only run from Training → Run loop (a few seconds) to get one.";
+    body.innerHTML = `<tr><td colspan="6" class="muted">${esc(msg)}</td></tr>`;
+    return;
+  }
+  const shown = rows.filter((x) => S.filter === "all" || x.band === S.filter);
+  body.innerHTML = shown.slice(0, S.listN).map((x) => {
+    const v = S.reviews[x.blogger_id];
+    return `<tr><td>${x.rank}</td><td>${esc(x.blogger_id)}</td>
+      <td><div class="score">${x.score.toFixed(2)}<div class="bar"><i style="width:${Math.min(x.score, 1) * 100}%"></i></div></div></td>
+      <td><span class="action action-${x.band}">${ACTION_CHIP[x.band]}</span></td>
+      <td class="why">${esc(why(x))}</td>
+      <td><div class="review" data-account="${esc(x.blogger_id)}"><button data-verdict="agree" class="${v === "agree" ? "on-agree" : ""}">Agree</button><button data-verdict="disagree" class="${v === "disagree" ? "on-disagree" : ""}">Disagree</button></div></td></tr>`;
   }).join("");
   $("r-more").hidden = shown.length <= S.listN;
 }
@@ -487,9 +498,12 @@ function renderLadder() {
   const body = $("r-ladder").querySelector("tbody");
   if (!S.ladder) return;
   const cap = S.stat?.policy?.cap_false_teen ?? 0.15;
-  body.innerHTML = S.ladder.map((r) => r.eval_set === "error"
+  const rs = rounds(), last = rs[rs.length - 1];
+  const mine = last ? [{ label: `This run, round ${last.round}${run().complete ? " (final)" : " (so far)"}`, rec: last.rec, ft: last.ft, prec: last.prec,
+    f1: last.prec + last.rec ? (2 * last.prec * last.rec) / (last.prec + last.rec) : 0, auc: last.auc, source: run().label, mine: true }] : [];
+  body.innerHTML = [...mine, ...S.ladder].map((r) => r.eval_set === "error"
     ? `<tr><td>${esc(r.label)}</td><td colspan="5" class="muted">could not compute</td><td>${esc(r.source)}</td></tr>`
-    : `<tr><td>${esc(r.label)}</td><td class="num">${pct(r.rec, 1)}</td><td class="num${overCap(r.ft, cap) ? " over" : ""}">${pct(r.ft, 1)}</td>
+    : `<tr class="${r.mine ? "this-run" : ""}"><td>${esc(r.label)}</td><td class="num">${pct(r.rec, 1)}</td><td class="num${overCap(r.ft, cap) ? " over" : ""}">${pct(r.ft, 1)}</td>
       <td class="num">${pct(r.prec, 1)}</td><td class="num">${isNum(r.f1) ? r.f1.toFixed(3) : "–"}</td><td class="num">${isNum(r.auc) ? r.auc.toFixed(3) : "–"}</td><td>${esc(r.source)}</td></tr>`).join("");
 }
 
@@ -516,11 +530,30 @@ function renderToast() {
 }
 
 // ---------- render all ----------
+function renderEmpty() {
+  const none = !run();
+  $("empty").hidden = !none;
+  document.querySelectorAll(".view").forEach((v) => { if (none) v.classList.remove("active"); });
+  if (!none) return;
+  const busy = !!S.job?.running;
+  $("empty-title").textContent = busy ? "Starting the run…" : "No run yet";
+  document.querySelectorAll("[data-start]").forEach((b) => (b.disabled = busy));
+  const replays = S.runs.filter((r) => r.source !== "live");
+  const lives = S.runs.filter((r) => r.source === "live");
+  $("empty-replays").innerHTML = replays.length || lives.length
+    ? `<span class="muted">Offline backup: replay a committed run, or open an earlier run.</span>` +
+      replays.map((r) => `<button class="btn btn-ghost" data-replay="${esc(r.id)}">${esc(r.label.replace("Replay: ", "Replay "))}</button>`).join("") +
+      (lives.length ? `<span class="muted">${lives.length} earlier run${lives.length > 1 ? "s" : ""} in the header's run picker.</span>` : "")
+    : "";
+}
+
 function render() {
   renderTop();
+  renderEmpty();
+  if (!run()) { renderToast(); return; }
   if (S.view === "dashboard") renderDashboard();
   if (S.view === "training") renderTraining();
-  if (S.view === "results") renderResults();
+  if (S.view === "results") { renderResults(); loadList(); }
   renderCapPanel();
   renderToast();
 }
@@ -536,7 +569,8 @@ async function loadRuns() {
     if (r) { S.runId = r.id; S.round = null; }
     if (!S.job.running) S.follow = null;
   }
-  if (!S.runs.find((r) => r.id === S.runId)) S.runId = (S.runs.find((r) => r.source === "recorded") || S.runs[0] || {}).id || null;
+  if (S.runId && !S.runs.find((r) => r.id === S.runId)) S.runId = null;
+  if (wasRunning && !S.job.running && S.job.run) delete S.lists[`live:${S.job.run}`]; // its list was written at the end
   if (wasRunning && !S.job.running && S.job.kind === "pipeline") await loadStatic(true);
   schedulePoll();
 }
@@ -571,6 +605,17 @@ async function startJob(kind, mode) {
 }
 
 // ---------- replay ----------
+function selectRun(id) {
+  stopReplay();
+  S.runId = id;
+  S.round = null;
+  S.filter = "all";
+  S.listN = 25;
+  const r = run();
+  if (r && r.source !== "live") toggleReplay(); // a committed run plays back from round 0
+  else render();
+}
+
 function stopReplay() { clearInterval(S.replay); S.replay = null; }
 function toggleReplay() {
   if (S.replay) { stopReplay(); render(); return; }
@@ -593,8 +638,13 @@ function setView(v) {
 function wire() {
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
   window.addEventListener("hashchange", () => setView(location.hash.slice(1)));
-  $("run-select").addEventListener("change", (e) => { S.runId = e.target.value; S.round = null; stopReplay(); store.set("ss.run", S.runId); render(); });
-  $("cap-slider").addEventListener("input", (e) => { S.cap = Number(e.target.value); S.listN = 25; render(); });
+  $("run-select").addEventListener("change", (e) => selectRun(e.target.value || null));
+  $("cap-slider").addEventListener("input", (e) => { S.cap = Number(e.target.value); render(); });
+  $("empty").addEventListener("click", (e) => {
+    const s_ = e.target.closest("[data-start]"), r = e.target.closest("[data-replay]");
+    if (s_) { setView("training"); startJob("run", s_.dataset.start); }
+    if (r) { setView("training"); selectRun(r.dataset.replay); }
+  });
   $("cap-default").addEventListener("click", () => { S.cap = Math.round((S.stat?.policy?.cap_false_teen ?? 0.15) * 100); render(); });
   $("t-pills").addEventListener("click", (e) => { const b = e.target.closest("[data-round]"); if (b && !b.disabled) { stopReplay(); S.round = Number(b.dataset.round); render(); } });
   $("t-table").addEventListener("click", (e) => { const tr = e.target.closest("[data-round]"); if (tr) { stopReplay(); S.round = Number(tr.dataset.round); render(); } });
@@ -620,12 +670,11 @@ function wire() {
 async function init() {
   wire();
   const asked = new URLSearchParams(location.search).get("run"); // ?run=rule | recorded | live | a full run id
-  S.runId = store.get("ss.run");
   try {
     await Promise.all([loadStatic(false), loadRuns()]);
     S.cap = Math.round((S.stat.policy?.cap_false_teen ?? 0.15) * 100);
     const hit = asked && S.runs.find((r) => r.id === asked || r.source === asked || r.run === asked);
-    if (hit) S.runId = hit.id;
+    if (hit) S.runId = hit.id; // a link can open a run directly; otherwise the page opens on no run
     S.reviews = await api("/api/reviews").catch(() => ({}));
   } catch (e) {
     document.querySelector("main").insertAdjacentHTML("afterbegin", `<div class="error-box">Could not load data from the server: ${esc(e.message)}</div>`);
