@@ -178,7 +178,7 @@ def test_every_round_has_an_a5_block_checked_against_this_runs_rows(crew_run):
     tmp, rounds, records = crew_run
     for r in records:
         a5 = r["a5"]
-        assert valid_decision(r) and a5["status"] == FALLBACK and a5["fallback_reason"] == OFFLINE
+        assert valid_decision(r) and a5["status"] == FALLBACK and a5["fallback_reason"] == "script_only"  # no model
         (claim,) = a5["output"]  # no A2 wired yet: the round's headline only
         assert claim["claim"].startswith(f"Round {r['round']}:") and claim["verdict"] == "supported"
         assert claim["source"] == f"rounds.csv:R{r['round']}"

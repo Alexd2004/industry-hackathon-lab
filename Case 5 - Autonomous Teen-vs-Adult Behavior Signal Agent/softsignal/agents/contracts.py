@@ -462,6 +462,28 @@ def round_claims(row: dict, record: dict) -> list[str]:
     return claims
 
 
+EVIDENCE_ROW_COLS = ("n_audit_adults", "n_labels", "n_flagged", "n_verify", "cap", "t_verify", "t_soft", "audit_ft")
+
+
+def evidence_source(record: dict, policy: dict, round_id: int, row: dict | None = None) -> dict:
+    """The round's decision inputs as one A5 source row, for A2's reason: the promote evidence, the hold floor,
+    the cap bounds, the rule's decision and the round's own loop state (row: its rounds.csv row; only
+    EVIDENCE_ROW_COLS, never a test metric). Not round-keyed, so a reason need not say "round N"."""
+    from softsignal.loop import CAP_MAX, CAP_MIN
+
+    ev = record.get("evidence") or {}
+    values = {k: _value(v) for k, v in ev.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    values |= {k: _value((row or {}).get(k)) for k in EVIDENCE_ROW_COLS
+               if isinstance((row or {}).get(k), (int, float)) and not isinstance((row or {}).get(k), bool)}
+    values |= {"min_audit_adults": int(policy["min_audit_adults"]), "cap_min": CAP_MIN, "cap_max": CAP_MAX}
+    rule = record.get("rule_decision") or {}
+    values |= {f"rule_{k}": _value(v) for k, v in rule.items()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    return {"file": "decisions.jsonl", "status": "present",
+            "rows": [{"id": f"decisions.jsonl:R{int(round_id)}", "kind": MEASURED,
+                      "values": {k: v for k, v in values.items() if v is not None}}]}
+
+
 def a5_input(claims: list[str], sources: list[dict], checklist: list[dict], mode: str,
              round_id: int | None = None) -> dict:
     """A5's input: the claims (with ids c1, c2, ...), the results files as rows, and the risk checklist.
@@ -471,6 +493,11 @@ def a5_input(claims: list[str], sources: list[dict], checklist: list[dict], mode
     """
     if mode not in ("round", "slides"):
         raise ValueError(f"mode must be round or slides, got {mode!r}")
+    from softsignal.agents.schemas import A5_MAX_CLAIMS
+
+    if len(claims) > A5_MAX_CLAIMS:  # the output schema allows this many verdicts: say so here, not as invalid_output
+        raise ValueError(f"A5 takes at most {A5_MAX_CLAIMS} claims per call, got {len(claims)}: "
+                         "split them into batches")
     payload = {
         "agent": "A5",
         "mode": mode,

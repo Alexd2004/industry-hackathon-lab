@@ -12,7 +12,7 @@ The claims below are a starting set taken from the handovers; replace them with 
 
 - SoftSignal catches 92% of teens at a 15% false-teen cap on the 900 held-out accounts.
 - At a 15% cap, 17.1% of held-out adults are flagged, and 15.0% on training data.
-- 225 accounts are sent to verification now, at 99.1% precision.
+- At a 15% cap, 225 accounts are sent to verification now, at 99.1% precision.
 - The keyword baseline catches 50% of teens at 32% false-teen.
 - The loop promotes the stack at round 7 and reaches 88.7% recall at 16.9% false-teen.
 - The stack's AUC is 0.955.

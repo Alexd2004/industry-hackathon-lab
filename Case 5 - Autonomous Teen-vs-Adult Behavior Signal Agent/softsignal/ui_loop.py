@@ -439,11 +439,25 @@ def _start_replay() -> None:
         st.session_state["replay_t0"] = time.time()
 
 
+_recorded_cache: dict = {}
+
+
+def _recorded(results_dir: Path) -> tuple:
+    """replay.load_recorded, read again only when a recorded file changes (the tab asks several times a poll)."""
+    stamp = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+                  for p in (results_dir / ROUNDS_RECORDED, results_dir / DECISIONS_RECORDED))
+    key = (str(results_dir), stamp)
+    if key not in _recorded_cache:
+        _recorded_cache.clear()
+        _recorded_cache[key] = replay.load_recorded(results_dir)
+    return _recorded_cache[key]
+
+
 def replay_state(results_dir: Path | None = None) -> dict | None:
     """While Replay is on: {"rounds", "records" (REPLAY-marked), "shown", "total"} of the recorded run, else None."""
     if not st.session_state.get("loop_replay"):
         return None
-    rounds, records = replay.load_recorded(RESULTS if results_dir is None else results_dir)
+    rounds, records = _recorded(RESULTS if results_dir is None else results_dir)
     total = max(len(rounds), len(records))
     shown = replay.revealed_rounds(st.session_state.get("replay_t0", time.time()), total=max(total, 1))
     return {"rounds": rounds, "records": records, "shown": shown, "total": total}

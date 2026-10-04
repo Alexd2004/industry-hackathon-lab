@@ -33,6 +33,7 @@ fresh clone shows.
 Run: python -m softsignal.crew [--rounds N] [--no-write | --record]   (agents offline unless ANTHROPIC_API_KEY)
 """
 import argparse
+import json
 import os
 import threading
 from dataclasses import dataclass
@@ -42,14 +43,16 @@ import pandas as pd
 
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
 from softsignal.agents import a1_drift, a5_audit
-from softsignal.agents.a1_drift import run_a1
-from softsignal.agents.a5_audit import run_a5
-from softsignal.agents.base import make_client, merge_block
-from softsignal.agents.contracts import a1_history, a1_input, a5_input, a5_sources, load_checklist, round_claims
+from softsignal.agents.base import FALLBACK, AgentResult, make_client, merge_block
+from softsignal.agents.contracts import (
+    a1_history, a1_input, a5_input, a5_sources, evidence_source, load_checklist, round_claims,
+)
 from softsignal.data import load_data
 from softsignal.loop import DECISIONS_JSONL, ROUNDS_CSV, SHADOW, Env, State, make_env, run_loop, write_run
 from softsignal.metrics import ROUNDS_COLS
-from softsignal.replay import Replayer, serve
+from softsignal.replay import Replayer, read_records, serve
+
+A5_ERROR = "agent_error"  # A5 raised: the round keeps going with an empty, FALLBACK A5 block
 
 ROUNDS_RECORDED = ROUNDS_CSV.with_name("rounds_recorded.csv")
 DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
@@ -82,10 +85,28 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         score_psi = psi_val if state.mode == SHADOW else None  # the live model changes every refit once ACTIVE
         payload = a1_input(prior, rows, score_psi, env.oracle.audit_counts(), history, rnd, psi_drift)
         a1 = (serve(offline, "a1", rnd, payload, a1_drift.validate_output, env.timer)
-              or run_a1(payload, client, env.timer, rnd))
+              or a1_drift.run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
         return {"a1": block(a1, rnd)}
+
+    def _a5_round(result, rnd: int) -> AgentResult:
+        """A5 on the finished round. Never raises: the round is already on disk, so an A5 error must not end it."""
+        try:
+            # a fixed logical name: the run id says which file the rows are in, and a recorded run
+            # (rounds_recorded.csv) must hash like a normal one (rounds.csv) or offline replay of A5 never matches
+            sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), ROUNDS_CSV.name,
+                                 files=("rounds",))
+            sources.append(evidence_source(result.record, env.policy, rnd, result.row))  # what A2's reason may quote
+            claims = round_claims(result.row, result.record)
+            payload = a5_input(claims, sources, checklist, "round", rnd)
+            # the round's own headline only (no A2 reason yet): the script checks it, no model call needed
+            script_only = len(claims) == 1
+            return (serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer)
+                    or a5_audit.run_a5(payload, None if script_only else client, env.timer, rnd,
+                                       script_only=script_only))
+        except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
+            return AgentResult("A5", FALLBACK, [], A5_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
     def on_round(result) -> None:
         rnd = int(result.row["round"])
@@ -93,17 +114,18 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         if write:  # the round shows now, A5's card reads "working..." (a5 null) until its line lands
             write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [{**result.record, "a5": None}],
                       rounds_path, decisions_path)
-        # a fixed logical name: the run id says which file the rows are in, and a recorded run (rounds_recorded.csv)
-        # must hash like a normal one (rounds.csv) or offline replay of A5 never matches
-        sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), ROUNDS_CSV.name,
-                             files=("rounds",))
-        payload = a5_input(round_claims(result.row, result.record), sources, checklist, "round", rnd)
-        a5 = serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer) or run_a5(payload, client, env.timer, rnd)
-        result.record["a5"] = block(a5, rnd)
+        result.record["a5"] = block(_a5_round(result, rnd), rnd)
         if write:  # the same round again with A5 in it: the last line of a (run, round) wins
             write_run(pd.DataFrame(columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
 
     return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round)
+
+
+def compact_decisions(path: Path) -> None:
+    """Keep only the last line of each (run, round), in round order: a live run writes A5's "working" line first,
+    which only the live screen needs."""
+    by_key = {(r["run"], r["round"]): r for r in read_records(path)}
+    path.write_text("".join(json.dumps(by_key[k]) + "\n" for k in sorted(by_key)), encoding="utf-8")
 
 
 # ---- background run for the Loop tab ----
@@ -184,6 +206,7 @@ def main() -> None:
             p.unlink(missing_ok=True)
         raise
     if args.record:
+        compact_decisions(paths[1])  # the committed file: one record per round (Crew Plan section 8)
         for new, old in zip(paths, recorded):
             os.replace(new, old)
         paths = recorded

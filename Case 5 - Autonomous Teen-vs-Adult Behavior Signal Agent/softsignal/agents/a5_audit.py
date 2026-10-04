@@ -37,19 +37,21 @@ import argparse
 import csv
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from softsignal.agent_timer import AgentTimer
 from softsignal.agents.base import (
     AGE_CLAIM, FALLBACK, INSUFFICIENT, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, UNSUPPORTED, AgentResult,
-    age_claims, call_model, input_hash, number_tokens, numbers_in, numbers_not_in_input, timeout_for,
+    age_claims, call_model, input_hash, number_spans, number_tokens, numbers_in, numbers_not_in_input, timeout_for,
 )
 from softsignal.agents.contracts import MEASURED, PROJECTED
-from softsignal.agents.schemas import A5_MAX_NOTE_CHARS, A5Output
+from softsignal.agents.schemas import A5_MAX_CLAIMS, A5_MAX_NOTE_CHARS, A5Output
 
 AGENT = "A5"
 SUPPORTED, UNSUPPORTED_V, PROJECTED_V, CANNOT = "supported", "unsupported", "projected", "cannot_check"
 SLIDE_TIMEOUT_S = 60.0  # the slide pass runs once, after the freeze: no live-demo budget (Crew Plan section 9)
+SCRIPT_ONLY = "script_only"  # per round, with only the round's own headline to check: the script, no model call
 CHECK_COLS = ["claim", "verdict", "source", "risks", "note", "status", "fallback_reason"]
 SYSTEM = f"""You are A5, the honesty auditor in SoftSignal, a system that estimates whether an account belongs \
 to a teen or an adult from writing style and app activity. Check each claim against the results files. You only \
@@ -82,28 +84,108 @@ Rules:
 
 
 # ---- the script: each quoted number against the rows ----
-# A metric a claim names -> the column names it is checked against (a column matches when one of its "_" parts
-# is in the family). The pitch's own wording counts: "catches 92% of teens" is recall, "adults flagged" false-teen.
+# A claim is read clause by clause. Each metric word is paired with its nearest number in the same clause
+# ("recall 88.7%", "catches 92% of teens", "a 15% cap"), and that number is checked against that metric's own
+# column only, so a claim that swaps recall and false-teen is never supported. A number with no metric beside it
+# never matches a round or count column. A claim with no number tied to a metric is cannot_check.
+_ANY = r"(?:[^.;]|\.(?=\d))*?"  # inside a clause; a decimal point ("88.7%") does not end it
 METRICS = {
-    r"\brecall\b|\bcatch(?:es)?\b[^.;]*\bteens?\b|\bcaught\b[^.;]*\bteens?\b": ("rec",),
-    r"\bfalse[- ]teen\b|\badults?\b[^.;]*\bflagged\b|\bflagged\b[^.;]*\badults?\b": ("ft",),
-    r"\bauc\b": ("auc",), r"\bprecision\b": ("prec",), r"\bmissed[- ]teen\b": ("mt",), r"\bf1\b": ("f1",),
-    r"\bcap\b": ("cap",), r"\bpsi\b": ("psi",), r"\baudit adults?\b": ("n_audit_adults",), r"\bround\b": ("round",),
+    "rec": rf"\brecall\b|\bcatch(?:es)?\b{_ANY}\bteens?\b|\bcaught\b{_ANY}\bteens?\b",
+    "ft": rf"\bfalse[- ]teen\b(?!\s+cap)|\badults?\b{_ANY}\bflagged\b|\bflagged\b{_ANY}\badults?\b",
+    "prec": r"\bprecision\b", "mt": r"\bmissed[- ]teen\b", "f1": r"\bf1\b", "auc": r"\bauc\b", "cap": r"\bcap\b",
+    "psi": r"\bpsi\b", "audit_adults": r"\baudit adults?\b", "round": r"\bround\b", "accounts": r"\baccounts?\b",
+    # A2's vocabulary (its reason is checked per round against decisions.jsonl's evidence row)
+    "floor": r"\bfloor\b|\bminimum\b", "adults": r"\badults?\b", "cutoff": r"\bcutoff\b|\bt_verify\b|\bthreshold\b",
+    "streak": r"\bstreak\b",
 }
-# Columns that hold a rate. A percent in a claim matches these only: "97%" is never a 0.965 cutoff (t_budget).
-RATE_PARTS = {"rec", "ft", "prec", "mt", "f1", "cap", "auc", "share", "psi"}
+# Metric -> qualifier ("" = always) -> the columns it may be checked against. Headline columns by default; the
+# training (out-of-fold), sent-now, soft-band and audit variants only when the claim says so.
+COLUMNS = {
+    "rec": {"": ("rec", "rec_flagged"), "sent": ("rec_sent",), "training": ("oof_rec_flagged",),
+            "soft": ("rec_soft_up",)},
+    "ft": {"": ("ft", "ft_flagged"), "sent": ("ft_sent",), "training": ("oof_ft_flagged",), "soft": ("ft_soft_up",),
+           "audit": ("audit_ft",), "pooled": ("pooled_ft",)},
+    "prec": {"": ("prec",), "sent": ("prec_sent",)}, "mt": {"": ("mt",)}, "f1": {"": ("f1",)}, "auc": {"": ("auc",)},
+    "cap": {"": ("cap",)}, "psi": {"": ("psi",)}, "round": {"": ("round",)},
+    "audit_adults": {"": ("n_audit_adults", "round_audit_adults", "pooled_adults", "min_audit_adults")},
+    "accounts": {"": ("n",), "sent": ("n_verify",), "flagged": ("n_flagged",), "soft": ("n_soft",)},
+    "floor": {"": ("min_audit_adults",)}, "adults": {"": ("n_audit_adults", "round_audit_adults", "pooled_adults")},
+    "cutoff": {"": ("t_verify", "rule_cutoff")}, "streak": {"": ("streak",)},
+}
+QUALIFIERS = {"sent": r"\bsent\b|\bverification\b", "training": r"\btraining\b|\bout-of-fold\b|\boof\b",
+              "soft": r"\bsoft\b|\bteen-safe\b", "audit": r"\baudit\b", "flagged": r"\bflagged\b",
+              "pooled": r"\bpooled\b"}
+RATE_PARTS = {"rec", "ft", "prec", "mt", "f1", "cap", "auc", "share", "psi"}  # a percent matches these only
+ROW_KEYS = {"rounds": "round", "policy_grid.csv": "cap"}  # the metric that names a row of the file (pins it)
+OTHER_MODELS = r"\b(?:baseline|keyword|tabular|tf-?idf|starter|text[- ]only|activity[- ]only)\b"
+_CLAUSE = re.compile(r"[;:,]|\.(?!\d)|\band\b")
 
 
-def _named_metrics(text: str) -> list[tuple[str, tuple]]:
-    low = text.lower()
-    return [(pat, cols) for pat, cols in METRICS.items() if re.search(pat, low)]
+@dataclass
+class Reading:
+    """A claim read for checking: (metric, number) pairs, numbers with no metric, and the qualifiers it states."""
+
+    tied: list
+    untied: list
+    qualifiers: set
 
 
-def _in_family(column: str | None, family: tuple) -> bool:
-    if column is None:
-        return False
-    parts = column.lower().split("_")
-    return any(column.lower() == f or f in parts for f in family)
+def _gap(clause: str, s: int, e: int, ns: int, ne: int) -> int:
+    """Words between a metric (s..e) and a number (ns..ne); 0 when adjacent or inside ("catches 92% of teens")."""
+    if ne <= s:
+        return len(clause[ne:s].split())
+    if ns >= e:
+        return len(clause[e:ns].split())
+    return 0
+
+
+def read_claim(text: str) -> Reading:
+    low, tied, untied = text.lower(), [], []
+    cuts = [0] + [m.end() for m in _CLAUSE.finditer(low)] + [len(low)]
+    for a, b in zip(cuts, cuts[1:]):
+        clause = low[a:b]
+        nums = number_spans(clause)
+        mentions = [(name, m.start(), m.end()) for name, pat in METRICS.items() for m in re.finditer(pat, clause)]
+        pairs = sorted((_gap(clause, s, e, ns, ne), i, j) for i, (_, s, e) in enumerate(mentions)
+                       for j, (_, ns, ne) in enumerate(nums))
+        used_m, used_n = set(), set()
+        for _, i, j in pairs:  # nearest first, each metric and each number used once
+            if i not in used_m and j not in used_n:
+                used_m.add(i)
+                used_n.add(j)
+                tied.append((mentions[i][0], nums[j][0]))
+        untied += [nums[j][0] for j in range(len(nums)) if j not in used_n]
+    return Reading(tied, untied, {q for q, pat in QUALIFIERS.items() if re.search(pat, low)})
+
+
+def _allowed(metric: str, qualifiers: set) -> set:
+    spec = COLUMNS[metric]
+    return {c for q, cols in spec.items() if q == "" or q in qualifiers for c in cols}
+
+
+def _is_count(column: str) -> bool:
+    c = column.lower()
+    return c in ("n", "round", "rank", "streak") or c.startswith("n_") or c.endswith("_adults")
+
+
+def token_error(token: str, value: float, column: str | None = None) -> float:
+    """How far a file value is from a number as a claim writes it ("92%", "0.955", "7"), in units of the claim's
+    rounding (0.5 at the last written decimal): <= 1 means the value rounds to the claim. A percent is compared
+    with the value x 100 in a CSV column, and also with the value itself on a text line (column None)."""
+    is_pct = token.endswith("%")
+    text = token.rstrip("%").lstrip("+-")
+    decimals = len(text.split(".")[1]) if "." in text else 0
+    x, tol = abs(float(text)), 0.5 * 10 ** -decimals
+    if not is_pct:
+        candidates = [abs(value)]
+    else:
+        candidates = [abs(value) * 100] if column is not None else [abs(value), abs(value) * 100]
+    return min(abs(c - x) for c in candidates) / tol
+
+
+def token_matches(token: str, value: float, column: str | None = None) -> bool:
+    """A number as a claim writes it against a file value, at the claim's precision."""
+    return token_error(token, value, column) <= 1 + 1e-6
 
 
 def _row_items(row: dict, file: str) -> list[tuple[str | None, float]]:
@@ -113,123 +195,131 @@ def _row_items(row: dict, file: str) -> list[tuple[str | None, float]]:
     return [(k, float(v)) for k, v in row["values"].items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
 
 
-def _row_numbers(row: dict, file: str) -> list[float]:
-    """The numbers a row holds: its numeric values, or the numbers written in a text file's line."""
-    return [v for _, v in _row_items(row, file)]
+def _pair_error(metric: str, token: str, row: dict, file: str, qualifiers: set) -> float | None:
+    """The smallest error of a (metric, number) pair over the columns it may use in this row; None if the row
+    has none of them (a text line: the metric must be named on the line)."""
+    if file.endswith(".txt"):
+        line = str(row["values"].get("line", "")).lower()
+        if not re.search(METRICS[metric], line):
+            return None
+        return min((token_error(token, v) for _, v in _row_items(row, file)), default=None)
+    cols = _allowed(metric, qualifiers)
+    errs = [token_error(token, v, c) for c, v in _row_items(row, file) if c in cols]
+    return min(errs) if errs else None
 
 
-def token_error(token: str, value: float) -> float:
-    """How far a file value is from a number as a claim writes it ("92%", "0.955", "7"), in units of the claim's
-    rounding (0.5 at the last written decimal): <= 1 means the value rounds to the claim. A percent is compared
-    with the value x 100 and with the value itself."""
-    is_pct = token.endswith("%")
-    text = token.rstrip("%").lstrip("+-")
-    decimals = len(text.split(".")[1]) if "." in text else 0
-    x, tol = abs(float(text)), 0.5 * 10 ** -decimals
-    candidates = [abs(value), abs(value) * 100] if is_pct else [abs(value)]
-    return min(abs(c - x) for c in candidates) / tol
+def _free_error(token: str, row: dict, file: str) -> float | None:
+    """The smallest error of a number with no metric: never a round or count column; a percent, rates only."""
+    items = [(c, v) for c, v in _row_items(row, file) if c is None or not _is_count(c)]
+    if token.endswith("%"):
+        items = [(c, v) for c, v in items if c is None or RATE_PARTS & set(c.lower().split("_"))]
+    errs = [token_error(token, v, c) for c, v in items]
+    return min(errs) if errs else None
 
 
-def token_matches(token: str, value: float) -> bool:
-    """A number as a claim writes it against a file value, at the claim's precision."""
-    return token_error(token, value) <= 1 + 1e-6
+def _row_key(file: str) -> str | None:
+    return next((k for prefix, k in ROW_KEYS.items() if file.startswith(prefix)), None)
 
 
-def _fits(token: str, column: str | None) -> bool:
-    """A percent fits a rate column only (or a text line); any other number fits any column."""
-    return not token.endswith("%") or column is None or bool(RATE_PARTS & set(column.lower().split("_")))
-
-
-def _token_in(token: str, items: list) -> list[str | None]:
-    """The columns of a row whose value matches the token (and that it may match)."""
-    return [c for c, v in items if _fits(token, c) and token_matches(token, v)]
-
-
-def _metric_status(text: str, row: dict, file: str) -> tuple[list, list]:
-    """(named metrics a claim number matches in their column, named metrics the row has but no claim number
-    matches): the second list is a contradiction once the first pins the row."""
-    tokens, items = number_tokens(text), _row_items(row, file)
-    held, differ = [], []
-    for pat, family in _named_metrics(text):
-        if file.endswith(".txt"):
-            (held if re.search(pat, str(row["values"].get("line", "")).lower()) else differ).append(family)
-            continue
-        cols = [c for c, _ in items if _in_family(c, family)]
-        if not cols:
-            continue
-        if any(_in_family(c, family) for t in tokens for c in _token_in(t, items)):
-            held.append(family)
-        else:
-            differ.append(family)
-    return held, differ
+def _fit(reading: Reading, row: dict, file: str) -> float | None:
+    """Total error if the row holds every number of the claim in its place, else None. A row of a swept file
+    (rounds: one per round; policy_grid.csv: one per cap) only holds a claim that names its round or cap: else a
+    "false-teen 15%" claim would be held by whichever cap happens to give 15.1%."""
+    key = _row_key(file)
+    if key is not None and not any(m == key for m, _ in reading.tied):
+        return None
+    total = 0.0
+    for metric, token in reading.tied:
+        e = _pair_error(metric, token, row, file, reading.qualifiers)
+        if e is None or e > 1 + 1e-6:
+            return None
+        total += e
+    for token in reading.untied:
+        e = _free_error(token, row, file)
+        if e is None or e > 1 + 1e-6:
+            return None
+        total += e
+    return total
 
 
 def row_holds(text: str, row: dict, file: str) -> bool:
-    """True when every number of the claim matches a value of the row it may match (a percent: a rate column),
-    and every metric the claim names has a claim number in its column (a claim with no number: False)."""
-    tokens, items = number_tokens(text), _row_items(row, file)
-    if not tokens or not all(_token_in(t, items) for t in tokens):
-        return False
-    held, differ = _metric_status(text, row, file)
-    named = _named_metrics(text)
-    if file.endswith(".txt"):
-        return not differ
-    return not differ and all(any(_in_family(c, fam) for c, _ in items) for _, fam in named)
+    """True when the row holds every number of the claim in its place (a claim with no number tied to a metric:
+    False)."""
+    reading = read_claim(text)
+    return bool(reading.tied) and _fit(reading, row, file) is not None
 
 
 def contradicting_row(text: str, present: list[dict]) -> str | None:
-    """A row that a claim's numbers pin by one named metric (e.g. cap 15%, round 7) while it holds a different
-    value for another the claim names (e.g. recall): the claim is contradicted, not just unchecked. Of several,
-    the row that matches the most of the claim's numbers (then the most named metrics), in file order."""
-    best, key = None, None
+    """A row the claim names by the file's row key (rounds: "round 7"; policy_grid.csv: "a 15% cap") that holds a
+    different value for another metric the claim states: the claim is contradicted. Claims about another model
+    (baseline, keyword, tabular, ...) are left out: those rows live in eval.csv, which has no row key."""
+    reading = read_claim(text)
+    if re.search(OTHER_MODELS, text.lower()):
+        return None
     for src in present:
-        if src["file"].endswith(".txt"):
+        key = _row_key(src["file"])
+        if key is None:
+            continue
+        keyed = [t for m, t in reading.tied if m == key]
+        others = [(m, t) for m, t in reading.tied if m != key]
+        if not keyed or not others:
             continue
         for r in src["rows"]:
-            held, differ = _metric_status(text, r, src["file"])
-            if held and differ and (key is None or (_matched(text, r, src["file"]), len(held)) > key):
-                best, key = r["id"], (_matched(text, r, src["file"]), len(held))
-    return best
-
-
-def _matched(text: str, row: dict, file: str) -> int:
-    items = _row_items(row, file)
-    return sum(bool(_token_in(t, items)) for t in number_tokens(text))
+            if not any((e := _pair_error(key, t, r, src["file"], set())) is not None and e <= 1 + 1e-6 for t in keyed):
+                continue
+            for m, t in others:
+                e = _pair_error(m, t, r, src["file"], reading.qualifiers)
+                if e is not None and e > 1 + 1e-6:  # the row has this metric, with another value
+                    return r["id"]
+    return None
 
 
 def _closeness(text: str, row: dict, file: str) -> tuple:
     """Sort key for rows that hold the claim: the closest values first (total rounding error), then the row
-    whose text fields share the most words with the claim, then measured before projected. Picking the first
-    holding row instead let a 49.6% / 31.6% grid row "support" a keyword-baseline claim of 50% / 32%."""
-    items = _row_items(row, file)
-    err = sum(min((token_error(t, v) for c, v in items if _fits(t, c)), default=1e9) for t in number_tokens(text))
+    whose text fields share the most words with the claim, then measured before projected."""
+    err = _fit(read_claim(text), row, file)
     words = {w for w in text.lower().replace(",", " ").split() if w.isalpha() and len(w) > 3}
     labels = " ".join(str(v).lower() for v in row["values"].values() if isinstance(v, str))
     overlap = sum(w in labels for w in words)
-    return round(err, 6), -overlap, row["kind"] != MEASURED
+    return round(1e9 if err is None else err, 6), -overlap, row["kind"] != MEASURED
+
+
+def _term(term: str) -> str:
+    """A watch term as a regex: whole words, or a word prefix when it ends with "*" ("accura*")."""
+    word = re.escape(term.lower().rstrip("*"))
+    return rf"(?<!\w){word}" + ("" if term.endswith("*") else r"(?!\w)")
 
 
 def risk_tags(text: str, checklist: list[dict]) -> list[str]:
-    """Checklist ids whose watch group appears in the claim (every term of a group, case-insensitive)."""
+    """Checklist ids whose watch group appears in the claim (every term of a group, whole words, case-insensitive)."""
     low = text.lower()
-    return [i["id"] for i in checklist if any(all(w.lower() in low for w in group) for group in i["watch"])]
+    return [i["id"] for i in checklist
+            if any(all(re.search(_term(w), low) for w in group) for group in i["watch"])]
+
+
+def _files(names: list[str]) -> str:
+    return "files: " + ", ".join(names)
 
 
 def check_claims(payload: dict) -> dict:
     """The deterministic verdicts (the fallback and the model's script_check): {"verdicts": [...]}."""
     present = [s for s in payload["sources"] if s["status"] == "present"]
     missing = [s["file"] for s in payload["sources"] if s["status"] == "missing"]
+    checked = [s["file"] for s in present]
     out = []
     for claim in payload["claims"]:
-        text, tokens = claim["text"], number_tokens(claim["text"])
+        text = claim["text"]
+        reading = read_claim(text)
         risks = risk_tags(text, payload["checklist"])[:4]
-        if not tokens:
+        if not number_tokens(text):
             v = {"verdict": CANNOT, "source": None, "note": "No number to check against a results file."}
+        elif not reading.tied:
+            v = {"verdict": CANNOT, "source": _files(missing or checked),
+                 "note": "No number is tied to a metric (recall, false-teen, cap, ...), so no row can confirm it."}
         elif not present:
-            v = {"verdict": CANNOT, "source": "files: " + ", ".join(missing),
-                 "note": "No results file to check against."}
+            v = {"verdict": CANNOT, "source": _files(missing), "note": "No results file to check against."}
         else:
-            full = [(s, r) for s in present for r in s["rows"] if row_holds(text, r, s["file"])]
+            full = [(s, r) for s in present for r in s["rows"] if _fit(reading, r, s["file"]) is not None]
             if full:
                 _, best = min(full, key=lambda sr: _closeness(text, sr[1], sr[0]["file"]))  # stable: file order last
                 if best["kind"] == MEASURED:
@@ -237,17 +327,14 @@ def check_claims(payload: dict) -> dict:
                 else:
                     v = {"verdict": PROJECTED_V, "source": best["id"],
                          "note": "The closest row holding these numbers is projected, not measured."}
-            elif (bad := contradicting_row(text, present)) is not None:  # a present row says otherwise
+            elif (bad := contradicting_row(text, present)) is not None:  # the row the claim names says otherwise
                 v = {"verdict": UNSUPPORTED_V, "source": bad,
-                     "note": "This row matches the claim on one metric and holds a different value for another."}
+                     "note": "The row this claim names holds a different value for one of its metrics."}
             elif missing:  # a file that could hold it is not written yet: cannot say it is wrong
-                v = {"verdict": CANNOT, "source": "files: " + ", ".join(missing),
+                v = {"verdict": CANNOT, "source": _files(missing),
                      "note": "No present row holds it, and these results files are missing."}
             else:
-                best = max(((_matched(text, r, s["file"]), r["id"]) for s in present for r in s["rows"]),
-                           default=(0, None))
-                v = {"verdict": UNSUPPORTED_V,
-                     "source": best[1] if best[0] else "files: " + ", ".join(s["file"] for s in present),
+                v = {"verdict": UNSUPPORTED_V, "source": _files(checked),
                      "note": "No results row holds every number of the claim."}
         out.append({"claim_id": claim["id"], **v, "risks": risks})
     return {"verdicts": out}
@@ -257,9 +344,7 @@ def check_claims(payload: dict) -> dict:
 def _closer_projected(text: str, row: dict, file: str, payload: dict) -> bool:
     """True when a projected row holds the claim's numbers with a strictly smaller error than the cited row:
     then the numbers are the projected ones, and citing a measured row that happens to round alike is not
-    support (the keyword-baseline case in _closeness)."""
-    if not number_tokens(text):
-        return False
+    support."""
     cited = _closeness(text, row, file)[0]
     return any(r["kind"] == PROJECTED and row_holds(text, r, s["file"]) and _closeness(text, r, s["file"])[0] < cited
                for s in payload["sources"] if s["status"] == "present" for r in s["rows"])
@@ -268,7 +353,7 @@ def _closer_projected(text: str, row: dict, file: str, payload: dict) -> bool:
 def _known_files(src: str, files: set) -> bool:
     """A "files: a.csv, b.txt" source (or a bare file name) naming only files of the input."""
     names = [f.strip() for f in src.removeprefix("files:").split(",")]
-    return bool(names) and all(n in files for n in names)
+    return all(n in files for n in names)
 
 
 def _rows(payload: dict) -> dict:
@@ -285,32 +370,36 @@ def validate_output(output, payload: dict) -> tuple[str | None, list[str]]:
         return UNKNOWN_FIELD, [f"verdicts for {sorted(ids)}, claims are {sorted(texts)}"]
     rows, files = _rows(payload), {s["file"] for s in payload["sources"]}
     risk_ids = {i["id"] for i in payload["checklist"]}
+    script = {v["claim_id"]: v["verdict"] for v in check_claims(payload)["verdicts"]}
     for v in verdicts:
-        if "claim" in v and v["claim"] != texts[v["claim_id"]]:
-            return UNKNOWN_FIELD, [f"{v['claim_id']}: claim text differs from the input"]
+        cid = v["claim_id"]
+        if "claim" in v and v["claim"] != texts[cid]:
+            return UNKNOWN_FIELD, [f"{cid}: claim text differs from the input"]
         if set(v["risks"]) - risk_ids:
-            return UNKNOWN_FIELD, [f"{v['claim_id']}: unknown risk ids {sorted(set(v['risks']) - risk_ids)}"]
+            return UNKNOWN_FIELD, [f"{cid}: unknown risk ids {sorted(set(v['risks']) - risk_ids)}"]
         src, verdict = v["source"], v["verdict"]
+        if script[cid] == UNSUPPORTED_V and verdict != UNSUPPORTED_V:  # a red flag is never softened away
+            return UNSUPPORTED, [f"{cid}: the script found it unsupported; {verdict} would hide that"]
         if verdict in (SUPPORTED, PROJECTED_V):
             if src not in rows:
-                return UNKNOWN_FIELD, [f"{v['claim_id']}: {verdict} must cite a row id, got {src!r}"]
+                return UNKNOWN_FIELD, [f"{cid}: {verdict} must cite a row id, got {src!r}"]
             file, row = rows[src]
-            if number_tokens(texts[v["claim_id"]]) and not row_holds(texts[v["claim_id"]], row, file):
-                return UNSUPPORTED, [f"{v['claim_id']}: {src} does not hold every number of the claim"]
+            if not row_holds(texts[cid], row, file):
+                return UNSUPPORTED, [f"{cid}: {src} does not hold every number of the claim in its place"]
             if verdict == SUPPORTED and row["kind"] == PROJECTED:
-                return UNSUPPORTED, [f"{v['claim_id']}: {src} is projected, so the claim is projected, not supported"]
-            if verdict == SUPPORTED and _closer_projected(texts[v["claim_id"]], row, file, payload):
-                return UNSUPPORTED, [f"{v['claim_id']}: a projected row holds these numbers more closely than {src}"]
+                return UNSUPPORTED, [f"{cid}: {src} is projected, so the claim is projected, not supported"]
+            if verdict == SUPPORTED and _closer_projected(texts[cid], row, file, payload):
+                return UNSUPPORTED, [f"{cid}: a projected row holds these numbers more closely than {src}"]
         elif src is None:
-            if number_tokens(texts[v["claim_id"]]):  # plan: every verdict names a source file and row
-                return UNKNOWN_FIELD, [f"{v['claim_id']}: {verdict} needs a source (a row id or files: ...)"]
+            if number_tokens(texts[cid]):  # plan: every verdict names a source file and row
+                return UNKNOWN_FIELD, [f"{cid}: {verdict} needs a source (a row id or files: ...)"]
         elif src not in rows and not _known_files(src, files):
-            return UNKNOWN_FIELD, [f"{v['claim_id']}: source {src!r} is not a row or file of the input"]
+            return UNKNOWN_FIELD, [f"{cid}: source {src!r} is not a row or file of the input"]
         if age_claims(v["note"]):
-            return AGE_CLAIM, [f"{v['claim_id']}: states an age"]
+            return AGE_CLAIM, [f"{cid}: states an age"]
         invented = numbers_not_in_input(v["note"], payload)
         if invented:
-            return NUMBER_NOT_IN_INPUT, [f"{v['claim_id']}: numbers not in the input: {invented}"]
+            return NUMBER_NOT_IN_INPUT, [f"{cid}: numbers not in the input: {invented}"]
     return None, []
 
 
@@ -342,11 +431,14 @@ def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: Agen
 
 
 def run_a5(payload: dict, client=None, timer: AgentTimer | None = None, round_id=None,
-           timeout: float | None = None) -> AgentResult:
-    """A5 on one set of claims. client: base.make_client() (None = offline: the script, FALLBACK)."""
+           timeout: float | None = None, script_only: bool = False) -> AgentResult:
+    """A5 on one set of claims. client: base.make_client() (None = offline: the script, FALLBACK). script_only:
+    the claims need no model (crew.py, while a round has only its own headline to check), badged FALLBACK."""
     h = input_hash(payload)
     if not payload["claims"]:
         return AgentResult(AGENT, FALLBACK, [], INSUFFICIENT, h)
+    if script_only:
+        return _fallback(payload, h, SCRIPT_ONLY, [], timer, round_id)
     if client is None:
         return _fallback(payload, h, OFFLINE, [], timer, round_id)
     reply = call_model(client, agent=AGENT, step="audit", system=SYSTEM, user=user_message(payload),
@@ -358,22 +450,26 @@ def run_a5(payload: dict, client=None, timer: AgentTimer | None = None, round_id
 
 
 # ---- the slide pass ----
-def write_check(result: AgentResult, path: Path) -> None:
-    """results/claims_check.csv: one row per claim (CHECK_COLS), with A5's status and fallback reason."""
+def write_check(results, path: Path) -> None:
+    """results/claims_check.csv: one row per claim (CHECK_COLS), with A5's status and fallback reason.
+    results: one AgentResult, or one per batch of claims."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CHECK_COLS)
         w.writeheader()
-        for v in result.output:
-            w.writerow({"claim": v["claim"], "verdict": v["verdict"], "source": v["source"] or "",
-                        "risks": ";".join(v["risks"]), "note": v["note"], "status": result.status,
-                        "fallback_reason": result.fallback_reason or ""})
+        for result in results if isinstance(results, list) else [results]:
+            for v in result.output:
+                w.writerow({"claim": v["claim"], "verdict": v["verdict"], "source": v["source"] or "",
+                            "risks": ";".join(v["risks"]), "note": v["note"], "status": result.status,
+                            "fallback_reason": result.fallback_reason or ""})
 
 
 def main(argv=None) -> None:
     from softsignal.agent_timer import get_timer
     from softsignal.agents.base import make_client
-    from softsignal.agents.contracts import CHECKLIST_FILE, CLAIMS_FILE, a5_input, a5_sources, load_checklist, load_claims
+    from softsignal.agents.contracts import (
+        CHECKLIST_FILE, CLAIMS_FILE, a5_input, a5_sources, load_checklist, load_claims,
+    )
     from softsignal.data import ROOT
 
     results = ROOT / "results"
@@ -382,14 +478,17 @@ def main(argv=None) -> None:
     ap.add_argument("--checklist", type=Path, default=CHECKLIST_FILE)
     ap.add_argument("--out", type=Path, default=results / "claims_check.csv")
     args = ap.parse_args(argv)
-    payload = a5_input(load_claims(args.claims), a5_sources(results), load_checklist(args.checklist), "slides")
+    claims, sources, checklist = load_claims(args.claims), a5_sources(results), load_checklist(args.checklist)
     client = make_client()
-    result = run_a5(payload, client, get_timer(), timeout=SLIDE_TIMEOUT_S)
-    write_check(result, args.out)
-    status = result.status + (f" ({result.fallback_reason})" if result.fallback_reason else "")
-    missing = [s["file"] for s in payload["sources"] if s["status"] == "missing"]
-    print(f"A5 slide pass: {len(result.output)} claims, {status}; missing files: {', '.join(missing) or 'none'}")
-    for v in result.output:
+    batches = [claims[i:i + A5_MAX_CLAIMS] for i in range(0, len(claims), A5_MAX_CLAIMS)] or [[]]
+    out = [run_a5(a5_input(b, sources, checklist, "slides"), client, get_timer(), timeout=SLIDE_TIMEOUT_S)
+           for b in batches]  # the schema takes A5_MAX_CLAIMS per call
+    write_check(out, args.out)
+    status = ", ".join(r.status + (f" ({r.fallback_reason})" if r.fallback_reason else "") for r in out)
+    missing = [s["file"] for s in sources if s["status"] == "missing"]
+    print(f"A5 slide pass: {len(claims)} claims in {len(out)} call(s), {status}; "
+          f"missing files: {', '.join(missing) or 'none'}")
+    for v in (v for r in out for v in r.output):
         risks = f"  [risks: {', '.join(v['risks'])}]" if v["risks"] else ""
         print(f"  {v['verdict']:<12} {v['source'] or '-':<28} {v['claim']}{risks}")
     print(f"wrote {args.out}")

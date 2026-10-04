@@ -66,7 +66,8 @@ class Replayer:
                 continue
             for key in AGENT_KEYS:
                 b = rec.get(key)
-                if isinstance(b, dict) and b.get("status") == LIVE and b.get("input_hash") and b.get("output") is not None:
+                live = isinstance(b, dict) and b.get("status") == LIVE and b.get("input_hash")
+                if live and b.get("output") is not None:
                     blocks[(rec["round"], key)] = (b["input_hash"], b["output"])
         return cls(run, blocks)
 
@@ -94,7 +95,12 @@ def serve(replayer: "Replayer | None", key: str, round_id: int, payload: dict,
         return None
     h = input_hash(payload)
     output = replayer.lookup(round_id, key, h)
-    if output is None or validate(output, payload)[0] is not None:
+    if output is None:
+        return None
+    try:  # a validator that changed since the recording must mean "no replay", never a crash
+        if validate(output, payload)[0] is not None:
+            return None
+    except Exception:  # noqa: BLE001
         return None
     if timer is not None:
         with timer.call(key.upper(), "replay", "retrieval", status=REPLAY, round_id=round_id):

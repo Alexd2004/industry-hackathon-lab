@@ -28,7 +28,7 @@ RESULTS = ROOT / "results"
 SEED = [  # claims/claims.md, in order: (verdict, source)
     (SUPPORTED, "policy_grid.csv:cap=0.15"),
     (SUPPORTED, "policy_grid.csv:cap=0.15"),
-    (SUPPORTED, "policy_grid.csv:cap=0.08"),
+    (SUPPORTED, "policy_grid.csv:cap=0.15"),  # the claim now names its cap (a grid row backs only its own cap)
     (PROJECTED_V, "eval_placeholder.csv:1"),
     (SUPPORTED, "rounds_recorded.csv:R7"),
     (PROJECTED_V, "eval_placeholder.csv:6"),
@@ -69,7 +69,7 @@ def test_a_row_must_hold_every_number_of_the_claim():
     row = {"values": {"rec": 0.92, "cap": 0.15, "n": 900, "stage": "x"}}
     assert row_holds("92% at a 15% cap on 900 accounts", row, "x.csv")
     assert not row_holds("92% at a 10% cap", row, "x.csv") and not row_holds("no numbers", row, "x.csv")
-    assert row_holds("line says 0.95", {"values": {"line": "auc 0.95"}}, "sanity.txt")  # text files: numbers in the line
+    assert row_holds("AUC 0.95", {"values": {"line": "auc 0.95"}}, "sanity.txt")  # a text line must name the metric
 
 
 # --- sources --------------------------------------------------------------------------------------
@@ -218,8 +218,11 @@ def test_round_claims_are_the_headline_and_a2s_reason():
     two = round_claims(row, {"a2": {"output": {"reason": "Promote: 213 audit adults."}}})
     assert two[1] == "A2: Promote: 213 audit adults."
     rounds = pd.DataFrame([row | {"run": "20261004T000000Z-x", "refit_s": 2.13}], columns=ROUNDS_COLS)
-    p = a5_input(two, a5_sources(RESULTS, rounds, "rounds.csv", files=("rounds",)), [], "round", 7)
-    assert [s["file"] for s in p["sources"]] == ["rounds.csv"]  # per round: this run's rows only
+    from softsignal.agents.contracts import evidence_source
+    from softsignal.policy import load_policy
+    sources = a5_sources(RESULTS, rounds, "rounds.csv", files=("rounds",)) + [evidence_source({}, load_policy(), 7, row)]
+    p = a5_input(two, sources, [], "round", 7)
+    assert [s["file"] for s in p["sources"]] == ["rounds.csv", "decisions.jsonl"]  # this run's rows + the round's inputs
     assert not {"run", "refit_s"} & set(p["sources"][0]["rows"][0]["values"])  # per-run values: no stable hash
     assert [v["verdict"] for v in check_claims(p)["verdicts"]] == [SUPPORTED, SUPPORTED]
 
@@ -297,3 +300,35 @@ def test_a_contradicted_claim_is_unsupported_even_with_files_missing(slides, cla
 
 def test_the_demo_mode_risk_is_tagged(checklist):
     assert risk_tags("The demo runs live on stage.", checklist) == ["demo_mode"]
+
+
+# --- review round 3: numbers tied to their own metric, headline columns, counts, percents ---------------------------
+
+@pytest.mark.parametrize("claim, verdict", [
+    ("The loop reaches 16.9% recall at 88.7% false-teen at round 7.", UNSUPPORTED_V),  # swapped metrics
+    ("The loop catches 99.9% of teens at round 7.", UNSUPPORTED_V),  # a decimal inside the clause
+    ("SoftSignal keeps false-teen at 15% on held-out accounts.", PROJECTED_V),  # not via oof_ft_flagged 0.1495
+    ("Teens open the app 3 times a day.", CANNOT),  # no metric: never a round or count column
+    ("Precision is 1% higher.", CANNOT),  # a percent is not the raw 0.991
+    ("The starter blend catches 82% of teens at a 15% cap.", CANNOT),  # another model: no contradiction by cap
+])
+def test_numbers_are_checked_against_their_own_metric(slides, claim, verdict):
+    p = a5_input([claim], slides["sources"], [], "slides")
+    assert check_claims(p)["verdicts"][0]["verdict"] == verdict
+
+
+def test_a_model_cannot_soften_the_scripts_unsupported(slides):
+    p = a5_input(["The loop reaches 99% recall at round 7."], slides["sources"], [], "slides")
+    soft = copy.deepcopy(check_claims(p))
+    soft["verdicts"][0].update(verdict=CANNOT, source="files: eval.csv")
+    assert validate_output(soft, p)[0] == UNSUPPORTED
+
+
+def test_risk_terms_are_whole_words(checklist):
+    assert "legal_age" not in risk_tags("The loop improves recall.", checklist)
+    assert risk_tags("Some metadata.", checklist) == []
+
+
+def test_more_than_the_schema_allows_is_a_clear_error():
+    with pytest.raises(ValueError, match="batches"):
+        tiny([f"claim {i}" for i in range(41)], [{"a": 1}])

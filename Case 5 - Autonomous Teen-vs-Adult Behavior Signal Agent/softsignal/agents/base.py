@@ -39,7 +39,8 @@ MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-opus-5")
 EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "low")
 TIMEOUT_S = float(os.environ.get("SOFTSIGNAL_AGENT_TIMEOUT_S", "4.0"))  # decision-path agents (A1-A3)
 TIMEOUTS = {"A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
-            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}  # per round, live (Crew Plan 9); slides: 60 s
+            # A5 per round is a live call (Crew Plan section 9: 4 s); its one-off slide pass uses 60 s
+            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}
 MAX_RETRIES = 0  # the SDK retries twice by default, which turns a 4 s timeout into about 12 s
 MAX_TOKENS = 4096  # adaptive thinking at low effort shares this with the short JSON answer
 MAX_REJECTED_CHARS = 2000  # a rejected reply is kept (truncated) for A5 and prompt tuning
@@ -100,6 +101,12 @@ def input_hash(payload: Any) -> str:
 
 def _strip_thousands(text: str) -> str:
     return re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+
+
+def number_spans(text: str) -> list[tuple[str, int, int]]:
+    """(number as written, start, end) for every number in text (no thousands commas inside a token: "1,000" is
+    two tokens here; claims write counts without them)."""
+    return [(m.group(), m.start(), m.end()) for m in _NUMBER.finditer(text)]
 
 
 def number_tokens(text: str) -> list[str]:

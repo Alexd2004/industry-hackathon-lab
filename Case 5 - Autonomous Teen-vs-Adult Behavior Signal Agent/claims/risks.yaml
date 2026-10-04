@@ -1,6 +1,7 @@
 # The Combined Plan section 8 risk list, as A5's checklist (softsignal/agents/a5_audit.py).
 # A claim is tagged with a risk id when every term of one of its `watch` groups appears in the claim
-# (case-insensitive substring match). Tags are flags for a person; they never change a verdict on their own.
+# (case-insensitive, whole words; a term ending in * matches a word prefix, e.g. accura* = accurate, accuracy).
+# Tags are flags for a person; they never change a verdict on their own.
 # risk: what can go wrong. say: how to say it honestly on a slide.
 - id: over_cap
   risk: The logistic stack lands at about 17% false-teen on held-out accounts, over the 15% cap (inside the +/-3.3-point CI).
@@ -29,7 +30,7 @@
 - id: agents_accuracy
   risk: The crew may be slower or no better than the rule-based loop; accuracy comes from the model.
   say: The agents explain, adapt and audit; quote ladder rows 11-12 for anything more.
-  watch: [["agent", "accura"], ["crew", "accura"], ["agent", "better"], ["crew", "better"], ["agent", "improv"]]
+  watch: [["agent*", "accura*"], ["crew", "accura*"], ["agent*", "better"], ["crew", "better"], ["agent*", "improv*"]]
 - id: market_figures
   risk: Market figures ($13.8B to $32.6B, per-check costs, 29 states) are unverified.
   say: Verify them or drop them before they reach a slide.
@@ -37,15 +38,15 @@
 - id: legal_age
   risk: The output is a likelihood, not legal age; the strongest action is a verification request, never a ban.
   say: Say likelihood, and request verification.
-  watch: [["legal age"], [" ban"], ["prove"], ["identif"]]
+  watch: [["legal age"], ["ban"], ["prove"], ["identif*"]]
 - id: latency
   risk: No latency figure may be quoted before it is measured.
   say: Quote p50 / p95 from agent_calls.jsonl only.
-  watch: [["latency"], [" ms"], ["seconds per"]]
+  watch: [["latency"], ["ms"], ["seconds per"]]
 - id: demo_mode
   risk: The demo mode can be misread (live vs replayed vs fallback).
   say: Say which mode is running; the badge shows LIVE, FALLBACK or REPLAY on every round.
-  watch: [[" live"], ["replay"], ["demo"]]
+  watch: [["live"], ["replay*"], ["demo"]]
 - id: appendix_figures
   risk: The Winning Plan appendices have inconsistent figures (audit 60 vs 80, 0.7 s refit, 11 vs 9 activity columns, the t_soft rule); main-body values win.
   say: Quote the main-body or measured values only.
