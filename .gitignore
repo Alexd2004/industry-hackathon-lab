@@ -32,3 +32,8 @@ JUDGE_GUIDE_PRIVATE.md
 # Tuning outputs and caches (regenerated)
 checkpoints/
 cache/
+
+# Live loop output (appended by every crew / loop run); the committed run is results/*_recorded.*
+**/results/rounds.csv
+**/results/decisions.jsonl
+**/results/.write.lock

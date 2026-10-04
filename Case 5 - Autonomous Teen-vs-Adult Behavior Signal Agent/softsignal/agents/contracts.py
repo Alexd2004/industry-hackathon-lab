@@ -2,7 +2,16 @@
 
 Each builder copies only the fields its agent's contract allows (Combined Plan section 7a). A1-A4 never get
 a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
-A2 and A4 are built so far; each owner adds theirs here.
+A1, A2 and A4 are built so far; each owner adds theirs here.
+
+A1 (drift watcher) gets, for this batch: the PSI of each feature group against the batches the loop saw in
+earlier rounds (never the whole train set: later batches are not known yet), the loop's PSI of the live
+scores (only while the live rule is the starter: once the stack is live every refit changes the model, so
+score PSI would measure model change, not drift), the revealed audit counts (adults, teens) so far, the
+earlier rounds' PSI, the policy.yaml threshold its fallback uses, and the PSI conventions and group sizes
+its prompt teaches (so it may quote them). No rows, no ids, no labels: counts only. Pooling every earlier
+batch as the reference absorbs slow drift; the history lets A1 see a trend, and a fixed reference (the first
+batches) would be the change to make if cumulative drift ever matters.
 
 A4 (verify-band triager) gets explain.py's output for the accounts sent to verification (score, band, the
 top 3 signed contributions, the teen-leaning words), summarised in code for the batch: score range and
@@ -13,6 +22,7 @@ check pass an invented count or one account's value presented as a batch figure.
 input is a batch-level fact, so every number A4 may cite is one too. It also keeps the prompt short.
 """
 import json
+import math
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
@@ -22,12 +32,16 @@ import pandas as pd
 
 from softsignal.agents.base import INSUFFICIENT
 from softsignal.data import SPLIT_FILE
-from softsignal.features import FORBIDDEN, ID_COL
+from softsignal.features import ACTIVITY_COLS, FORBIDDEN, ID_COL, TEXT_COLS
+from softsignal.metrics import psi
 
 TEST_METRIC_KEYS = frozenset({"prec", "rec", "ft", "mt", "f1", "auc"})  # test-set metrics: never in A1-A4 input
 LABEL_KEYS = frozenset(FORBIDDEN | {"label", "labels", "in_verify", "in_audit"})
 A4_COLS = [ID_COL, "score", "band", "c1", "c2", "c3", "f1", "f2", "f3", "v1", "v2", "v3", "words"]
 A4_TOP_WORDS = 10
+PSI_GROUPS = {"activity": ACTIVITY_COLS, "text": TEXT_COLS}  # the 9 activity and 7 stylometry columns
+PSI_DECIMALS = 3
+PSI_CONVENTIONS = {"stable": 0.10, "large": 0.25}  # under stable: no shift; 0.10-0.25 moderate; over large: large
 
 
 class BarrierError(ValueError):
@@ -114,6 +128,76 @@ def a4_input(frame: pd.DataFrame, verify_ids, round_id: int | None, test_ids=Non
     }
     check_barrier(payload)
     return payload
+
+
+def floor_psi(x) -> float | None:
+    """PSI floored to PSI_DECIMALS (None stays None). Floored, not rounded: then comparing the shown value
+    with a threshold of up to 3 decimals gives the same verdict as the exact PSI (0.2496 never reads 0.25)."""
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return None
+    scale = 10 ** PSI_DECIMALS
+    return math.floor(float(x) * scale + 1e-9) / scale  # 1e-9: float noise must not drop an exact 0.25 to 0.249
+
+
+def group_psi(reference: pd.DataFrame, batch: pd.DataFrame) -> dict:
+    """PSI of each feature group, batch against reference: per group the largest feature PSI, the mean, and
+    which feature is largest. metrics.psi per column (bins from the reference's quantiles), floored."""
+    out = {}
+    for group, cols in PSI_GROUPS.items():
+        per = {c: psi(reference[c].to_numpy(dtype=float), batch[c].to_numpy(dtype=float)) for c in cols}
+        top = max(per, key=lambda c: (per[c], c))
+        out[f"{group}_max"] = floor_psi(per[top])
+        out[f"{group}_mean"] = floor_psi(float(np.mean(list(per.values()))))
+        out[f"{group}_top_feature"] = top
+    return out
+
+
+def a1_input(reference: pd.DataFrame, batch: pd.DataFrame, score_psi, audit_counts: dict, history: list[dict],
+             round_id: int, psi_drift: float | None) -> dict:
+    """A1's input for one round. reference: the rows of every earlier batch (loop state.seen before this
+    round); batch: this round's rows; score_psi: the loop's PSI of the live scores (rounds.csv psi, None
+    when it has no history, e.g. round 1 or the round after a promote); audit_counts: oracle.audit_counts()
+    after this round's reveal; history: earlier rounds' entries of this payload's "psi" (see a1_history);
+    psi_drift: policy.yaml's threshold. With no reference rows the PSI is not computed (n_reference 0: A1
+    returns insufficient_data without a model call).
+    """
+    n_ref, n_batch = len(reference), len(batch)
+    psi_block = {"score": floor_psi(score_psi)}
+    if n_ref and n_batch:
+        psi_block |= group_psi(reference, batch)
+    payload = {
+        "agent": "A1",
+        "round": int(round_id),
+        "n_reference": int(n_ref),
+        "n_batch": int(n_batch),
+        "psi": psi_block,
+        "psi_drift": None if psi_drift is None else float(psi_drift),
+        "psi_conventions": dict(PSI_CONVENTIONS),
+        "n_features": {g: len(cols) for g, cols in PSI_GROUPS.items()},
+        "audit": {"adults": int(audit_counts["adults"]), "teens": int(audit_counts["teens"])},
+        "history": [dict(h) for h in history],
+    }
+    check_barrier(payload)
+    return payload
+
+
+def a1_history(payload: dict) -> dict:
+    """The compact entry a round adds to the next rounds' history: round and the PSI numbers."""
+    p = payload["psi"]
+    return {"round": payload["round"], **{k: p.get(k) for k in ("score", "activity_max", "text_max")}}
+
+
+def a1_fields(payload: dict) -> dict:
+    """Every numeric input field A1 may cite, by path: "psi.activity_max", "audit.adults",
+    "history.round3.score", ... (None values are left out: there is nothing to cite)."""
+    out = {k: payload[k] for k in ("n_reference", "n_batch", "psi_drift")}
+    out |= {f"psi.{k}": v for k, v in payload["psi"].items() if not isinstance(v, str)}
+    out |= {f"psi_conventions.{k}": v for k, v in payload["psi_conventions"].items()}
+    out |= {f"n_features.{k}": v for k, v in payload["n_features"].items()}
+    out |= {f"audit.{k}": v for k, v in payload["audit"].items()}
+    for h in payload["history"]:
+        out |= {f"history.round{h['round']}.{k}": v for k, v in h.items() if k != "round"}
+    return {k: float(v) for k, v in out.items() if v is not None}
 
 
 INSUFFICIENT_INPUT = INSUFFICIENT  # what an absent A1 / A3 output looks like to A2 (contract: no guessing)

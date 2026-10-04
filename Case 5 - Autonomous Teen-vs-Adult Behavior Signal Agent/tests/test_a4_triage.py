@@ -30,7 +30,8 @@ from softsignal.data import load_data
 from softsignal.features import ID_COL, TARGET
 from softsignal.ui_loop import plain, valid_decision
 
-REQ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+from agent_fakes import REQ, FakeClient, reply
+
 CHIPS = [("logit_text_score", "writes like a teen"), ("night_notification_open_rate", "opens notifications at night"),
          ("pct_active_school_hours", "quiet in school hours"), ("share_news_views", "reads little news")]
 
@@ -63,34 +64,6 @@ def good_output(payload) -> dict:
     return {"batch_reason": f"{payload['n_accounts']} accounts, mostly {s['signal']} ({s['n_accounts']} accounts). "
                             f"Scores run {payload['score_min']} to {payload['score_max']}.",
             "based_on": [s["feature"]]}
-
-
-class FakeClient:
-    """Stands in for anthropic.Anthropic: messages.create returns `reply` (or raises it); calls and the options
-    the agent set (timeout, retries) are recorded."""
-
-    def __init__(self, reply=None, raises=None):
-        self.calls, self.options, self.reply, self.raises = [], [], reply, raises
-        self.messages = SimpleNamespace(create=self._create)
-
-    def with_options(self, **kw):
-        self.options.append(kw)
-        return self
-
-    def _create(self, **kw):
-        self.calls.append(kw)
-        if self.raises is not None:
-            raise self.raises
-        return self.reply
-
-
-def reply(output=None, stop_reason="end_turn", text=None):
-    """A Message-like reply: one text block holding output as JSON (or the given raw text)."""
-    body = text if text is not None else (json.dumps(output) if output is not None else "")
-    return SimpleNamespace(stop_reason=stop_reason, stop_details=None,
-                           content=[SimpleNamespace(type="text", text=body)] if body else [],
-                           usage=SimpleNamespace(input_tokens=1200, output_tokens=80, cache_creation_input_tokens=None,
-                                                 cache_read_input_tokens=None))
 
 
 # --- contract and information barrier -------------------------------------------------------------

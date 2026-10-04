@@ -333,10 +333,10 @@ def test_skipped_lines_are_reported(real_dir):
     assert any("1 lines skipped" in c.value for c in at.caption)
 
 
-def test_live_crew_and_replay_are_disabled_stubs(placeholder_only):
+def test_run_button_is_live_and_replay_is_still_a_stub(placeholder_only):
     at = AppTest.from_function(render).run()
-    assert at.button[0].label == "Run live crew" and at.button[0].disabled
-    assert at.toggle[0].label == "Replay" and at.toggle[0].disabled
+    assert at.button[0].label == "Run loop" and not at.button[0].disabled  # crew.py, see test_crew.py
+    assert at.toggle[0].label == "Replay" and at.toggle[0].disabled  # replay.py: round 8
 
 
 def test_placeholder_log_lines_tag_test_metrics_as_projected(placeholder_only):
@@ -493,3 +493,40 @@ def test_diff_table_flags_a2_vs_rule_even_without_a_diff_entry():
     d = decision(diff={})  # loop.py forgot the diff entry; the table still compares A2 with the rule
     d["a2"]["output"]["action"] = "re-tune"
     assert diff_table(d).set_index("field").loc["action", "changed"] == "YES"
+
+
+@pytest.mark.parametrize("states, badge", [
+    (["LIVE", "FALLBACK", None], "LIVE"),
+    (["FALLBACK", None, None], "FALLBACK"),  # agents ran, none live: never shown as LIVE
+    ([None, None, None], "RULE ONLY"),  # a plain loop.py run
+    (["REPLAY", "LIVE", None], "REPLAY"),
+])
+def test_run_badge_says_what_actually_ran(states, badge):
+    d = decision(**{k: agent(st) for k, st in zip(("a1", "a2", "a3"), states)})
+    d |= {"a4": agent(None), "a5": agent(None)}
+    assert ui_loop.run_badge([d], False) == badge
+    assert ui_loop.run_badge([d], True) == "PLACEHOLDER"
+
+
+def test_log_line_carries_the_a1_verdict_and_the_promote_test():
+    d = decision(rnd=7, diff={}, a1=agent("FALLBACK", {"drift": "not_real", "evidence": [], "reason": "r"}, "offline"))
+    d["evidence"] = {"pooled_adults": 57, "pooled_ft": 0.16, "streak": 2}
+    line = log_line(d, None)
+    assert "A1 drift not_real" in line and "pooled audit false-teen 16% on 57 adults, streak 2" in line
+    d["a1"] = agent("FALLBACK", {"drift": "insufficient_data", "evidence": [], "reason": "r"}, "insufficient_data")
+    d["evidence"] = {"pooled_adults": None, "pooled_ft": None, "streak": 0}
+    line = log_line(d, None)
+    assert "A1 drift" not in line and "promote test" not in line
+
+
+def test_a1_card_shows_evidence_and_its_own_insufficient_note(real_dir):
+    ev = {"drift": "not_real", "evidence": [{"field": "psi.activity_max", "value": 0.062}], "reason": "calm"}
+    write_decisions(real_dir, [
+        decision(rnd=0, a1=agent("FALLBACK", {"drift": "insufficient_data", "evidence": [], "reason": "x"},
+                                 "insufficient_data")),
+        decision(rnd=1, a1=agent("FALLBACK", ev, "offline")),
+    ])
+    at = AppTest.from_function(render).run()
+    caps = [c.value for c in at.caption]
+    assert any(c == "Evidence: " + ui_loop.plain("psi.activity_max = 0.062") for c in caps)
+    assert any(c.startswith("insufficient_data: no earlier batch") for c in caps)

@@ -1,8 +1,11 @@
-"""Loop tab (step 12 skeleton): header, tiles, round chart, agent cards, decision log, footer.
+"""Loop tab (step 12): header, tiles, round chart, agent cards, decision log, footer.
 
-Reads results/rounds.csv and results/decisions.jsonl. The placeholders are used only when both real files
-are missing. The tab only reads; it never writes anything an agent reads. Auto-refresh, the live crew and
-replay are stubs here.
+Reads the live files results/rounds.csv and decisions.jsonl (gitignored; appended by loop.py / crew.py runs)
+together with the committed recorded run (rounds_recorded.csv, decisions_recorded.jsonl), so a rehearsal never
+hides the recorded run (it is marked "(recorded)" in the picker); the placeholders only when neither exists. While a run started here is going, the tab re-reads the files every REFRESH_S seconds (a
+fragment), so rounds show up as they land; otherwise it does not poll. "Run loop" starts crew.py in a
+background thread; the tab itself only reads, never writes anything an agent reads, and never calls a model.
+Replay is still a stub.
 """
 import io
 import json
@@ -14,6 +17,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from softsignal import crew
 from softsignal.agents.contracts import TEST_METRIC_KEYS
 from softsignal.explain import FEATURE_NAMES
 from softsignal.metrics import DEFAULT_CAP, ROUNDS_COLS
@@ -21,6 +25,7 @@ from softsignal.ui_results import FOOTER, FT_CI, FT_HUE, REC_HUE, headline_rows,
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 ROUNDS_FILE, DECISIONS_FILE = "rounds.csv", "decisions.jsonl"
+ROUNDS_RECORDED, DECISIONS_RECORDED = "rounds_recorded.csv", "decisions_recorded.jsonl"
 ROUNDS_PLACEHOLDER, DECISIONS_PLACEHOLDER = "rounds_placeholder.csv", "decisions_placeholder.jsonl"
 
 BANNER = ("PLACEHOLDER, projected, not measured. Loop numbers are a hand-made path between the plan's "
@@ -31,7 +36,8 @@ MODES = {"SHADOW", "ACTIVE"}
 SOURCES = {"A2", "rule", "starter"}
 STATUSES = {"LIVE", "FALLBACK", "REPLAY", None}
 BADGE_COLOR = {"LIVE": "green", "FALLBACK": "orange", "REPLAY": "gray", "PLACEHOLDER": "gray",
-               "SHADOW": "gray", "ACTIVE": "blue"}
+               "RULE ONLY": "gray", "SHADOW": "gray", "ACTIVE": "blue"}
+REFRESH_S = 1  # the tab re-reads the files this often (UI handover section 5)
 NUMERIC = [c for c in ROUNDS_COLS if c not in ("run", "mode", "action", "applied_source")]
 BLANK_OK = {"t_soft", "audit_ft", "psi", "refit_s"}
 INTS = {"round", "n_flagged", "n_verify", "n_labels", "n_audit_adults"}
@@ -39,6 +45,7 @@ RATES = {"cap", "audit_ft", "prec", "rec", "ft", "mt", "auc"}
 DIFF_ROWS = ("blend_w", "cutoff", "cap", "action")
 LAST_ROUND = 7
 INSUFFICIENT_TEXT = {"default": "insufficient_data: not enough labels yet (normal early on, not an error).",
+                     "a1": "insufficient_data: no earlier batch to compare with yet (normal in rounds 0 and 1).",
                      "a4": "insufficient_data: no accounts were sent to verification in this batch."}
 
 
@@ -49,6 +56,8 @@ class LoopData:
     is_placeholder: bool
     n_skipped: int
     warnings: list = field(default_factory=list)
+    source: str = "live"  # live / recorded / placeholder / none (live when live files exist, even with recorded)
+    recorded: frozenset = frozenset()  # run ids that come from the committed recorded run
 
 
 def read_complete_lines(path: Path) -> list[str]:
@@ -155,19 +164,38 @@ def load_decisions(path: Path) -> tuple[list, int]:
     return [by_key[k] for k in sorted(by_key)], skipped
 
 
-def load_loop(results_dir: Path | None = None) -> LoopData:
-    """Real mode if either real file exists (a missing one counts as empty); placeholders only when both are missing."""
-    results_dir = RESULTS if results_dir is None else results_dir
-    real_r, real_d = results_dir / ROUNDS_FILE, results_dir / DECISIONS_FILE
-    if real_r.exists() or real_d.exists():
-        r_path, d_path, is_placeholder = real_r, real_d, False
-    else:
-        r_path, d_path = results_dir / ROUNDS_PLACEHOLDER, results_dir / DECISIONS_PLACEHOLDER
-        is_placeholder = r_path.exists() or d_path.exists()
-    warnings: list = []
+def _load_pair(r_path: Path, d_path: Path, warnings: list) -> tuple[pd.DataFrame, list, int]:
+    """(rounds, decisions, n_skipped) of one pair; a missing file counts as empty."""
     rounds = load_rounds(r_path, warnings) if r_path.exists() else empty_rounds()
     decisions, skipped = load_decisions(d_path) if d_path.exists() else ([], 0)
-    return LoopData(rounds, decisions, is_placeholder, skipped, warnings)
+    return rounds, decisions, skipped
+
+
+def load_loop(results_dir: Path | None = None) -> LoopData:
+    """The live runs together with the committed recorded run, so a rehearsal never hides the recorded one
+    (a run in both: the live copy wins); the placeholders only when neither pair has a file."""
+    results_dir = RESULTS if results_dir is None else results_dir
+    pairs = {"live": (ROUNDS_FILE, DECISIONS_FILE), "recorded": (ROUNDS_RECORDED, DECISIONS_RECORDED)}
+    present = [n for n, (r, d) in pairs.items() if (results_dir / r).exists() or (results_dir / d).exists()]
+    warnings: list = []
+    if not present:
+        r_path, d_path = results_dir / ROUNDS_PLACEHOLDER, results_dir / DECISIONS_PLACEHOLDER
+        source = "placeholder" if r_path.exists() or d_path.exists() else "none"
+        rounds, decisions, skipped = _load_pair(r_path, d_path, warnings)
+        return LoopData(rounds, decisions, source == "placeholder", skipped, warnings, source)
+    loaded = {n: _load_pair(results_dir / pairs[n][0], results_dir / pairs[n][1], warnings) for n in present}
+    frames = [loaded[n][0] for n in present if len(loaded[n][0])]
+    rounds = (pd.concat(frames, ignore_index=True).drop_duplicates(["run", "round"])  # live first: it wins
+              .sort_values(["run", "round"]).reset_index(drop=True)) if frames else empty_rounds()
+    by_key = {(d["run"], d["round"]): d for n in reversed(present) for d in loaded[n][1]}  # live last: it wins
+
+    def run_ids(name: str) -> set:
+        r, d, _ = loaded.get(name, (empty_rounds(), [], 0))
+        return set(r["run"]) | {x["run"] for x in d}
+
+    recorded = frozenset(run_ids("recorded") - run_ids("live"))
+    return LoopData(rounds, [by_key[k] for k in sorted(by_key)], False, sum(loaded[n][2] for n in present),
+                    warnings, present[0], recorded)
 
 
 def runs(data: LoopData) -> list[str]:
@@ -184,9 +212,15 @@ def statuses(decisions: list) -> list:
 
 
 def run_badge(decisions: list, is_placeholder: bool) -> str:
+    """What ran: REPLAY if any agent block was replayed, LIVE if any agent answered live, FALLBACK if agents
+    ran but all fell back, RULE ONLY if no agent ran (a plain loop.py run). Never LIVE without a live call."""
     if is_placeholder:
         return "PLACEHOLDER"
-    return "REPLAY" if "REPLAY" in statuses(decisions) else "LIVE"
+    seen = statuses(decisions)
+    for badge in ("REPLAY", "LIVE", "FALLBACK"):
+        if badge in seen:
+            return badge
+    return "RULE ONLY"
 
 
 def _fmt(v) -> str:
@@ -228,6 +262,15 @@ def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
                  if decision.get(a) is not None and decision[a]["status"] == "FALLBACK"]
     if fallbacks:
         parts.append("Fallback: " + ", ".join(fallbacks))
+    if decision.get("agent_error"):
+        parts.append(f"Agents failed, the rule decided: {decision['agent_error']}")
+    a1 = (decision.get("a1") or {}).get("output")
+    if isinstance(a1, dict) and a1.get("drift") in ("real", "not_real"):
+        parts.append(f"A1 drift {a1['drift']}")
+    ev = decision.get("evidence")
+    if isinstance(ev, dict) and isinstance(ev.get("pooled_adults"), int) and ev.get("pooled_ft") is not None:
+        parts.append(f"promote test: pooled audit false-teen {_pct(ev['pooled_ft'])} on {ev['pooled_adults']} "
+                     f"adults, streak {ev.get('streak')}")
     if round_row is not None:
         parts.append(f"{round_row['mode']}, recall {round_row['rec']:.0%}, false-teen {round_row['ft']:.0%}{tag}")
     return ". ".join(parts) + "."
@@ -257,6 +300,9 @@ def _card_body(key: str, block: dict, decision: dict) -> None:
     if key == "a1" and isinstance(out, dict):
         st.markdown(f"**Drift:** {plain(out.get('drift', '?'))}")
         st.caption(plain(out.get("reason", "")))
+        ev = [f"{e.get('field')} = {e.get('value')}" for e in _dicts(out.get("evidence"))]
+        if ev:
+            st.caption("Evidence: " + plain("; ".join(ev)))
     elif key == "a3" and isinstance(out, dict):
         pats = _dicts(out.get("patterns"))
         st.markdown(f"**Top pattern:** {plain(pats[0].get('description', '?'))}" if pats else "No pattern found.")
@@ -363,7 +409,17 @@ def loop_chart(rounds: pd.DataFrame, cap: float, tag: str) -> alt.LayerChart:
     return alt.layer(*layers, title=f"Recall and false-teen by round{tag}")
 
 
-def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisions: list) -> None:
+def _start_run() -> None:
+    """Button callback: start crew.py in the background and make the run picker follow the new run."""
+    run_id = crew.start_background(RESULTS)
+    if run_id is None:
+        st.toast("A loop run is already going; it shows here as it lands.")
+        return
+    st.session_state["loop_run"] = run_id
+    st.session_state["loop_started_run"] = run_id  # this session's run: only it sees that run's error
+
+
+def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisions: list, running: bool) -> None:
     latest = rounds.iloc[-1] if len(rounds) else None
     seen = [int(r) for r in rounds["round"]] + [d["round"] for d in decisions]
     rnd = max(seen) if seen else None
@@ -375,14 +431,30 @@ def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisio
         st.badge(badge, color=BADGE_COLOR[badge])
         st.badge(mode, color=BADGE_COLOR[mode])
     with c2:
-        st.caption(f"Run {run or '-'}. Round {'-' if rnd is None else rnd} of {LAST_ROUND}, cap {cap:.0%}.")
+        st.caption(f"Run {run or '-'}. Round {'-' if rnd is None else rnd} of {LAST_ROUND}, cap {cap:.0%}."
+                   + (" Running..." if running else ""))
     with c3:
-        st.button("Run live crew", disabled=True, help="Stub: the live crew is not wired yet.")
+        st.button("Run loop", disabled=running, on_click=_start_run,
+                  help="Runs loop.py R0-R7 with the agents built so far (A1) in the background. Each round is "
+                       "appended as it ends and this tab follows it. Agents are live only with ANTHROPIC_API_KEY set.")
     with c4:
         st.toggle("Replay", disabled=True, help="Stub: replay is not wired yet.")
 
 
 def render_loop_tab() -> None:
+    """The tab as a fragment that polls every REFRESH_S seconds only while a run is going (no idle polling)."""
+    running = crew.status()["running"]
+    st.session_state["loop_polling"] = running
+    st.fragment(run_every=REFRESH_S if running else None)(_loop_fragment)()
+
+
+def _loop_fragment() -> None:
+    """The whole tab; while polling it re-runs on its own, without re-running the Results tab."""
+    status = crew.status()
+    if status["running"] != st.session_state.get("loop_polling", False):
+        st.rerun()  # a run started or ended: rebuild the fragment with (or without) polling
+    if status["error"] and status["run"] == st.session_state.get("loop_started_run"):
+        st.error(f"The loop run you started failed: {status['error']}")
     try:
         data = load_loop()
     except ValueError as e:
@@ -391,18 +463,28 @@ def render_loop_tab() -> None:
         return
     if data.is_placeholder:
         st.warning(BANNER)
+    elif data.recorded:
+        st.caption(f"Runs marked (recorded) are the committed run ({ROUNDS_RECORDED}, {DECISIONS_RECORDED}). "
+                   f"Run loop adds new runs to {ROUNDS_FILE} / {DECISIONS_FILE}; the recorded run stays in the picker.")
     for w in data.warnings:
         st.warning(w)
     if data.n_skipped:
         st.caption(f"{data.n_skipped} lines skipped in decisions (bad JSON or invalid record).")
 
     all_runs = runs(data)
-    run = st.selectbox("Run (newest first)", all_runs, key="loop_run") if all_runs else None
+    live_run = status["run"] if status["running"] else None
+    if live_run is not None and live_run not in all_runs:  # started, nothing written yet
+        all_runs = [live_run, *all_runs]
+    if st.session_state.get("loop_run") not in all_runs:  # e.g. the placeholder run once real files exist
+        st.session_state.pop("loop_run", None)
+    run = st.selectbox("Run (newest first)", all_runs, key="loop_run",
+                       format_func=lambda r: f"{r} (running)" if r == live_run
+                       else f"{r} (recorded)" if r in data.recorded else r) if all_runs else None
     rounds, decisions = for_run(data, run)
     tag = " (projected)" if data.is_placeholder else ""
-    render_header(data, run, rounds, decisions)
+    render_header(data, run, rounds, decisions, status["running"])
     if run is None:
-        st.info("No loop run yet. Press Run when the live crew is wired.")
+        st.info("No loop run yet. Press Run loop (or run python -m softsignal.crew).")
 
     latest = rounds.iloc[-1] if len(rounds) else None
     t1, t2, t3, t4, t5 = st.columns(5)

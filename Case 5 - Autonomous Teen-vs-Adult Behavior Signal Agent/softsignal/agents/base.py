@@ -11,7 +11,7 @@ so an agent never breaks the round:
     api_error        any other API or client error (auth, rate limit, server error, unresolved credentials)
     refusal          stop_reason "refusal" (checked before the text is read, so it is never mislabelled)
     invalid_output   cut off at max_tokens, no text, or text that does not match the schema
-    number_not_in_input / cites_unknown_field / age_claim / guardrail   the agent's own checks (validate in each agent)
+    number_not_in_input / cites_unknown_field / age_claim / unsupported_verdict / guardrail   the agents' checks
     insufficient_data   the input lacks what the agent needs; no model call is made
 
 Model: claude-opus-5 for all five agents (Crew Plan section 9: one setup to measure), effort "low".
@@ -46,6 +46,7 @@ INSUFFICIENT = "insufficient_data"
 OFFLINE, TIMEOUT, CONNECTION, API_ERROR = "offline", "timeout", "connection", "api_error"
 REFUSAL, INVALID = "refusal", "invalid_output"
 NUMBER_NOT_IN_INPUT, UNKNOWN_FIELD, AGE_CLAIM = "number_not_in_input", "cites_unknown_field", "age_claim"
+UNSUPPORTED = "unsupported_verdict"  # e.g. A1 says drift is real without citing any PSI
 GUARDRAIL = "guardrail"  # A2: an action the hold rule or the promote guard forbids
 CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID")
 

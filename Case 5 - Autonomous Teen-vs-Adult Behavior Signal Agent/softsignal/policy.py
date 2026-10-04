@@ -13,7 +13,7 @@ cannot tell them apart from scored ones, so its soft_up rates include them.
 Thresholds come from honest out-of-fold scores only (cache/stack_oof.csv, written by stack.py), never
 from test. Decisions: the cap wins over review_budget (the verify band is never truncated, budget_binding
 reports when it is over budget); the 8-30% cap clamp lives in loop.py and A2, not here, because the
-ladder rows use 5% and 10%. psi_drift (the A1 fallback threshold) is in policy.yaml with no value yet.
+ladder rows use 5% and 10%. psi_drift (the A1 fallback threshold) is in policy.yaml, measured over loop batches.
 
 Run: python -m softsignal.policy
 """
