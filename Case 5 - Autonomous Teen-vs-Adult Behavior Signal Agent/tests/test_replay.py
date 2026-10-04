@@ -3,6 +3,7 @@ mode (Crew Plan test_replay: replaying a recorded run reproduces the same screen
 import json
 import time
 
+import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -75,6 +76,59 @@ def test_an_offline_crew_run_replays_a_recorded_live_output(split_and_tm, tmp_pa
     assert again[2]["a1"]["status"] == REPLAY and again[2]["a1"]["output"] == recorded[2]["a1"]["output"]
     assert again[2]["a1"]["input_hash"] == recorded[2]["a1"]["input_hash"]  # the same input, so it may be replayed
     assert [r["a1"]["status"] for r in again[:2]] == [FALLBACK, FALLBACK]  # nothing recorded live: the fallback
+
+
+def _env(split_and_tm, tmp_path, run):
+    train, test, tm = split_and_tm
+    return loop.make_env(train, test, timer=AgentTimer(tmp_path / f"{run}.jsonl", run=run), tm=tm)
+
+
+def _pretend_live(records, keys=("a1", "a2", "a3", "a5")):
+    """The records as if every agent that ran had answered live."""
+    return [{**r, **{k: {**r[k], "status": LIVE} for k in keys if r[k]["status"] is not None}} for r in records]
+
+
+def test_a_full_offline_replay_reproduces_the_rounds_and_marks_every_agent_replay(split_and_tm, tmp_path):
+    # the "recording": an offline run whose A2 decision is applied (as a live crew run's would be), dressed as live
+    _, base = crew.run_crew(_env(split_and_tm, tmp_path, "base"), None, 3)
+    first_rounds, first = crew.run_crew(_env(split_and_tm, tmp_path, "first"), None, 3,
+                                        replayer=replay.Replayer.from_records(_pretend_live(base, keys=("a2",))))
+    replayer = replay.Replayer.from_records(_pretend_live(first))  # every agent that ran, dressed as live
+    again_rounds, again = crew.run_crew(_env(split_and_tm, tmp_path, "again"), None, 3, replayer=replayer)
+    cols = [c for c in first_rounds.columns if c != "run"]
+    pd.testing.assert_frame_equal(first_rounds[cols], again_rounds[cols])  # the same rounds.csv rows
+    for r in again:
+        ran = [k for k in ("a1", "a2", "a3", "a5") if r[k]["status"] is not None]
+        assert ran and all(r[k]["status"] == REPLAY for k in ran if not (k == "a3" and r[k]["status"] == FALLBACK)), r["round"]
+    assert [r["a2"]["status"] for r in again[1:]] == [REPLAY] * 3  # A2 is replayed from R1 (R0 has no A2)
+
+
+def test_a2_replay_is_applied_and_a_recorded_fallback_is_not_served(split_and_tm, tmp_path):
+    _, first = crew.run_crew(_env(split_and_tm, tmp_path, "first"), None, 2)
+    live = _pretend_live(first, keys=("a2",))
+    _, again = crew.run_crew(_env(split_and_tm, tmp_path, "again"), None, 2, replayer=replay.Replayer.from_records(live))
+    assert again[1]["a2"]["status"] == REPLAY and again[1]["a2"]["output"] == first[1]["a2"]["output"]
+    assert again[1]["applied"]["source"] == "A2"  # a REPLAY decision is A2's own, so it is applied in crew mode
+    _, plain = crew.run_crew(_env(split_and_tm, tmp_path, "plain"), None, 2, replayer=replay.Replayer.from_records(first))
+    assert plain[1]["a2"]["status"] == FALLBACK  # the recording holds a FALLBACK: nothing to replay
+
+
+def test_a_recording_from_a_different_input_is_flagged_not_served(split_and_tm, tmp_path):
+    _, first = crew.run_crew(_env(split_and_tm, tmp_path, "first"), None, 2)
+    live = _pretend_live(first, keys=("a1", "a2"))
+    live[1] = {**live[1], "a2": {**live[1]["a2"], "input_hash": "0000000000000000"}}
+    _, again = crew.run_crew(_env(split_and_tm, tmp_path, "again"), None, 2, replayer=replay.Replayer.from_records(live))
+    a2 = again[1]["a2"]
+    assert a2["status"] == FALLBACK
+    assert any(e.startswith("replay_hash_mismatch: recorded input 0000000000000000") for e in a2["errors"])
+    assert not any("replay_hash_mismatch" in e for e in again[1]["a1"]["errors"])  # the other agent matched
+
+
+def test_mismatch_note_is_none_when_nothing_was_recorded_or_the_hash_matches():
+    r = replay.Replayer.from_records([rec("r", 1, a1=(LIVE, {"x": 1}, "h1"))])
+    assert r.mismatch_note(1, "a1", "h1") is None and r.mismatch_note(2, "a1", "h1") is None
+    assert r.mismatch_note(1, "a2", "h1") is None
+    assert "recorded input h1, now h9" in r.mismatch_note(1, "a1", "h9")
 
 
 # --- the Loop tab's Replay mode --------------------------------------------------------------------------------

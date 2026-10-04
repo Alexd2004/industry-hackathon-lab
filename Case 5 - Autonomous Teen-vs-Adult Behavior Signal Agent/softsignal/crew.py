@@ -21,10 +21,12 @@ loop.run_loop's three callbacks:
 
 Offline (no client), each agent first asks replay.Replayer for a recorded LIVE output made from the same input
 (marked REPLAY); otherwise it uses its fallback. --record never replays: a recording holds live or fallback
-output only. A2 is not replayed: offline it always falls back to the rule's own decision.
+output only. A2 is replayed too (its recorded decision is applied, marked REPLAY, only when its input hash matches
+and it still passes validate_output). A recording made from a different input is not served and the agent block's
+errors say replay_hash_mismatch.
 
-A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline (no key) A2 falls
-back to the rule's own decision every round, so an offline run's decisions are exactly loop.run_loop's. Score PSI goes
+A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline with nothing recorded A2
+falls back to the rule's own decision every round, so such a run's decisions are exactly loop.run_loop's. Score PSI goes
 to A1 only while the live rule is the starter: once the stack is live every refit changes the model, and
 score PSI would measure that change, not drift. A4 is not run here: while the loop is in SHADOW the
 starter blend picks the verify band and has no explanations; wire it once the live rule is the stack
@@ -52,9 +54,9 @@ import numpy as np
 import pandas as pd
 
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
-from softsignal.agents import a1_drift, a3_errors, a5_audit
+from softsignal.agents import a1_drift, a2_controller, a3_errors, a5_audit
 from softsignal.agents.a2_controller import run_a2
-from softsignal.agents.base import FALLBACK, AgentResult, make_client, merge_block
+from softsignal.agents.base import FALLBACK, AgentResult, input_hash, make_client, merge_block
 from softsignal.agents.contracts import (
     A3_COLS, INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a3_input, a5_input, a5_sources, evidence_source,
     load_checklist, round_claims,
@@ -126,6 +128,18 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         except FileNotFoundError:
             checklist = []
 
+    def replay_or_run(key: str, rnd: int, payload: dict, validate, run) -> AgentResult:
+        """The recorded output when offline and the input matches (REPLAY), else run() as usual. If this round and
+        agent were recorded from a different input, the result's errors say so (replay_hash_mismatch)."""
+        got = serve(offline, key, rnd, payload, validate, env.timer)
+        if got is not None:
+            return got
+        result = run()
+        note = offline.mismatch_note(rnd, key, input_hash(payload)) if offline is not None else None
+        if note:
+            result.errors.append(note)
+        return result
+
     def block(result, rnd: int) -> dict:
         return merge_block(result, round_agent_summary(env.timer.records, rnd, env.timer.run).get(result.agent))
 
@@ -134,8 +148,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         rows = prior.iloc[0:0] if batch is None else batch.rows
         score_psi = psi_val if state.mode == SHADOW else None  # the live model changes every refit once ACTIVE
         payload = a1_input(prior, rows, score_psi, env.oracle.audit_counts(), history, rnd, psi_drift)
-        a1 = (serve(offline, "a1", rnd, payload, a1_drift.validate_output, env.timer)
-              or a1_drift.run_a1(payload, client, env.timer, rnd))
+        a1 = replay_or_run("a1", rnd, payload, a1_drift.validate_output,
+                           lambda: a1_drift.run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
         return {"a1": block(a1, rnd), "a3": block(_a3_round(state, batch, prior, rnd), rnd)}
@@ -144,8 +158,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         """A3 on this round's earlier-round errors. Never raises: an A3 error must not take A1 or the round down."""
         try:
             payload = a3_payload(env, state, batch, prior)
-            return (serve(offline, "a3", rnd, payload, a3_errors.validate_output, env.timer)
-                    or a3_errors.run_a3(payload, client, env.timer, rnd))
+            return replay_or_run("a3", rnd, payload, a3_errors.validate_output,
+                                 lambda: a3_errors.run_a3(payload, client, env.timer, rnd))
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A3", FALLBACK, a3_errors.fallback_output(), A3_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
@@ -161,9 +175,9 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             payload = a5_input(claims, sources, checklist, "round", rnd)
             # the round's own headline only (no A2 reason yet): the script checks it, no model call needed
             script_only = len(claims) == 1
-            return (serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer)
-                    or a5_audit.run_a5(payload, None if script_only else client, env.timer, rnd,
-                                       script_only=script_only))
+            return replay_or_run("a5", rnd, payload, a5_audit.validate_output,
+                                 lambda: a5_audit.run_a5(payload, None if script_only else client, env.timer, rnd,
+                                                         script_only=script_only))
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A5", FALLBACK, [], A5_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
@@ -174,7 +188,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
                            a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT,
                            a3=a3 if a3_ok else INSUFFICIENT_INPUT, policy=env.policy)
-        a2 = run_a2(payload, client, env.timer, ctx.round)
+        a2 = replay_or_run("a2", ctx.round, payload, a2_controller.validate_output,
+                           lambda: run_a2(payload, client, env.timer, ctx.round))
         return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
 
     def on_round(result) -> None:
