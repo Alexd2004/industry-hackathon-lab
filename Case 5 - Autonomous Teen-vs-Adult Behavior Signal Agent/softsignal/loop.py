@@ -134,6 +134,7 @@ class State:
     candidate: Rule | None = None
     candidate_round: int | None = None  # the round whose refit made the candidate (None: no candidate yet)
     candidate_cap: float | None = None  # the cap that refit used: what the promote gate's evidence was gathered at
+    candidate_margin: float | None = None  # the cap_margin that refit used (None: the policy's), kept with the cap
     mode: str = SHADOW
     streak: int = 0  # rounds in the window while it fills, then PROMOTE_STREAK if the pooled test passes, else 0
     window: list = field(default_factory=list)  # (audit adults, candidate false teens) of the last rounds, reassigned
@@ -228,8 +229,10 @@ def labelled_rows(env: Env, state: State) -> pd.DataFrame:
     return lab.merge(state.seen, on=ID_COL, how="left", validate="one_to_one").reset_index(drop=True)
 
 
-def refit(env: Env, state: State, cap: float) -> Rule:
+def refit(env: Env, state: State, cap: float, margin: float | None = None) -> Rule:
     """A new candidate: a stack fit on all revealed labels, thresholds from out-of-fold scores.
+
+    margin: how far below the cap the verify cutoff aims; None is the policy's cap_margin.
 
     Each revealed row is scored by a stack fit without it (5 folds), so the audit rows the thresholds
     come from are never scored by a model that saw them.
@@ -241,7 +244,7 @@ def refit(env: Env, state: State, cap: float) -> Rule:
         oof[val_idx] = fit(frame.iloc[fit_idx].reset_index(drop=True)).score(frame.iloc[val_idx])
     keep = (frame["in_audit"] if env.threshold_source == "audit" else pd.Series(True, index=frame.index)).to_numpy()
     th = pick_thresholds(oof[keep], frame.loc[keep, TARGET].to_numpy(), cap=cap,
-                         soft_recall=env.policy["soft_recall"], margin=env.policy["cap_margin"], prior=state.live.th)
+                         soft_recall=env.policy["soft_recall"], margin=env.policy["cap_margin"] if margin is None else margin, prior=state.live.th)
     return Rule(th, fit(frame))
 
 
@@ -254,7 +257,10 @@ def report_metrics(rule: Rule, test: pd.DataFrame) -> dict:
 
 
 def _decision_block(rule_dec: dict, live: Rule) -> dict:
-    return {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
+    block = {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
+    if rule_dec.get("cap_margin") is not None:
+        block["cap_margin"] = rule_dec["cap_margin"]
+    return block
 
 
 def pooled_test(window: list, cap: float) -> tuple[int, int, bool]:
@@ -383,7 +389,7 @@ def _a2_applied(a2_block: "dict | None", rule_dec: dict, floor_met: bool, promot
     """A2's own {action, cap} as the loop will apply it, or None when A2 has no decision of its own (not run,
     FALLBACK, no output). The guards are enforced here again, in code: no refit before the audit floor, no promote
     unless the pooled test passed (then re-tune), and the cap is clamped. The promote gate itself used the policy
-    cap."""
+    cap. cap_margin is clamped to 0..MARGIN_MAX (and the cap); None keeps the policy's."""
     out = side_by_side.a2_decision(a2_block)
     if out is None or out.get("action") not in (HOLD, RETUNE, PROMOTE) or not isinstance(out.get("cap"), (int, float)):
         return None
@@ -392,7 +398,11 @@ def _a2_applied(a2_block: "dict | None", rule_dec: dict, floor_met: bool, promot
         action = HOLD
     elif action == PROMOTE and not promote_ok:
         action = RETUNE
-    return {"action": action, "cap": clamp_cap(float(out["cap"]))}
+    cap = clamp_cap(float(out["cap"]))
+    margin = out.get("cap_margin")
+    if not isinstance(margin, (int, float)) or isinstance(margin, bool):
+        return {"action": action, "cap": cap}
+    return {"action": action, "cap": cap, "cap_margin": clamp_margin(float(margin), cap)}
 
 
 def _agent_blocks(before_decision: BeforeDecision | None, state: State, batch: "Batch | None",
@@ -513,17 +523,24 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     # 5. apply it
     refit_s = None
     policy_cap = clamp_cap(env.policy["cap_false_teen"])
-    evidence.update(policy_cap=policy_cap, refit_cap=None, cap_differs=False)
+    policy_margin = float(env.policy["cap_margin"])
+    evidence.update(policy_cap=policy_cap, refit_cap=None, cap_differs=False, policy_margin=policy_margin,
+                    refit_margin=None, margin_differs=False)
     if applied["action"] != HOLD:
         if applied["action"] == PROMOTE:
             # the model that goes live is thresholded at the cap its evidence candidate was refit at (the one the
             # gate measured), not at whatever cap A2 or the rule proposes now; the gate bar itself is the policy cap
-            applied = {**applied, "cap": policy_cap if state.candidate_cap is None else state.candidate_cap}
-        evidence.update(refit_cap=applied["cap"], cap_differs=applied["cap"] != policy_cap)
+            applied = {**applied, "cap": policy_cap if state.candidate_cap is None else state.candidate_cap,
+                       "cap_margin": state.candidate_margin}  # the margin goes with the cap: same model as tested
+        margin = policy_margin if applied.get("cap_margin") is None else applied["cap_margin"]
+        applied = {**applied, "cap_margin": margin}
+        evidence.update(refit_cap=applied["cap"], cap_differs=applied["cap"] != policy_cap,
+                        refit_margin=margin, margin_differs=margin != policy_margin)
         t0 = time.perf_counter()
         with env.timer.call(AGENT, "refit", "tool"):
-            state.candidate = refit(env, state, applied["cap"])
+            state.candidate = refit(env, state, applied["cap"], margin)
             state.candidate_round, state.candidate_cap = batch.round, applied["cap"]
+            state.candidate_margin = margin
         refit_s = time.perf_counter() - t0
         if applied["action"] == PROMOTE:
             if _unsafe(state.candidate):
@@ -536,10 +553,12 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
             state.live = state.candidate
     if source == SOURCE_RULE:
         rule_orig = applied  # a refused promote shows as the rule's own decision, as before A2 existed
-    diff = side_by_side.diff(a2_block, rule_orig)  # A2's raw proposal against the rule decision in the record
+    # A2's raw proposal against the rule decision in the record; the rule's margin is the policy's
+    diff = side_by_side.diff(a2_block, {**rule_orig, "cap_margin": policy_margin})
     decision = _decision_block(applied, state.live)
     rule_block = _decision_block(rule_orig, state.live)
-    if (rule_orig["action"], rule_orig["cap"]) != (applied["action"], applied["cap"]):
+    if (rule_orig["action"], rule_orig["cap"], rule_orig.get("cap_margin", policy_margin)) != (
+            applied["action"], applied["cap"], applied.get("cap_margin", policy_margin)):
         # the live cutoff is the applied decision's; the rule's own cutoff is unknown without a second refit
         rule_block["cutoff"] = None
     row = make_row(env, state, batch.round, applied["action"], source, n_flagged=n_flagged,

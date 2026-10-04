@@ -257,15 +257,17 @@ def split():
 
 
 def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=(), min_adults=1, decide=None, apply_a2=False,
-               caps=None):
+               caps=None, margins=None):
     """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place.
     decide / apply_a2: A2's callback (see loop.run_round); caps, if a list, collects the cap of every refit."""
     train, test, tm = split
     monkeypatch.setattr(lp, "PROMOTE_MIN_ADULTS", min_adults)  # these test the promote logic, not the real floor
     seq = list(flags) if isinstance(flags, list) else [flags]  # a list gives each refit its own flags, the last repeats
-    def stub_refit(env, st, cap):
+    def stub_refit(env, st, cap, margin=None):
         if caps is not None:
             caps.append(cap)
+        if margins is not None:
+            margins.append(margin)
         return candidate(seq.pop(0) if len(seq) > 1 else seq[0])
 
     monkeypatch.setattr(lp, "refit", stub_refit)
@@ -338,7 +340,8 @@ def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
     for r in records[1:]:
         ev = r["evidence"]
         assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "pooled_adults", "pooled_ft", "streak",
-                           "promote_refused", "policy_cap", "refit_cap", "cap_differs", "cand_age"}
+                           "promote_refused", "policy_cap", "refit_cap", "cap_differs", "cand_age",
+                           "policy_margin", "refit_margin", "margin_differs"}
         assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
     hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
     assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)
@@ -418,9 +421,9 @@ def test_pooled_test_counts_adults_and_false_teens():
 
 
 # ---- A2 inside the round (step 15) ----
-def a2_says(action, cap):
+def a2_says(action, cap, cap_margin=None):
     block = {"status": "LIVE", "fallback_reason": None,
-             "output": {"action": action, "cap": cap, "reason": "test", "cites": ["audit"]}}
+             "output": {"action": action, "cap": cap, "cap_margin": cap_margin, "reason": "test", "cites": ["audit"]}}
     return lambda ctx, blocks: {"a2": block}
 
 
@@ -484,3 +487,49 @@ def test_a_stale_header_fails_before_any_round_runs(tmp_path, monkeypatch, mode)
     monkeypatch.setattr("sys.argv", ["loop", "--mode", mode, "--no-write"])
     with pytest.raises(pytest.fail.Exception, match="must not load"):  # --no-write skips the check and goes on to run
         lp.main()
+
+
+# ---- A2's cap_margin (step 2) ----
+def test_a2_margin_reaches_the_refit_clamped_and_is_logged(split, tmp_path, monkeypatch):
+    margins = []
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 1, decide=a2_says("re-tune", 0.15, 0.4),
+                               apply_a2=True, margins=margins)
+    rec = rounds.attrs["records"][0]
+    assert margins == [lp.MARGIN_MAX] and st.candidate_margin == lp.MARGIN_MAX  # 0.4 clamped in code
+    assert rec["evidence"]["refit_margin"] == lp.MARGIN_MAX and rec["evidence"]["margin_differs"] is True
+    assert rec["applied"]["decision"]["cap_margin"] == lp.MARGIN_MAX
+    assert rec["diff"]["cap_margin"] == [POL["cap_margin"], 0.4]  # A2's own ask against the policy value
+
+
+def test_a_null_margin_keeps_the_policy_value_and_no_diff(split, tmp_path, monkeypatch):
+    margins = []
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 1, decide=a2_says("re-tune", 0.15),
+                              apply_a2=True, margins=margins)
+    rec = rounds.attrs["records"][0]
+    assert margins == [POL["cap_margin"]] and rec["evidence"]["margin_differs"] is False
+    assert "cap_margin" not in rec["diff"]
+
+
+def test_the_rule_mode_never_uses_a2_margin(split, tmp_path, monkeypatch):
+    margins = []
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 1, decide=a2_says("re-tune", 0.15, 0.04),
+                              apply_a2=False, margins=margins)
+    assert margins == [POL["cap_margin"]] and rounds.attrs["records"][0]["a2"]["output"]["cap_margin"] == 0.04
+
+
+def test_a_promote_keeps_the_margin_the_evidence_candidate_was_refit_at(split, tmp_path, monkeypatch):
+    margins = []
+
+    def decide(ctx, blocks):
+        if ctx.guards["promote_allowed"]:
+            return a2_says("promote", 0.15, 0.01)(ctx, blocks)
+        return a2_says("re-tune", 0.15, 0.03)(ctx, blocks)
+
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 2, decide=decide, apply_a2=True, margins=margins)
+    assert rounds["action"].tolist() == [lp.RETUNE, lp.PROMOTE] and margins == [0.03, 0.03]
+    assert st.mode == lp.ACTIVE and st.candidate_margin == 0.03
+
+
+def test_clamp_margin_never_exceeds_the_cap():
+    assert lp.clamp_margin(0.2, 0.08) == lp.MARGIN_MAX and lp.clamp_margin(-1, 0.15) == 0.0
+    assert lp.clamp_margin(0.5, 0.03) == 0.03
