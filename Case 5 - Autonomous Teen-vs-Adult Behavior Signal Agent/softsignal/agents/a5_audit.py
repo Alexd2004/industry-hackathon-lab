@@ -18,7 +18,12 @@ file + row, risks, note}. Verdicts:
     unsupported   the files are there but no row holds the claim's numbers
     cannot_check  no number in the claim, or no results file to check it against
 A number matches a file value at the precision the claim writes it: "92%" matches 0.9199 (92.0 within 0.5),
-"17.1%" matches 0.171, "0.955" matches 0.9551; a percent also matches the value itself.
+"17.1%" matches 0.171, "0.955" matches 0.9551; a percent also matches the value itself. A claim that names a
+metric (recall, false-teen, AUC, precision, missed-teen, F1, cap, PSI, audit adults) needs one of its numbers in
+a column of that metric (METRICS), so "AUC 0.50" is not supported by a cutoff of 0.50. When no present row holds
+a claim and a results file is missing, the verdict is cannot_check (the missing file may hold it), not unsupported.
+Sources: a row id ("policy_grid.csv:cap=0.15"), or "files: a.csv, b.txt" (the files checked, or missing); null
+only for a claim with no number.
 
 Fallback (the plan's "script that compares each quoted number with its file"): check_claims(). It also goes to
 the model as script_check, a starting point the model may overrule with a reason. Code gate: one verdict per
@@ -29,6 +34,7 @@ sources are known rows or files; risk ids come from the checklist; numbers in th
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 
 from softsignal.agent_timer import AgentTimer
@@ -59,8 +65,11 @@ Verdicts:
 - supported: every number in the claim matches one measured row; source is that row's id.
 - projected: the numbers match only a projected row; source is that row's id. Never call a projected number \
 supported.
-- unsupported: the files that should hold the numbers do not; source is the closest row id, a file, or null.
-- cannot_check: the claim has no number, or no file covers it; source is a file or null.
+- unsupported: every file is present and none holds the numbers; source is the closest row id, or "files: \
+<the files checked>".
+- cannot_check: the claim has no number (source null), or a file that could hold it is missing (source "files: \
+<the missing files>").
+- A metric the claim names (recall, false-teen, AUC, precision, cap, ...) must be the column the number is in.
 
 Rules:
 - Use only the input. Never state or guess an age or anything the input does not say.
@@ -71,6 +80,37 @@ Rules:
 
 
 # ---- the script: each quoted number against the rows ----
+# A metric word in a claim -> the column names it may be checked against (prefix match on "_"-separated parts).
+METRICS = {r"\brecall\b": ("rec",), r"\bfalse[- ]teen\b": ("ft",), r"\bauc\b": ("auc",),
+           r"\bprecision\b": ("prec",), r"\bmissed[- ]teen\b": ("mt",), r"\bf1\b": ("f1",), r"\bcap\b": ("cap",),
+           r"\bpsi\b": ("psi",), r"\baudit adults?\b": ("n_audit_adults",)}
+
+
+def _named_metrics(text: str) -> list[tuple[str, tuple]]:
+    low = text.lower()
+    return [(pat, cols) for pat, cols in METRICS.items() if re.search(pat, low)]
+
+
+def _in_family(column: str, family: tuple) -> bool:
+    parts = column.lower().split("_")
+    return any(column.lower() == f or f in parts for f in family)
+
+
+def _metrics_hold(text: str, row: dict, file: str) -> bool:
+    """Every metric the claim names has one of the claim's numbers in a column of that metric (a text line
+    must name the metric itself)."""
+    tokens = number_tokens(text)
+    for pat, family in _named_metrics(text):
+        if file.endswith(".txt"):
+            if not re.search(pat, str(row["values"].get("line", "")).lower()):
+                return False
+            continue
+        cols = [v for k, v in row["values"].items() if _in_family(k, family)
+                and isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if not any(token_matches(t, v) for t in tokens for v in cols):
+            return False
+    return True
+
 def _row_numbers(row: dict, file: str) -> list[float]:
     """The numbers a row holds: its numeric values, or the numbers written in a text file's line."""
     if file.endswith(".txt"):
@@ -96,9 +136,11 @@ def token_matches(token: str, value: float) -> bool:
 
 
 def row_holds(text: str, row: dict, file: str) -> bool:
-    """True when every number of the claim matches some value of the row (a claim with no number: False)."""
+    """True when every number of the claim matches some value of the row and every metric the claim names is
+    among the matched columns (a claim with no number: False)."""
     tokens, values = number_tokens(text), _row_numbers(row, file)
-    return bool(tokens) and all(any(token_matches(t, v) for v in values) for t in tokens)
+    return (bool(tokens) and all(any(token_matches(t, v) for v in values) for t in tokens)
+            and _metrics_hold(text, row, file))
 
 
 def _matched(text: str, row: dict, file: str) -> int:
@@ -127,6 +169,7 @@ def risk_tags(text: str, checklist: list[dict]) -> list[str]:
 def check_claims(payload: dict) -> dict:
     """The deterministic verdicts (the fallback and the model's script_check): {"verdicts": [...]}."""
     present = [s for s in payload["sources"] if s["status"] == "present"]
+    missing = [s["file"] for s in payload["sources"] if s["status"] == "missing"]
     out = []
     for claim in payload["claims"]:
         text, tokens = claim["text"], number_tokens(claim["text"])
@@ -134,7 +177,8 @@ def check_claims(payload: dict) -> dict:
         if not tokens:
             v = {"verdict": CANNOT, "source": None, "note": "No number to check against a results file."}
         elif not present:
-            v = {"verdict": CANNOT, "source": None, "note": "No results file to check against."}
+            v = {"verdict": CANNOT, "source": "files: " + ", ".join(missing),
+                 "note": "No results file to check against."}
         else:
             full = [(s, r) for s in present for r in s["rows"] if row_holds(text, r, s["file"])]
             if full:
@@ -144,10 +188,14 @@ def check_claims(payload: dict) -> dict:
                 else:
                     v = {"verdict": PROJECTED_V, "source": best["id"],
                          "note": "The closest row holding these numbers is projected, not measured."}
+            elif missing:  # a file that could hold it is not written yet: cannot say it is wrong
+                v = {"verdict": CANNOT, "source": "files: " + ", ".join(missing),
+                     "note": "No present row holds it, and these results files are missing."}
             else:
                 best = max(((_matched(text, r, s["file"]), r["id"]) for s in present for r in s["rows"]),
                            default=(0, None))
-                v = {"verdict": UNSUPPORTED_V, "source": best[1] if best[0] else None,
+                v = {"verdict": UNSUPPORTED_V,
+                     "source": best[1] if best[0] else "files: " + ", ".join(s["file"] for s in present),
                      "note": "No results row holds every number of the claim."}
         out.append({"claim_id": claim["id"], **v, "risks": risks})
     return {"verdicts": out}
@@ -163,6 +211,12 @@ def _closer_projected(text: str, row: dict, file: str, payload: dict) -> bool:
     cited = _closeness(text, row, file)[0]
     return any(r["kind"] == PROJECTED and row_holds(text, r, s["file"]) and _closeness(text, r, s["file"])[0] < cited
                for s in payload["sources"] if s["status"] == "present" for r in s["rows"])
+
+
+def _known_files(src: str, files: set) -> bool:
+    """A "files: a.csv, b.txt" source (or a bare file name) naming only files of the input."""
+    names = [f.strip() for f in src.removeprefix("files:").split(",")]
+    return bool(names) and all(n in files for n in names)
 
 
 def _rows(payload: dict) -> dict:
@@ -195,7 +249,10 @@ def validate_output(output, payload: dict) -> tuple[str | None, list[str]]:
                 return UNSUPPORTED, [f"{v['claim_id']}: {src} is projected, so the claim is projected, not supported"]
             if verdict == SUPPORTED and _closer_projected(texts[v["claim_id"]], row, file, payload):
                 return UNSUPPORTED, [f"{v['claim_id']}: a projected row holds these numbers more closely than {src}"]
-        elif src is not None and src not in rows and src not in files:
+        elif src is None:
+            if number_tokens(texts[v["claim_id"]]):  # plan: every verdict names a source file and row
+                return UNKNOWN_FIELD, [f"{v['claim_id']}: {verdict} needs a source (a row id or files: ...)"]
+        elif src not in rows and not _known_files(src, files):
             return UNKNOWN_FIELD, [f"{v['claim_id']}: source {src!r} is not a row or file of the input"]
         if age_claims(v["note"]):
             return AGE_CLAIM, [f"{v['claim_id']}: states an age"]

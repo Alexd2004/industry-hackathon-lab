@@ -329,6 +329,9 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
 
 # ---- A5: claims, results files as rows, the risk checklist ----
 A5_DECIMALS = 4  # source values are rounded for the prompt; a claim states at most this precision
+# Columns left out of A5's rounds rows: the run id is in no claim, and refit_s is wall-clock time; both differ on
+# every run, so leaving them in made A5's input hash (and so its replay) change from run to run.
+A5_ROUND_DROP = ("run", "refit_s")
 CLAIMS_DIR = Path(__file__).resolve().parents[2] / "claims"
 CLAIMS_FILE, CHECKLIST_FILE = CLAIMS_DIR / "claims.md", CLAIMS_DIR / "risks.yaml"
 MEASURED, PROJECTED = "measured", "projected"
@@ -380,8 +383,10 @@ def a5_sources(results_dir: Path, rounds: pd.DataFrame | None = None, rounds_fil
                files: tuple = ("eval", "rounds", "policy_grid", "sanity", "ablations")) -> list[dict]:
     """The results files A5 checks claims against, as [{file, status, rows: [{id, kind, values}]}].
 
-    eval: eval.csv (rows with eval_set "projected" are projected), else eval_placeholder.csv (all projected).
-    rounds: the given rows (a run in progress: its rounds.csv rows so far), else rounds_file's latest run.
+    eval: eval.csv (rows with eval_set "projected" are projected), else eval_placeholder.csv (all projected), and
+    eval.csv is then also listed as missing.
+    rounds: the given rows (a run in progress: its rows so far, named rounds_file), else rounds_file's latest run;
+    without the A5_ROUND_DROP columns.
     policy_grid: policy_grid.csv (what the Results tab shows; an addition to the plan's four files).
     sanity: sanity.txt, one row per line with a number. ablations: ablations.csv. A missing file is listed with
     status "missing", so A5 can say cannot_check instead of guessing.
@@ -395,8 +400,9 @@ def a5_sources(results_dir: Path, rounds: pd.DataFrame | None = None, rounds_fil
         if f == "eval":
             real, ph = results_dir / "eval.csv", results_dir / "eval_placeholder.csv"
             path = real if real.exists() else ph if ph.exists() else None
+            if path != real:
+                missing("eval.csv")  # the measured ladder is not written yet: say so, even with the placeholder
             if path is None:
-                missing("eval.csv")
                 continue
             df = pd.read_csv(path)
             proj = path == ph
@@ -411,9 +417,10 @@ def a5_sources(results_dir: Path, rounds: pd.DataFrame | None = None, rounds_fil
                     continue
                 df = pd.read_csv(path, dtype={"run": str})
                 df = df[df["run"] == df["run"].max()]  # run ids are UTC timestamps: the latest recorded run
-                name = rounds_file
             else:
-                df, name = rounds, "rounds.csv"
+                df = rounds
+            name = rounds_file
+            df = df.drop(columns=[c for c in A5_ROUND_DROP if c in df.columns])
             out.append({"file": name, "status": "present", "rows": _csv_rows(
                 df, name, lambda i, r: f"R{int(r['round'])}", lambda r: MEASURED)})
         elif f == "policy_grid":

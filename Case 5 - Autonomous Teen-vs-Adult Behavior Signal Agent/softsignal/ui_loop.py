@@ -331,7 +331,8 @@ def _card_body(key: str, block: dict, decision: dict) -> None:
         st.caption(", ".join(f"{n} {v}" for v, n in verdicts.items()) or "No claims checked.")
         for c in _dicts(out):  # flags for a person: anything not supported, with where A5 looked
             if c.get("verdict") != "supported":
-                st.caption(plain(f"{c.get('verdict')}: {c.get('claim', '?')} ({c.get('source') or 'no source'})"))
+                line = plain(f"{c.get('verdict')}: {c.get('claim', '?')} ({c.get('source') or 'no source'})")
+                st.caption(f":red[{line}]" if c.get("verdict") == "unsupported" else line)  # UI handover 6: red flag
 
 
 def agent_card(key: str, decision: dict | None, placeholder: bool = False) -> None:

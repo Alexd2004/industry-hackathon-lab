@@ -6,10 +6,12 @@ callbacks:
     before_decision(state, batch, prior, psi)  -> A1 on (prior = the earlier batches, the batch rows, the score
                                                   PSI while the live rule is the starter, audit counts, earlier
                                                   rounds' PSI); its block goes into the round's record
-    on_round(result)                           -> A5 on the finished round (its headline numbers and A2's reason,
-                                                  against this run's rounds.csv rows so far), after the decision,
-                                                  so nothing A5 writes can reach A1-A4; then loop.write_run(this
-                                                  row, this record), when writing
+    on_round(result)                           -> when writing, the round is appended at once with A5 "working"
+                                                  (a5 null), so the screen never waits on A5; then A5 checks the
+                                                  finished round (its headline numbers and A2's reason, against
+                                                  this run's rows so far), after the decision, so nothing A5
+                                                  writes can reach A1-A4; then the record is appended again with
+                                                  A5 filled in (decisions.jsonl: the last line of a round wins)
 
 Offline (no client), each agent first asks replay.Replayer for a recorded LIVE output made from the same input
 (marked REPLAY); otherwise it uses its fallback. --record never replays: a recording holds live or fallback
@@ -85,15 +87,21 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             history.append(a1_history(payload))
         return {"a1": block(a1, rnd)}
 
+    rounds_name = rounds_path.name.removesuffix(".new")  # --record builds rounds_recorded.csv.new, then swaps it in
+
     def on_round(result) -> None:
         rnd = int(result.row["round"])
         rows_so_far.append(result.row)
-        sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), files=("rounds",))
+        if write:  # the round shows now, A5's card reads "working..." (a5 null) until its line lands
+            write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [{**result.record, "a5": None}],
+                      rounds_path, decisions_path)
+        sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), rounds_name,
+                             files=("rounds",))
         payload = a5_input(round_claims(result.row, result.record), sources, checklist, "round", rnd)
         a5 = serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer) or run_a5(payload, client, env.timer, rnd)
-        result.record["a5"] = block(a5, rnd)  # before the write: the record on disk carries A5
-        if write:
-            write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
+        result.record["a5"] = block(a5, rnd)
+        if write:  # the same round again with A5 in it: the last line of a (run, round) wins
+            write_run(pd.DataFrame(columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
 
     return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round)
 

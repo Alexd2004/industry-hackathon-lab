@@ -42,3 +42,11 @@
   risk: No latency figure may be quoted before it is measured.
   say: Quote p50 / p95 from agent_calls.jsonl only.
   watch: [["latency"], [" ms"], ["seconds per"]]
+- id: demo_mode
+  risk: The demo mode can be misread (live vs replayed vs fallback).
+  say: Say which mode is running; the badge shows LIVE, FALLBACK or REPLAY on every round.
+  watch: [[" live"], ["replay"], ["demo"]]
+- id: appendix_figures
+  risk: The Winning Plan appendices have inconsistent figures (audit 60 vs 80, 0.7 s refit, 11 vs 9 activity columns, the t_soft rule); main-body values win.
+  say: Quote the main-body or measured values only.
+  watch: [["appendix"], ["80 audit"], ["11 activity"], ["0.7 s"]]

@@ -67,7 +67,7 @@ def test_each_round_is_appended_as_it_lands(split_and_tm, tmp_path, monkeypatch)
     monkeypatch.setattr(crew, "write_run", spy)
     crew.run_crew(env(split_and_tm, tmp_path, "r-append"), None, 2, write=True, rounds_path=tmp_path / "rounds.csv",
                   decisions_path=tmp_path / "decisions.jsonl")
-    assert seen == [(1, 1), (1, 2), (1, 3)]  # one row per call, the file growing round by round
+    assert seen == [(1, 1), (0, 1), (1, 2), (0, 2), (1, 3), (0, 3)]  # the row at once, then A5's record only
 
 
 def test_loop_tab_shows_the_real_run(crew_run, monkeypatch):
@@ -183,4 +183,41 @@ def test_every_round_has_an_a5_block_checked_against_this_runs_rows(crew_run):
         assert claim["claim"].startswith(f"Round {r['round']}:") and claim["verdict"] == "supported"
         assert claim["source"] == f"rounds.csv:R{r['round']}"
     on_disk = [__import__("json").loads(x) for x in (tmp / "decisions.jsonl").read_text().splitlines()]
-    assert all(d["a5"]["status"] == FALLBACK for d in on_disk)  # A5 is in the record before it is written
+    # each round lands at once with A5 working (null), then again with A5 in it; the last line of a round wins
+    assert [(d["round"], d["a5"] is None) for d in on_disk] == [(r, w) for r in range(N_ROUNDS + 1) for w in (True, False)]
+    assert all(d["a5"]["status"] == FALLBACK for d in load_loop(tmp).decisions)
+
+
+def test_isolation(split_and_tm, tmp_path, monkeypatch):
+    """Crew Plan section 12: no frozen-test id, no rounds.csv / eval.csv test metric and nothing from A5 in A1's input."""
+    from softsignal.agents.contracts import TEST_METRIC_KEYS, frozen_test_ids
+
+    seen = []
+    real = crew.run_a1
+    monkeypatch.setattr(crew, "run_a1", lambda p, *a, **k: seen.append(p) or real(p, *a, **k))
+    _, records = crew.run_crew(env(split_and_tm, tmp_path, "r-iso"), None, N_ROUNDS)
+    text = "\n".join(__import__("json").dumps(p) for p in seen)
+    assert len(seen) == N_ROUNDS + 1
+    assert not any(i in text for i in frozen_test_ids())
+    keys = set()
+    stack = list(seen)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            keys |= set(node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    assert not keys & (TEST_METRIC_KEYS | {"a5", "claim", "verdict", "rounds", "eval"})
+    assert not any(c["claim"] in text for r in records for c in r["a5"]["output"])  # A5's claims never reach A1
+
+
+def test_a5_is_replayed_offline_for_the_same_input(split_and_tm, tmp_path):
+    _, first = crew.run_crew(env(split_and_tm, tmp_path, "r-a"), None, 2)
+    _, second = crew.run_crew(env(split_and_tm, tmp_path, "r-b"), None, 2)
+    assert [r["a5"]["input_hash"] for r in first] == [r["a5"]["input_hash"] for r in second]  # stable across runs
+    recorded = [{**r, "a5": {**r["a5"], "status": "LIVE"}} for r in first]  # pretend A5 answered live
+    _, third = crew.run_crew(env(split_and_tm, tmp_path, "r-c"), None, 2,
+                             replayer=__import__("softsignal.replay", fromlist=["Replayer"]).Replayer.from_records(recorded))
+    assert {r["a5"]["status"] for r in third} == {"REPLAY"} and [r["a5"]["output"] for r in third] == [
+        r["a5"]["output"] for r in first]

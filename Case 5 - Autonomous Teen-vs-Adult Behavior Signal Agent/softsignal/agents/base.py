@@ -17,7 +17,9 @@ so an agent never breaks the round:
 Model: claude-opus-5 for all five agents (Crew Plan section 9: one setup to measure), effort "low".
 Timeouts: 4 s for agents on the decision path (Crew Plan section 6); A4 and A5 run after the round, off the
 path, so they get longer (TIMEOUTS; not measured yet, set after measuring). Overrides:
-SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S.
+SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S /
+SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
+forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
 The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. Refusals go to the
 deterministic fallback, as the plan says, not to a server-side model fallback.
 """
@@ -37,7 +39,7 @@ MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-opus-5")
 EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "low")
 TIMEOUT_S = float(os.environ.get("SOFTSIGNAL_AGENT_TIMEOUT_S", "4.0"))  # decision-path agents (A1-A3)
 TIMEOUTS = {"A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
-            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "15.0"))}  # after the round, off the path
+            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}  # per round, live (Crew Plan 9); slides: 60 s
 MAX_RETRIES = 0  # the SDK retries twice by default, which turns a 4 s timeout into about 12 s
 MAX_TOKENS = 4096  # adaptive thinking at low effort shares this with the short JSON answer
 MAX_REJECTED_CHARS = 2000  # a rejected reply is kept (truncated) for A5 and prompt tuning
