@@ -271,8 +271,8 @@ def test_the_request_is_one_fresh_prompt_with_the_contract_settings(payload, tmp
     run(payload, client, tmp_path)
     (kw,) = client.calls
     assert kw["model"] == base.MODEL and kw["system"] == SYSTEM and kw["max_tokens"] == base.MAX_TOKENS
-    assert kw["output_config"] == {"effort": base.EFFORT, "format": {
-        "type": "json_schema", "schema": anthropic.transform_schema(A4Output)}}
+    assert kw["output_config"] == base.output_config(A4Output)
+    assert ("effort" in kw["output_config"]) == bool(base.EFFORT)
     # A4 is off the decision path: its own, longer timeout, and never a retry
     assert client.options == [{"timeout": base.TIMEOUTS["A4"], "max_retries": 0}]
     assert base.TIMEOUTS["A4"] > base.TIMEOUT_S
@@ -357,7 +357,7 @@ def test_real_sdk_request_through_a_mocked_transport(payload, tmp_path):
     result, records = run(payload, client, tmp_path)
     assert (result.status, result.output) == (LIVE, out) and records[0]["tokens_in"] == 1500
     body = seen["body"]
-    assert body["model"] == base.MODEL and body["output_config"]["effort"] == base.EFFORT
+    assert body["model"] == base.MODEL and body["output_config"].get("effort") == (base.EFFORT or None)
     assert body["output_config"]["format"]["type"] == "json_schema" and body["max_tokens"] == base.MAX_TOKENS
     assert set(body["output_config"]["format"]["schema"]["properties"]) == {"batch_reason", "based_on"}
     assert "temperature" not in body and len(body["messages"]) == 1
