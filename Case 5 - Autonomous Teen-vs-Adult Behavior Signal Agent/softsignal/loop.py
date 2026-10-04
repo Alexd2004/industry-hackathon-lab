@@ -169,7 +169,8 @@ def make_env(
     tm: TextMatrix | None = None,
     **oracle_kw,
 ) -> Env:
-    """Env over a train/test split. The oracle gets train rows and test ids only, never test labels."""
+    """Env over a train/test split. The oracle gets train rows and test ids only, never test labels.
+    With oracle_kw drift=Drift(...) the test report is scored on the drifted test rows (oracle.shift_frame)."""
     if threshold_source not in THRESHOLD_SOURCES:
         raise ValueError(f"threshold_source must be one of {THRESHOLD_SOURCES}, got {threshold_source!r}")
     policy = load_policy() if policy is None else policy
@@ -177,7 +178,8 @@ def make_env(
     oracle_kw.setdefault("review_budget", policy["review_budget"])
     oracle = Oracle(train, test[ID_COL].tolist(), **oracle_kw)
     ids = tuple(train[ID_COL].astype(str))
-    return Env(oracle, test, tm if tm is not None else build_matrix(ids), ids, policy,
+    report = oracle.shift_frame(test) if oracle.drift is not None else test  # score the drifted world, not the old one
+    return Env(oracle, report, tm if tm is not None else build_matrix(ids), ids, policy,
                timer if timer is not None else get_timer(), threshold_source)
 
 
