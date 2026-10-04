@@ -265,7 +265,8 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
                 rule_decision: dict | None = None) -> dict:
     """decisions.jsonl line. Every agent block starts empty; the round fills the ones that ran.
 
-    decision is what was applied; rule_decision is what the rule would have decided (None: the same).
+    decision is what was applied; rule_decision is what the rule would have decided (None: the same); its cutoff is None when the rule was not
+    the one applied and chose another action or cap, because that cutoff is never computed.
 
     evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
     cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
@@ -516,10 +517,14 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     if source == SOURCE_RULE:
         rule_orig = applied  # a refused promote shows as the rule's own decision, as before A2 existed
     decision = _decision_block(applied, state.live)
+    rule_block = _decision_block(rule_orig, state.live)
+    if (rule_orig["action"], rule_orig["cap"]) != (applied["action"], applied["cap"]):
+        # the live cutoff is the applied decision's; the cutoff the rule would have picked is unknown without a second refit
+        rule_block["cutoff"] = None
     row = make_row(env, state, batch.round, applied["action"], source, n_flagged=n_flagged,
                    n_verify=len(verify_ids), audit_ft=audit_ft, psi=psi_val, refit_s=refit_s, diff_count=len(diff))
     record = make_record(env.timer.run, batch.round, decision, source, evidence,
-                         rule_decision=_decision_block(rule_orig, state.live))
+                         rule_decision=rule_block)
     record.update(blocks)
     record.update(a2_blocks)
     record["diff"] = diff
@@ -586,7 +591,8 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
         if first:
             header = first.split(",")
             if header != list(rounds.columns):
-                raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}")
+                raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}. "
+                                 f"It is from an older schema: move or delete {rounds_path} (a new run recreates it) and run again.")
         buf = io.StringIO()
         rounds.to_csv(buf, header=not first, index=False, lineterminator="\n")
         new_dec = "".join(json.dumps(r) + "\n" for r in records)

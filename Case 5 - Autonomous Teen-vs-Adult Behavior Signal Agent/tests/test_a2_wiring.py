@@ -13,7 +13,8 @@ from softsignal.agent_timer import AgentTimer
 from softsignal.agents.base import FALLBACK, LIVE
 from softsignal.data import load_data
 from softsignal.text_model import build_matrix
-from softsignal.ui_loop import valid_decision
+from softsignal.metrics import ROUNDS_COLS
+from softsignal.ui_loop import diff_table, load_rounds, valid_decision
 
 N_ROUNDS = 5  # R5 is the first round past the 120 audit adult floor (seed 42: 156 audit adults)
 
@@ -280,3 +281,46 @@ def test_a_promote_refits_at_the_policy_cap_not_a2s(promote_run):
     assert r["evidence"]["refit_cap"] == 0.15 and r["evidence"]["cap_differs"] is False
     assert r["a2"]["output"]["cap"] == 0.10 and r["diff"]["cap"] == [0.15, 0.10]  # A2's own cap is still logged
     assert all(cap == 0.10 for rnd, cap in caps if rnd != r["round"])  # re-tune rounds still use A2's cap
+
+
+# ---- the rule's cutoff in the record ----
+def test_rule_cutoff_is_unknown_when_a2_chose_something_else(applied_run):
+    _, records, _, _ = applied_run
+    assert records[1]["rule_decision"]["cutoff"] is None  # A2 applied hold at cap 0.20, the rule said hold at 0.15
+    assert records[5]["rule_decision"]["cutoff"] is None  # A2 re-tuned at 0.10, the rule at 0.15
+    assert isinstance(records[1]["applied"]["decision"]["cutoff"], float)
+
+
+def test_rule_cutoff_is_kept_when_the_rule_was_applied_or_agreed(applied_run, split_and_tm, tmp_path):
+    _, records, _, _ = applied_run
+    assert isinstance(records[2]["rule_decision"]["cutoff"], float)  # FALLBACK: the rule was applied
+    agree = loop.run_loop(make_env(split_and_tm, tmp_path), 1, decide=scripted({1: a2_block()}), apply_a2=True)[1]
+    assert agree[1]["applied"]["source"] == "A2" and agree[1]["diff"] == {}
+    assert agree[1]["rule_decision"]["cutoff"] == agree[1]["applied"]["decision"]["cutoff"]
+
+
+def test_a_record_with_an_unknown_rule_cutoff_still_loads_in_the_tab(applied_run):
+    _, records, _, _ = applied_run
+    assert all(valid_decision(r) for r in records)
+    table = diff_table(records[1]).set_index("field")
+    assert table.loc["cutoff", "rule"] == "-" and table.loc["cap", "changed"] == "YES"
+
+
+# ---- a results file from before diff_count ----
+OLD_COLS = [c for c in ROUNDS_COLS if c != "diff_count"]
+
+
+def test_write_run_names_the_old_file_and_the_fix(split_and_tm, tmp_path):
+    rounds, records = loop.run_loop(make_env(split_and_tm, tmp_path), 0)
+    old = tmp_path / "rounds.csv"
+    old.write_text(",".join(OLD_COLS) + "\n")
+    with pytest.raises(ValueError, match=r"older schema: move or delete .*rounds\.csv"):
+        loop.write_run(rounds, records, old, tmp_path / "decisions.jsonl")
+    assert old.read_text() == ",".join(OLD_COLS) + "\n"  # nothing was written
+
+
+def test_loop_tab_tells_the_user_how_to_fix_an_old_file(tmp_path):
+    old = tmp_path / "rounds.csv"
+    old.write_text(",".join(OLD_COLS) + "\n")
+    with pytest.raises(ValueError, match=r"missing columns \['diff_count'\]\. It is from an older schema: regenerate it"):
+        load_rounds(old, [])

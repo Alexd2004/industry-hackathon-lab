@@ -85,7 +85,10 @@ def load_rounds(path: Path, warnings: list) -> pd.DataFrame:
         raise ValueError(f"{path.name} is not a readable CSV: {e}") from e
     missing = [c for c in ROUNDS_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"{path.name} is missing columns {missing}")
+        hint = ""
+        if "diff_count" in missing:
+            hint = " It is from an older schema: regenerate it (move it aside and run the loop again)."
+        raise ValueError(f"{path.name} is missing columns {missing}.{hint}")
     df = df[ROUNDS_COLS].apply(lambda s: s.str.strip())
     for col in ("run", "mode", "action", "applied_source"):
         if (df[col] == "").any():
