@@ -1,0 +1,115 @@
+"""Input builders for the agents: the information barrier lives here (Crew Plan section 7).
+
+Each builder copies only the fields its agent's contract allows (Combined Plan section 7a). A1-A4 never get
+a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
+Only A4 is built so far; each owner adds theirs here.
+
+A4 (verify-band triager) gets explain.py's output for the accounts sent to verification (score, band, the
+top 3 signed contributions, the teen-leaning words), summarised in code for the batch: score range and
+median, each signal's account count, share and mean contribution, how many accounts each signal leads, and
+the recurring words. No per-account rows and no account ids: the note is about the batch, an id is not
+evidence, and per-account numbers (ranks 1..n, one account's contribution) would let the numbers-in-input
+check pass an invented count or one account's value presented as a batch figure. Every number in the
+input is a batch-level fact, so every number A4 may cite is one too. It also keeps the prompt short.
+"""
+import json
+from collections import Counter
+from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from softsignal.data import SPLIT_FILE
+from softsignal.features import FORBIDDEN, ID_COL
+
+TEST_METRIC_KEYS = frozenset({"prec", "rec", "ft", "mt", "f1", "auc"})  # test-set metrics: never in A1-A4 input
+LABEL_KEYS = frozenset(FORBIDDEN | {"label", "labels", "in_verify", "in_audit"})
+A4_COLS = [ID_COL, "score", "band", "c1", "c2", "c3", "f1", "f2", "f3", "v1", "v2", "v3", "words"]
+A4_TOP_WORDS = 10
+
+
+class BarrierError(ValueError):
+    """An agent input would carry a label, a frozen test account or a test-set metric."""
+
+
+@lru_cache(maxsize=4)
+def _test_ids_from(path: str, mtime_ns: int) -> frozenset:
+    return frozenset(json.loads(Path(path).read_text())["test_ids"])
+
+
+def frozen_test_ids(split_file: Path = SPLIT_FILE) -> frozenset:
+    """The 900 held-out test ids from the committed split (ids only, no labels)."""
+    return _test_ids_from(str(split_file), split_file.stat().st_mtime_ns)
+
+
+def check_barrier(payload) -> None:
+    """Raise BarrierError if any key anywhere in the payload names a label or a test-set metric."""
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            bad = (LABEL_KEYS | TEST_METRIC_KEYS) & set(node)
+            if bad:
+                raise BarrierError(f"agent input carries forbidden keys {sorted(bad)}")
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+
+
+def _phrase(chip: str) -> str:
+    """The readable part of a chip: "writes like a teen +7.98" -> "writes like a teen"."""
+    return chip.rsplit(" ", 1)[0]
+
+
+def a4_input(frame: pd.DataFrame, verify_ids, round_id: int | None, test_ids=None) -> dict:
+    """A4's input for one batch. frame: explain.apply_bands(explain_frame(model, batch rows), ...) rows of the
+    batch (other columns, a label included, are never copied). verify_ids: the accounts sent to verification
+    (the verify band cut to the review budget). test_ids: the frozen test set (default: results/split.json).
+
+    Raises BarrierError if a verify id is a frozen test account, ValueError if a verify id is missing from the
+    frame or not in its verify band. An empty verify_ids gives n_accounts 0 (A4 returns insufficient_data).
+    """
+    missing = [c for c in A4_COLS if c not in frame.columns]
+    if missing:
+        raise ValueError(f"A4 needs explain.apply_bands output; missing columns {missing}")
+    ids = list(dict.fromkeys(str(i) for i in verify_ids))
+    test = frozen_test_ids() if test_ids is None else frozenset(str(i) for i in test_ids)
+    leaked = sorted(set(ids) & test)
+    if leaked:
+        raise BarrierError(f"{len(leaked)} verify ids are frozen test accounts (e.g. {leaked[0]}); A4 never sees them")
+    rows = frame[A4_COLS].assign(**{ID_COL: frame[ID_COL].astype(str)})
+    rows = rows[rows[ID_COL].isin(ids)]
+    if rows[ID_COL].duplicated().any() or len(rows) != len(ids):
+        raise ValueError("every verify id must appear exactly once in the frame")
+    if (rows["band"] != "verify").any():
+        raise ValueError("every verify id must be in the verify band")
+    groups, leads, words = {}, Counter(), Counter()
+    for r in rows.itertuples(index=False):
+        top = [(f, _phrase(c), float(v)) for f, c, v in zip((r.f1, r.f2, r.f3), (r.c1, r.c2, r.c3), (r.v1, r.v2, r.v3))
+               if isinstance(f, str) and f and isinstance(c, str) and c]
+        for f, p, v in top:
+            groups.setdefault((f, p), []).append(v)
+        if top:  # c1 is the account's largest contribution by size
+            leads[top[0][:2]] += 1
+        words.update({w for w in str(r.words).split(", ") if w} if isinstance(r.words, str) else set())
+    n = len(rows)
+    signals = [{"feature": f, "signal": p, "n_accounts": len(v), "share_pct": round(100 * len(v) / n),
+                "mean_contribution": round(float(np.mean(v)), 2), "n_leading": leads[(f, p)]}
+               for (f, p), v in groups.items()]
+    signals.sort(key=lambda s: (-s["n_accounts"], -abs(s["mean_contribution"]), s["feature"], s["signal"]))
+    score = rows["score"].astype(float)
+    payload = {
+        "agent": "A4",
+        "round": None if round_id is None else int(round_id),
+        "band": "verify",
+        "n_accounts": n,
+        "score_min": round(float(score.min()), 2) if n else None,
+        "score_median": round(float(score.median()), 2) if n else None,
+        "score_max": round(float(score.max()), 2) if n else None,
+        "signals": signals,
+        "top_words": [{"word": w, "n_accounts": k}
+                      for w, k in sorted(words.items(), key=lambda kv: (-kv[1], kv[0]))[:A4_TOP_WORDS]],
+    }
+    check_barrier(payload)
+    return payload

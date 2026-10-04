@@ -391,3 +391,11 @@ def test_real_oof_false_teen_within_cap(stack_cache, cap):
     assert out["ft_verify"] <= cap
     assert out["rec_soft_up"] >= target
     assert th.t_soft <= th.t_verify
+
+
+def test_malformed_yaml_raises_value_error(tmp_path):
+    # one error type for every caller: the Results tab catches ValueError and keeps rendering
+    bad = tmp_path / "policy.yaml"
+    bad.write_text("cap_false_teen: [0.15\nreview_budget: 0.25\n")
+    with pytest.raises(ValueError, match="not valid YAML"):
+        pol.load_policy(bad)

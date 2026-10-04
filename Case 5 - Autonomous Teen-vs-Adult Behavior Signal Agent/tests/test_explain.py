@@ -13,7 +13,8 @@ import pytest
 import softsignal.explain as ex
 from softsignal.data import load_data
 from softsignal.features import ACTIVITY_COLS, FEATURE_COLS, FORBIDDEN, ID_COL, TARGET
-from softsignal.metrics import CONTRIB_COLS, RANKED_COLS, top_k_precision, top_share_cutoff
+from softsignal.metrics import CONTRIB_COLS, RANKED_COLS, prf, top_k_precision, top_share_cutoff
+from softsignal.policy import assign_bands, pick_thresholds
 from softsignal.stack import TEXT_FEATURE, Stack, logit
 from softsignal.text_model import account_top_words, build_matrix
 
@@ -267,6 +268,12 @@ def test_contrib_table_is_long_exact_and_aligned(fitted, tmp_path):
         assert np.allclose(rows.loc[exp.contrib.columns, "contrib"], exp.contrib.iloc[0])
         assert np.allclose(rows.loc[exp.raw.columns, "raw"], exp.raw.iloc[0].astype(float))
     ex.write_contrib(table, tmp_path / "contrib.csv")
+    # written at 12 significant digits: still exact enough for the detail card's logit check (abs_tol 1e-9)
+    back = pd.read_csv(tmp_path / "contrib.csv", dtype={ID_COL: str}, float_precision="round_trip")
+    per = back.groupby(ID_COL, sort=False)
+    rebuilt = per["intercept"].first() + per["contrib"].sum()
+    score = per["score"].first()
+    assert np.abs(1 / (1 + np.exp(-rebuilt)) - score).max() < 1e-9
 
 
 @pytest.mark.parametrize("damage", ["drop_col", "drop_feature_row", "duplicate_row"])
@@ -280,7 +287,7 @@ def test_write_contrib_checks_the_full_schema(fitted, tmp_path, damage):
         ex.write_contrib(bad, tmp_path / "contrib.csv")
 
 
-# --- contrarians and interim thresholds --------------------------------------------------
+# --- contrarians ------------------------------------------------------------------------
 
 def test_contrarians_are_caught_only_because_of_the_text(fitted):
     _, test, model = fitted
@@ -303,25 +310,85 @@ def test_contrarians_are_caught_only_because_of_the_text(fitted):
     assert loose.sum() > strict.sum() and len(every) == strict.sum()
 
 
-def test_interim_soft_never_sits_above_the_cap_cutoff():
-    # plan t_soft (10% quantile of teen scores) above the cap cutoff, as on the real data
-    y = np.repeat([0, 1], 100)
-    oof = np.concatenate([np.linspace(0, 0.5, 100), np.linspace(0.45, 1, 100)])
-    t_soft, t_verify = ex.interim_thresholds(oof, y, np.linspace(0, 1, 50), cap=0.15)
-    t_cap = ex.cap_threshold(oof, y, 0.15)
-    assert np.quantile(oof[y == 1], 0.10) > t_cap  # the case this test is about
-    assert t_soft == pytest.approx(t_cap)  # every account over the cap cutoff is at least soft
+# --- review queue and the policy grid (the Results tab slider) ----------------------------
+
+def synthetic_policy(seed=0, n_oof=1000, n=400):
+    rng = np.random.default_rng(seed)
+    y_oof = np.repeat([0, 1], n_oof // 2)
+    oof = np.where(y_oof == 1, rng.uniform(0.3, 1, n_oof), rng.uniform(0, 0.7, n_oof))
+    y = rng.integers(0, 2, n)
+    scores = np.where(y == 1, rng.uniform(0.3, 1, n), rng.uniform(0, 0.7, n))
+    return oof, y_oof, scores, y
 
 
-def test_interim_thresholds_follow_the_plan_and_the_budget():
-    rng = np.random.default_rng(0)
-    y = np.repeat([0, 1], 500)
-    oof = np.where(y == 1, rng.uniform(0.3, 1, 1000), rng.uniform(0, 0.7, 1000))
-    scores = rng.uniform(0, 1, 400)
-    t_soft, t_verify = ex.interim_thresholds(oof, y, scores, cap=0.15, budget=0.25)
-    t_cap = ex.cap_threshold(oof, y, 0.15)
-    assert t_soft == pytest.approx(min(np.quantile(oof[y == 1], 0.10), t_cap))
-    assert t_verify >= t_cap and (scores >= t_verify).sum() <= 100  # the budget wins
+def test_every_level2_feature_has_a_name():
+    assert set(ex.FEATURE_NAMES) == set(ex.PHRASES)
+    assert len(set(ex.FEATURE_NAMES.values())) == len(ex.FEATURE_NAMES)
+
+
+def test_review_cutoff_sends_at_most_the_budget_and_only_flagged_accounts():
+    _, _, scores, _ = synthetic_policy()
+    for t_verify in (0.2, 0.5, 0.95):
+        t = ex.review_cutoff(scores, t_verify, 0.25)
+        assert t >= t_verify and (scores >= t).sum() <= len(scores) // 4
+        if (scores >= t_verify).sum() <= len(scores) // 4:  # band within budget: all of it is sent
+            assert t == t_verify
+
+
+@pytest.mark.parametrize("n", [300, 299, 301, 7])
+def test_review_cutoff_matches_the_oracle_verify_budget(n):
+    scores = np.random.default_rng(n).uniform(0, 1, n)
+    sent = (scores >= ex.review_cutoff(scores, 0.0, 0.25)).sum()
+    assert sent == int(np.floor(0.25 * n + 1e-9))  # Oracle.verify_budget: no ties, so exactly the budget
+
+
+def test_policy_grid_rows_follow_policy_py():
+    oof, y_oof, scores, y = synthetic_policy()
+    caps = (0.08, 0.15, 0.3)
+    grid = ex.policy_grid(oof, y_oof, scores, y, soft_recall=0.9, budget=0.25, caps=caps)
+    assert list(grid.columns) == ex.POLICY_GRID_COLS and grid["cap"].tolist() == list(caps)
+    for row in grid.itertuples(index=False):
+        th = pick_thresholds(oof, y_oof, cap=row.cap, soft_recall=0.9)
+        assert (row.t_verify, row.t_soft, row.flags) == (th.t_verify, th.t_soft, ",".join(th.flags))
+        bands = assign_bands(scores, th)
+        assert row.n == len(scores) and row.n_flagged == (bands == "verify").sum()
+        assert (row.n_soft, row.n_none) == ((bands == "soft").sum(), (bands == "none").sum())
+        sent = scores >= row.t_budget
+        assert row.t_budget == ex.review_cutoff(scores, th.t_verify, 0.25)
+        assert row.n_verify == sent.sum() <= len(scores) // 4 and not (sent & (bands != "verify")).any()
+        assert row.budget_binding == (row.n_flagged / row.n > 0.25)
+        assert (row.prec_sent, row.rec_sent, row.ft_sent) == pytest.approx(prf(y, sent.astype(int))[:3])
+        assert (row.rec_flagged, row.ft_flagged) == pytest.approx(prf(y, (bands == "verify").astype(int))[1:3])
+        assert row.oof_ft_flagged <= row.cap + 1e-12  # the cap holds on the scores it was picked from
+
+
+def test_slider_rebanding_with_apply_bands_matches_the_grid():
+    # the Results tab re-bands with explain.bands; the grid counts with policy.assign_bands: they must agree
+    oof, y_oof, scores, y = synthetic_policy(seed=3)
+    grid = ex.policy_grid(oof, y_oof, scores, y, soft_recall=0.9, budget=0.25)
+    assert len(grid) == len(ex.SLIDER_CAPS) == 23 and grid["cap"].min() == 0.08 and grid["cap"].max() == 0.3
+    for row in grid.itertuples(index=False):
+        b = ex.bands(scores, row.t_soft, row.t_verify)
+        assert ((b == "verify").sum(), (b == "soft").sum(), (b == "none").sum()) == (row.n_flagged, row.n_soft, row.n_none)
+
+
+def test_policy_grid_holds_no_per_account_value():
+    oof, y_oof, scores, y = synthetic_policy()
+    grid = ex.policy_grid(oof, y_oof, scores, y, soft_recall=0.9, budget=0.25, caps=(0.15,))
+    assert len(grid) == 1 and ID_COL not in grid.columns and TARGET not in grid.columns
+
+
+def test_write_policy_grid_round_trip_and_schema_check(tmp_path):
+    oof, y_oof, scores, y = synthetic_policy()
+    grid = ex.policy_grid(oof, y_oof, scores, y, soft_recall=0.9, budget=0.25, caps=(0.1, 0.15))
+    path = tmp_path / "policy_grid.csv"
+    ex.write_policy_grid(grid, path)
+    back = pd.read_csv(path, float_precision="round_trip", keep_default_na=False)
+    assert back["t_budget"].tolist() == grid["t_budget"].tolist() and back["n_flagged"].tolist() == grid["n_flagged"].tolist()
+    with pytest.raises(ValueError, match="columns"):
+        ex.write_policy_grid(grid.drop(columns="t_budget"), path)
+    with pytest.raises(ValueError, match="one row per cap"):
+        ex.write_policy_grid(pd.concat([grid, grid]), path)
 
 
 def test_top_share_cutoff():

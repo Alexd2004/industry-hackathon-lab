@@ -16,10 +16,13 @@ ranked() does both and sorts. ranked.csv (metrics.RANKED_COLS) holds the held-ou
 accounts and never a label; contrib.csv (metrics.CONTRIB_COLS, long format) holds every
 contribution with its raw and standardized value, for the account detail card.
 
-Thresholds belong to policy.py (step 9). Until it lands, main() uses interim_thresholds(): the
-plan's rules plus the review budget, so the demo list is never 55% "verify".
+Bands come from policy.py (step 9) unchanged: the cap wins, so the verify band is never cut.
+The review budget is a queue on top, as in rounds.csv: review_cutoff() picks the flagged
+accounts that fit the budget (sent to verification now); the rest of the band stays flagged.
+policy_grid.csv (metrics.POLICY_GRID_COLS) holds the thresholds and band counts for every cap
+on the Results tab slider, so the app re-bands ranked.csv from files alone (no model, no cache).
 
-Run: python -m softsignal.explain
+Run: python -m softsignal.explain   (after python -m softsignal.stack, which writes the OOF cache)
 """
 import os
 import tempfile
@@ -32,14 +35,18 @@ import pandas as pd
 from softsignal.data import ROOT, load_data
 from softsignal.features import ACTIVITY_COLS, ID_COL, TARGET
 from softsignal.metrics import (
-    CONTRIB_COLS, DEFAULT_CAP, RANKED_COLS, cap_threshold, top_k_precision, top_share_cutoff,
+    CONTRIB_COLS, POLICY_GRID_COLS, RANKED_COLS, prf, top_k_precision, top_share_cutoff,
 )
-from softsignal.oracle import REVIEW_BUDGET
-from softsignal.stack import TEXT_FEATURE, Stack, stack
+from softsignal.policy import (
+    assign_bands, band_summary, load_audit_slice, load_policy, pick_thresholds,
+)
+from softsignal.stack import TEXT_FEATURE, Stack
 from softsignal.text_model import account_top_words
 
 RANKED = ROOT / "results" / "ranked.csv"
 CONTRIB = ROOT / "results" / "contrib.csv"
+POLICY_GRID = ROOT / "results" / "policy_grid.csv"
+SLIDER_CAPS = tuple(c / 100 for c in range(8, 31))  # the cap slider: 8-30% in 1-point steps (plan's clamp)
 N_TOP = 3
 
 # (phrase when the account's value is above average, phrase when below). For the text score the
@@ -62,6 +69,26 @@ PHRASES = {
     "exclaim_rate": ("uses many exclamation marks", "uses few exclamation marks"),
     "slang_emoji_rate": ("uses slang and emoji", "uses little slang or emoji"),
     "keyword_teen_flag": ("uses school or birthday keywords", "no school or birthday keywords"),
+}
+# Neutral names for level-2 features (detail card bars, A4's "based on" list).
+FEATURE_NAMES = {
+    TEXT_FEATURE: "writing style (text score)",
+    "pct_active_school_hours": "activity in school hours",
+    "pct_active_evening": "evening activity",
+    "pct_active_late_night": "late-night activity",
+    "weekend_weekday_session_ratio": "weekend vs weekday sessions",
+    "sessions_per_day": "sessions per day",
+    "avg_session_minutes": "session length",
+    "share_short_video_views": "short-video share",
+    "share_news_views": "news share",
+    "night_notification_open_rate": "night notification opens",
+    "avg_word_len": "word length",
+    "first_person_rate": "first-person writing",
+    "school_token_rate": "school mentions",
+    "birthday_token_rate": "birthday mentions",
+    "exclaim_rate": "exclamation marks",
+    "slang_emoji_rate": "slang and emoji",
+    "keyword_teen_flag": "school or birthday keywords",
 }
 # A text score just past 0.5 can sit on the other side of the training average, so its
 # contribution's sign disagrees with the teen/adult phrase; it then reads as neutral.
@@ -214,13 +241,18 @@ def _readable_mode() -> int:
     return 0o666 & ~mask
 
 
-def _write_csv(df: pd.DataFrame, path: Path) -> None:
-    """Write via a temp file and rename, so the app never reads a half-written file."""
+CONTRIB_FLOAT_FORMAT = "%.12g"  # last-bit BLAS / sklearn noise does not rewrite the committed 1.8 MB file
+
+
+def _write_csv(df: pd.DataFrame, path: Path, float_format: str | None = None) -> None:
+    """Write via a temp file and rename, so the app never reads a half-written file.
+
+    float_format=None writes every float exactly (scores and cutoffs that sit 1 ulp apart must survive)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".csv.tmp")
     try:
         with os.fdopen(fd, "w", newline="") as f:
-            df.to_csv(f, index=False)
+            df.to_csv(f, index=False, float_format=float_format)
         os.chmod(tmp, _readable_mode())  # other readers (a container, CI, the demo account) need access
         os.replace(tmp, path)
     finally:
@@ -240,7 +272,7 @@ def write_contrib(df: pd.DataFrame, path: Path = CONTRIB) -> None:
     per_account = df.groupby(ID_COL, sort=False)["feature"].apply(frozenset)
     if per_account.nunique() != 1 or df.duplicated([ID_COL, "feature"]).any():
         raise ValueError("every account must have each level-2 feature exactly once")
-    _write_csv(df, path)
+    _write_csv(df, path, CONTRIB_FLOAT_FORMAT)  # display only: 12 digits keep the logit sum exact to ~1e-10
 
 
 def contrarian_candidates(model: Stack, df: pd.DataFrame, t_verify: float, n: int = 5,
@@ -251,7 +283,8 @@ def contrarian_candidates(model: Stack, df: pd.DataFrame, t_verify: float, n: in
     the writing", not "from TF-IDF alone".)
 
     These are the demo pin candidates. No labels are used, so a person must still check one
-    before showing it as a correct catch. Pass the final (budget-capped) t_verify.
+    before showing it as a correct catch. Pass t_budget (review_cutoff) to pin an account that was
+    actually sent to verification.
     """
     cols = [ID_COL, "score", "text_contrib", "activity_contrib"]
     if not model.use_text:
@@ -266,43 +299,85 @@ def contrarian_candidates(model: Stack, df: pd.DataFrame, t_verify: float, n: in
     return out.head(n).reset_index(drop=True)[cols]
 
 
-def interim_thresholds(oof, y, scores, cap: float = DEFAULT_CAP,
-                       budget: float = REVIEW_BUDGET) -> tuple[float, float]:
-    """(t_soft, t_verify) until policy.py lands. oof/y: nested OOF train scores and labels; scores:
-    the accounts being banded (one batch, here the test set).
+def review_cutoff(scores, t_verify: float, budget: float) -> float:
+    """Cutoff for the flagged accounts sent to verification now: max(t_verify, the batch's top-budget cutoff).
 
-    t_cap is the cap cutoff on OOF scores; the plan's t_soft is the 10% quantile of OOF teen
-    scores. The review budget wins: t_verify is raised to the batch's top-budget cutoff, so the
-    verify band is budget-bound BY DESIGN (its size is set here, it is not a result); with fewer
-    than 1 / budget accounts nobody verifies. Every account over t_cap is at least soft. policy.py
-    should keep the budget a per-batch rule when it takes this over.
+    scores: every account in the batch (here the test set as one batch). At most floor(budget x n)
+    accounts reach it and ties never push past that (metrics.top_share_cutoff); with fewer flagged
+    accounts than slots, every flagged account is sent. The same rule as the loop's verify budget.
     """
-    oof, y = np.asarray(oof, dtype=float), np.asarray(y)
-    t_cap = cap_threshold(oof, y, cap)
-    t_budget = top_share_cutoff(scores, budget)
-    plan_soft = float(np.quantile(oof[y == 1], 0.10))
-    return min(plan_soft, t_cap), max(t_cap, t_budget)
+    return max(float(t_verify), top_share_cutoff(scores, budget))
+
+
+def policy_grid(oof, y_oof, scores, y, soft_recall: float, budget: float,
+                caps=SLIDER_CAPS) -> pd.DataFrame:
+    """One row per cap (POLICY_GRID_COLS): policy.py thresholds from the OOF audit slice (oof, y_oof),
+    then band counts and rates on the ranked accounts (scores, y). y gives aggregate rates only; no
+    per-account label is written anywhere.
+    """
+    scores = np.asarray(scores, dtype=float)
+    y = np.asarray(y)
+    rows = []
+    for cap in caps:
+        th = pick_thresholds(oof, y_oof, cap=cap, soft_recall=soft_recall)
+        t_budget = review_cutoff(scores, th.t_verify, budget)
+        sent = scores >= t_budget
+        flagged = band_summary(assign_bands(scores, th), budget, y)  # its *_verify keys = the verify band
+        oof_flagged = band_summary(assign_bands(oof, th), budget, y_oof)
+        prec_s, rec_s, ft_s, _ = prf(y, sent.astype(int))
+        rows.append({
+            "cap": round(cap, 4), "t_verify": th.t_verify, "t_soft": th.t_soft, "t_budget": t_budget,
+            "flags": ",".join(th.flags), "n": len(scores), "n_flagged": flagged["n_verify"],
+            "n_verify": int(sent.sum()), "n_soft": flagged["n_soft"], "n_none": flagged["n_none"],
+            "flagged_share": flagged["verify_share"], "budget_binding": flagged["budget_binding"],
+            "rec_flagged": flagged["rec_verify"], "ft_flagged": flagged["ft_verify"], "prec_sent": prec_s,
+            "rec_sent": rec_s, "ft_sent": ft_s, "rec_soft_up": flagged["rec_soft_up"],
+            "ft_soft_up": flagged["ft_soft_up"], "oof_rec_flagged": oof_flagged["rec_verify"],
+            "oof_ft_flagged": oof_flagged["ft_verify"],
+        })
+    return pd.DataFrame(rows, columns=POLICY_GRID_COLS)
+
+
+def write_policy_grid(df: pd.DataFrame, path: Path = POLICY_GRID) -> None:
+    if list(df.columns) != POLICY_GRID_COLS:
+        raise ValueError(f"policy grid must have columns {POLICY_GRID_COLS}")
+    if df["cap"].duplicated().any():
+        raise ValueError("policy grid must have one row per cap")
+    _write_csv(df, path)
 
 
 def main() -> None:
+    pol = load_policy()
+    cap, budget, soft_recall = pol["cap_false_teen"], pol["review_budget"], pol["soft_recall"]
     train, test = load_data(on_param_mismatch="error")
-    res = stack(train, test)
-    exp = contributions(res.stack, test)  # one model pass, reused below
-    t_soft, t_verify = interim_thresholds(res.oof, train[TARGET], exp.score)
-    out = ranked(res.stack, test, t_soft, t_verify, exp=exp)
+    audit = load_audit_slice(train)  # nested-OOF stack scores; raises if the cache is stale
+    oof, y_oof = audit["stack_oof"].to_numpy(), audit[TARGET].to_numpy()
+    model = Stack.fit(train)
+    exp = contributions(model, test)  # one model pass, reused below
+    th = pick_thresholds(oof, y_oof, cap=cap, soft_recall=soft_recall)
+    out = ranked(model, test, th.t_soft, th.t_verify, exp=exp)
     write_ranked(out)
-    write_contrib(contrib_table(res.stack, test, exp=exp))
+    write_contrib(contrib_table(model, test, exp=exp))
+    caps = sorted({*SLIDER_CAPS, cap})
+    grid = policy_grid(oof, y_oof, exp.score, test[TARGET].to_numpy(), soft_recall, budget, caps)
+    write_policy_grid(grid)
+    row = grid.loc[grid["cap"] == round(cap, 4)].iloc[0]
     counts = out["band"].value_counts().reindex(BANDS, fill_value=0)
-    print(f"wrote {len(out)} held-out test accounts to {RANKED} and {CONTRIB.name}")
-    print(f"interim thresholds (until policy.py): t_soft {t_soft:.3f}, t_verify {t_verify:.3f} "
-          f"(cap cutoff {res.threshold:.3f}; verify is capped at the {REVIEW_BUDGET:.0%} review budget by design)")
+    print(f"wrote {len(out)} held-out test accounts to {RANKED}, {CONTRIB.name} and "
+          f"{POLICY_GRID.name} ({len(grid)} caps)")
+    print(f"policy at {cap:.0%} cap: t_verify {th.t_verify:.3f}, t_soft {th.t_soft:.3f}, "
+          f"flags [{', '.join(th.flags)}] (policy.py; the cap wins, the verify band is not cut)")
     print("bands:", ", ".join(f"{b} {k}" for b, k in counts.items()))
+    print(f"review budget {budget:.0%}: {int(row['n_verify'])} of {int(row['n_flagged'])} flagged accounts "
+          f"are sent to verification now (t_budget {row['t_budget']:.3f})")
+    print(f"test (report only): flagged recall {row['rec_flagged']:.3f}, false-teen {row['ft_flagged']:.3f}; "
+          f"sent recall {row['rec_sent']:.3f}, false-teen {row['ft_sent']:.3f}, precision {row['prec_sent']:.3f}")
     by_id = test.set_index(ID_COL)[TARGET].reindex(out[ID_COL])
     print("top-k precision (test labels, report only):",
           ", ".join(f"top-{k} {top_k_precision(by_id, out['score'], k):.3f}" for k in (100, 200, 300)))
     print("\n" + out.head(5)[["rank", ID_COL, "score", "band", "c1", "words"]].round(3).to_string(index=False))
-    cands = contrarian_candidates(res.stack, test, t_verify, exp=exp)
-    print(f"\ncontrarian candidates (caught only because of the writing): {len(cands)} shown")
+    cands = contrarian_candidates(model, test, row["t_budget"], exp=exp)
+    print(f"\ncontrarian candidates (sent to verification only because of the writing): {len(cands)} shown")
     if len(cands):
         print(cands.round(2).to_string(index=False))
 
