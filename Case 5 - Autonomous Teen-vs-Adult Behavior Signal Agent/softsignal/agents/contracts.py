@@ -149,24 +149,36 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     any other field the caller holds never reaches the prompt; check_barrier() then checks the whole payload.
 
     thresholds: the live rule's (t_verify, t_soft, cap, flags). audit: audit-slice counts and the candidate's
-    audit false-teen rate (audit_false_teen, never a test-set figure). bounds: the clamp and the hold floor.
+    audit false-teen rate (candidate_false_teen, never a test-set figure). bounds: the clamp and the hold floor.
     guards: hold_required (fewer than min_audit_adults audit adults) and promote_allowed (SHADOW and the pooled
-    test passed), both computed by loop.py in code; the agent is told them and the checks enforce them.
+    test passed), both computed by loop.py in code; the agent is told them and the checks enforce them. They are
+    cross-checked here against the counts and the mode, so a caller that builds them wrongly fails loudly.
     rule: {action, cap}, loop.rule_decision(). a1 / a3: the agent's output dict, or "insufficient_data" (round 0,
     or an agent not built yet); never a guess.
     """
     rule = _pick(rule, ("action", "cap"), "rule")
     if rule["action"] not in A2_ACTIONS:
         raise ValueError(f"rule action must be one of {A2_ACTIONS}, got {rule['action']!r}")
+    bounds = _pick(bounds, A2_BOUND_KEYS, "bounds")
+    guards = _pick(guards, A2_GUARD_KEYS, "guards")
+    audit = _pick(audit, A2_AUDIT_KEYS, "audit")
+    if not 0 <= bounds["cap_min"] <= bounds["cap_max"] <= 1:
+        raise ValueError(f"A2 bounds need 0 <= cap_min <= cap_max <= 1, got {bounds['cap_min']}, {bounds['cap_max']}")
+    if not bounds["cap_min"] <= rule["cap"] <= bounds["cap_max"]:
+        raise ValueError(f"rule cap {rule['cap']} is outside the bounds {bounds['cap_min']}..{bounds['cap_max']}")
+    if guards["hold_required"] != (audit["audit_adults"] < bounds["min_audit_adults"]):
+        raise ValueError("guards.hold_required contradicts audit_adults and bounds.min_audit_adults")
+    if guards["promote_allowed"] and (guards["hold_required"] or audit["mode"] != "SHADOW"):
+        raise ValueError("guards.promote_allowed needs mode SHADOW and the hold rule satisfied")
     payload = {
         "agent": "A2",
         "round": int(round_id),
         "a1": a1,
         "a3": a3,
         "thresholds": _pick(thresholds, A2_THRESHOLD_KEYS, "thresholds"),
-        "audit": _pick(audit, A2_AUDIT_KEYS, "audit"),
-        "bounds": _pick(bounds, A2_BOUND_KEYS, "bounds"),
-        "guards": _pick(guards, A2_GUARD_KEYS, "guards"),
+        "audit": audit,
+        "bounds": bounds,
+        "guards": guards,
         "rule": rule,
     }
     check_barrier(payload)

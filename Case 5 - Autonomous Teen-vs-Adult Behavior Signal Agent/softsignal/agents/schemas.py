@@ -26,6 +26,7 @@ class A4Output(BaseModel):
                     "relies on, most important first.",
     )
 
+
 A2_MAX_REASON_CHARS = 400
 A2_MAX_CITES = 5
 
@@ -42,6 +43,7 @@ class A2Output(BaseModel):
                     "SHADOW to ACTIVE. Only choose what input.guards allows.",
     )
     cap: float = Field(
+        allow_inf_nan=False,
         description="Cap on the false-teen rate (share of adults sent to verification) for this round, "
                     "as a fraction, e.g. 0.15. Stay within input.bounds.",
     )

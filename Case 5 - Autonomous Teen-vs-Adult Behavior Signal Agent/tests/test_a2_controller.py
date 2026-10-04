@@ -11,10 +11,10 @@ from pydantic import ValidationError
 
 from softsignal.agent_timer import AgentTimer, load_records, round_agent_summary
 from softsignal.agents.a2_controller import (
-    GUARDRAIL, SYSTEM, clamp_output, fallback_output, run_a2, user_message, validate_output,
+    SYSTEM, clamp_output, fallback_output, percent_forms, run_a2, user_message, validate_output,
 )
 from softsignal.agents.base import (
-    AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL, TIMEOUT,
+    AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL, TIMEOUT,
     UNKNOWN_FIELD, merge_block,
 )
 from softsignal.agents.contracts import BarrierError, a2_input, dotted_paths
@@ -102,6 +102,22 @@ def test_agent_output_carrying_a_forbidden_key_is_refused(key):
         make_payload(a3={"patterns": [{"description": "x", key: 1}]})
 
 
+@pytest.mark.parametrize("over,match", [
+    ({"bounds": BOUNDS | {"cap_min": 0.4}}, "cap_min <= cap_max"),
+    ({"bounds": BOUNDS | {"cap_max": 1.5}}, "cap_min <= cap_max"),
+    ({"rule": RULE | {"cap": 0.5}}, "outside the bounds"),
+    ({"rule": RULE | {"cap": 0.01}}, "outside the bounds"),
+    ({"guards": GUARDS | {"hold_required": True}}, "hold_required contradicts"),
+    ({"audit": AUDIT | {"audit_adults": 10}}, "hold_required contradicts"),
+    ({"guards": GUARDS | {"promote_allowed": True}, "audit": AUDIT | {"mode": "ACTIVE"}}, "promote_allowed needs"),
+    ({"guards": GUARDS | {"promote_allowed": True, "hold_required": True}, "audit": AUDIT | {"audit_adults": 10}},
+     "promote_allowed needs"),
+])
+def test_inconsistent_input_is_refused(over, match):
+    with pytest.raises(ValueError, match=match):
+        make_payload(**over)
+
+
 def test_non_json_input_is_refused():
     with pytest.raises(TypeError):
         make_payload(audit=AUDIT | {"streak": object()})
@@ -131,6 +147,13 @@ def test_schema_has_action_and_cap_only():
 def test_schema_rejects(bad):
     with pytest.raises(ValidationError):
         A2Output(**(good() | bad))
+
+
+@pytest.mark.parametrize("cap", ["NaN", "Infinity", "-Infinity"])
+def test_schema_rejects_a_non_finite_cap(cap):
+    body = json.dumps(good()).replace("0.15", cap)
+    with pytest.raises(ValidationError):
+        A2Output.model_validate_json(body)
 
 
 def test_schema_accepts_an_out_of_range_cap():
@@ -168,6 +191,31 @@ def test_promote_needs_the_loops_pooled_test():
     assert validate_output(good(action="promote"), p) == (None, [])
 
 
+def test_guards_are_rederived_from_the_counts_not_trusted():
+    p = make_payload()
+    p["audit"] = AUDIT | {"audit_adults": 10, "mode": "ACTIVE"}  # flags say all clear, the counts do not
+    p["guards"] = {"hold_required": False, "promote_allowed": True}
+    assert validate_output(good(action="re-tune", reason="10 audit adults."), p)[0] == GUARDRAIL
+    p["audit"] = AUDIT | {"mode": "ACTIVE"}
+    assert validate_output(good(action="promote"), p)[0] == GUARDRAIL  # not SHADOW
+
+
+@pytest.mark.parametrize("reason,ok", [
+    ("Cap 15% is kept, pooled 12% is within it.", True),
+    ("Cap 0.15 and 12% pooled.", True),
+    ("Cap 99% would be fine.", False),
+    ("Cap 14% would be fine.", False),
+])
+def test_percent_form_of_an_input_fraction_is_accepted(payload, reason, ok):
+    got = validate_output(good(reason=reason, cites=["thresholds.cap"]), payload)[0]
+    assert (got is None) == ok and (ok or got == NUMBER_NOT_IN_INPUT)
+
+
+def test_percent_forms_are_rounded_fractions(payload):
+    forms = percent_forms(payload)
+    assert 15.0 in forms and 12.0 in forms and 10.0 in forms and 81.0 in forms
+
+
 def test_hold_is_allowed_after_the_floor(payload):
     assert validate_output(good(action="hold"), payload) == (None, [])  # A2 may be more careful than the rule
 
@@ -180,6 +228,20 @@ def test_cap_is_clamped_to_bounds(payload, cap, want):
 
 
 # --- fallback -------------------------------------------------------------------------------------
+
+def test_clamped_reason_matches_the_applied_cap(payload):
+    out, _ = clamp_output(good(cap=0.5, reason="Cap 0.5 is wanted."), payload)
+    assert out["cap"] == 0.3 and out["reason"].endswith("(cap clamped from 0.5 to 0.3)")
+    out, _ = clamp_output(good(cap=0.5, reason="x" * 400), payload)
+    assert len(out["reason"]) == 400 and out["reason"].endswith("to 0.3)")
+
+
+def test_fallback_is_clamped_even_if_the_rule_is_not(payload):
+    p = copy.deepcopy(payload)
+    p["rule"]["cap"] = 0.9  # bypasses a2_input on purpose
+    r = run_a2(p, client=None)
+    assert r.output["cap"] == 0.3 and r.errors and r.errors[0].startswith("CLAMPED")
+
 
 @pytest.mark.parametrize("action", ["hold", "re-tune", "promote"])
 def test_fallback_is_the_rule_decision_and_passes_its_own_checks(action):
