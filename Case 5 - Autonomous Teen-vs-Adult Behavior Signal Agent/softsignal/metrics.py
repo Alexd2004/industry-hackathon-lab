@@ -145,3 +145,23 @@ def cap_threshold(scores, y, cap: float = DEFAULT_CAP) -> float:
         return float(scores.min())  # every adult may be flagged; finite, so JSON-safe
     # step up in the scores' own dtype so float32 callers keep the tie guarantee
     return float(np.nextafter(adults[k], adults.dtype.type(np.inf)))
+
+
+def psi(expected, actual, bins: int = 10, eps: float = 1e-4) -> float:
+    """Population stability index of actual against expected scores (label-free).
+
+    Bin edges are the expected scores' quantiles (duplicates merged, so tied scores share a bin); each
+    bin share is floored at eps so an empty bin stays finite. 0.0 with a single bin (no edges).
+    """
+    e, a = np.asarray(expected, dtype=float), np.asarray(actual, dtype=float)
+    if len(e) == 0 or len(a) == 0:
+        raise ValueError("psi needs at least one expected and one actual score")
+    if not (np.isfinite(e).all() and np.isfinite(a).all()):
+        raise ValueError("scores must be finite (no NaN or inf)")
+    edges = np.unique(np.quantile(e, np.linspace(0.0, 1.0, bins + 1)[1:-1]))
+    if len(edges) == 0:
+        return 0.0
+    pe = np.bincount(np.searchsorted(edges, e, side="right"), minlength=len(edges) + 1) / len(e)
+    pa = np.bincount(np.searchsorted(edges, a, side="right"), minlength=len(edges) + 1) / len(a)
+    pe, pa = np.clip(pe, eps, None), np.clip(pa, eps, None)
+    return float(np.sum((pa - pe) * np.log(pa / pe)))
