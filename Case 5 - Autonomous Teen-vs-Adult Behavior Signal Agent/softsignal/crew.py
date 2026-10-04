@@ -87,15 +87,15 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             history.append(a1_history(payload))
         return {"a1": block(a1, rnd)}
 
-    rounds_name = rounds_path.name.removesuffix(".new")  # --record builds rounds_recorded.csv.new, then swaps it in
-
     def on_round(result) -> None:
         rnd = int(result.row["round"])
         rows_so_far.append(result.row)
         if write:  # the round shows now, A5's card reads "working..." (a5 null) until its line lands
             write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [{**result.record, "a5": None}],
                       rounds_path, decisions_path)
-        sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), rounds_name,
+        # a fixed logical name: the run id says which file the rows are in, and a recorded run (rounds_recorded.csv)
+        # must hash like a normal one (rounds.csv) or offline replay of A5 never matches
+        sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), ROUNDS_CSV.name,
                              files=("rounds",))
         payload = a5_input(round_claims(result.row, result.record), sources, checklist, "round", rnd)
         a5 = serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer) or run_a5(payload, client, env.timer, rnd)

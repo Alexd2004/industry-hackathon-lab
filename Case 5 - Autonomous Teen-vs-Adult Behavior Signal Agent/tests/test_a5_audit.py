@@ -273,3 +273,27 @@ def test_a_refusal_with_partial_text_falls_back(slides, tmp_path):
 
 def test_the_per_round_timeout_is_the_live_one():
     assert base.TIMEOUTS["A5"] == base.TIMEOUT_S == 4.0 and SLIDE_TIMEOUT_S == 60.0
+
+
+# --- review round 2: the pitch's wording, percents, contradictions ------------------------------------------------
+
+def test_a_percent_never_matches_a_cutoff_and_catches_teens_means_recall(slides):
+    p = tiny(["The stack catches 97% of teens."], [{"t_budget": 0.965, "rec": 0.92}])
+    assert check_claims(p)["verdicts"][0]["verdict"] == UNSUPPORTED_V  # 97% is not the 0.965 cutoff
+    assert check_claims(tiny(["The stack catches 92% of teens."], [{"t_budget": 0.965, "rec": 0.92}]))[
+        "verdicts"][0]["verdict"] == SUPPORTED
+
+
+@pytest.mark.parametrize("claim, source", [
+    ("At a 15% cap the stack catches 97% of teens on the 900 held-out accounts.", "policy_grid.csv:cap=0.15"),
+    ("The loop reaches 99% recall at round 7.", "rounds_recorded.csv:R7"),
+])
+def test_a_contradicted_claim_is_unsupported_even_with_files_missing(slides, claim, source):
+    p = a5_input([claim], slides["sources"], [], "slides")
+    v = check_claims(p)["verdicts"][0]
+    assert (v["verdict"], v["source"]) == (UNSUPPORTED_V, source)
+    assert validate_output(check_claims(p), p) == (None, [])
+
+
+def test_the_demo_mode_risk_is_tagged(checklist):
+    assert risk_tags("The demo runs live on stage.", checklist) == ["demo_mode"]

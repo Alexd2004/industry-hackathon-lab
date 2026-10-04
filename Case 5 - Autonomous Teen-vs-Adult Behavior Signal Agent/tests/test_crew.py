@@ -221,3 +221,17 @@ def test_a5_is_replayed_offline_for_the_same_input(split_and_tm, tmp_path):
                              replayer=__import__("softsignal.replay", fromlist=["Replayer"]).Replayer.from_records(recorded))
     assert {r["a5"]["status"] for r in third} == {"REPLAY"} and [r["a5"]["output"] for r in third] == [
         r["a5"]["output"] for r in first]
+
+
+def test_a_recorded_run_hashes_a5_like_a_normal_run(split_and_tm, tmp_path):
+    # --record writes to rounds_recorded.csv.new; a normal run writes rounds.csv: A5's input must not depend on it
+    rec_dir, live_dir = tmp_path / "rec", tmp_path / "live"
+    rec_dir.mkdir(), live_dir.mkdir()
+    _, recorded = crew.run_crew(env(split_and_tm, rec_dir, "r-rec"), None, 2, write=True,
+                                rounds_path=rec_dir / "rounds_recorded.csv.new",
+                                decisions_path=rec_dir / "decisions_recorded.jsonl.new")
+    live = [{**r, "a5": {**r["a5"], "status": "LIVE"}} for r in recorded]
+    _, normal = crew.run_crew(env(split_and_tm, live_dir, "r-norm"), None, 2, write=True,
+                              rounds_path=live_dir / "rounds.csv", decisions_path=live_dir / "decisions.jsonl",
+                              replayer=__import__("softsignal.replay", fromlist=["Replayer"]).Replayer.from_records(live))
+    assert {r["a5"]["status"] for r in normal} == {"REPLAY"}

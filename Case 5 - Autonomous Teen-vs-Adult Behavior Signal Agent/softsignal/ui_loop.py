@@ -597,4 +597,5 @@ def render_claims_check(results_dir: Path | None = None) -> None:
             counts = df["verdict"].value_counts()
             st.caption(", ".join(f"{n} {v}" for v, n in counts.items())
                        + ". Flags for a person: projected means only a projected row holds the number.")
-        st.dataframe(df, hide_index=True, width="stretch")
+        red = (lambda r: ["color: #b00020; font-weight: 600" if r.get("verdict") == "unsupported" else ""] * len(r))
+        st.dataframe(df.style.apply(red, axis=1), hide_index=True, width="stretch")  # UI handover 6: red flag

@@ -20,8 +20,10 @@ file + row, risks, note}. Verdicts:
 A number matches a file value at the precision the claim writes it: "92%" matches 0.9199 (92.0 within 0.5),
 "17.1%" matches 0.171, "0.955" matches 0.9551; a percent also matches the value itself. A claim that names a
 metric (recall, false-teen, AUC, precision, missed-teen, F1, cap, PSI, audit adults) needs one of its numbers in
-a column of that metric (METRICS), so "AUC 0.50" is not supported by a cutoff of 0.50. When no present row holds
-a claim and a results file is missing, the verdict is cannot_check (the missing file may hold it), not unsupported.
+a column of that metric (METRICS, including "catches ... teens" = recall), so "AUC 0.50" is not supported by a
+cutoff of 0.50, and a percent only ever matches a rate column (never a cutoff). A row that pins the claim by one
+named metric (cap 15%, round 7) but holds a different value for another (recall) contradicts it: unsupported.
+Otherwise, when no present row holds a claim and a results file is missing, the verdict is cannot_check.
 Sources: a row id ("policy_grid.csv:cap=0.15"), or "files: a.csv, b.txt" (the files checked, or missing); null
 only for a claim with no number.
 
@@ -80,10 +82,16 @@ Rules:
 
 
 # ---- the script: each quoted number against the rows ----
-# A metric word in a claim -> the column names it may be checked against (prefix match on "_"-separated parts).
-METRICS = {r"\brecall\b": ("rec",), r"\bfalse[- ]teen\b": ("ft",), r"\bauc\b": ("auc",),
-           r"\bprecision\b": ("prec",), r"\bmissed[- ]teen\b": ("mt",), r"\bf1\b": ("f1",), r"\bcap\b": ("cap",),
-           r"\bpsi\b": ("psi",), r"\baudit adults?\b": ("n_audit_adults",)}
+# A metric a claim names -> the column names it is checked against (a column matches when one of its "_" parts
+# is in the family). The pitch's own wording counts: "catches 92% of teens" is recall, "adults flagged" false-teen.
+METRICS = {
+    r"\brecall\b|\bcatch(?:es)?\b[^.;]*\bteens?\b|\bcaught\b[^.;]*\bteens?\b": ("rec",),
+    r"\bfalse[- ]teen\b|\badults?\b[^.;]*\bflagged\b|\bflagged\b[^.;]*\badults?\b": ("ft",),
+    r"\bauc\b": ("auc",), r"\bprecision\b": ("prec",), r"\bmissed[- ]teen\b": ("mt",), r"\bf1\b": ("f1",),
+    r"\bcap\b": ("cap",), r"\bpsi\b": ("psi",), r"\baudit adults?\b": ("n_audit_adults",), r"\bround\b": ("round",),
+}
+# Columns that hold a rate. A percent in a claim matches these only: "97%" is never a 0.965 cutoff (t_budget).
+RATE_PARTS = {"rec", "ft", "prec", "mt", "f1", "cap", "auc", "share", "psi"}
 
 
 def _named_metrics(text: str) -> list[tuple[str, tuple]]:
@@ -91,31 +99,23 @@ def _named_metrics(text: str) -> list[tuple[str, tuple]]:
     return [(pat, cols) for pat, cols in METRICS.items() if re.search(pat, low)]
 
 
-def _in_family(column: str, family: tuple) -> bool:
+def _in_family(column: str | None, family: tuple) -> bool:
+    if column is None:
+        return False
     parts = column.lower().split("_")
     return any(column.lower() == f or f in parts for f in family)
 
 
-def _metrics_hold(text: str, row: dict, file: str) -> bool:
-    """Every metric the claim names has one of the claim's numbers in a column of that metric (a text line
-    must name the metric itself)."""
-    tokens = number_tokens(text)
-    for pat, family in _named_metrics(text):
-        if file.endswith(".txt"):
-            if not re.search(pat, str(row["values"].get("line", "")).lower()):
-                return False
-            continue
-        cols = [v for k, v in row["values"].items() if _in_family(k, family)
-                and isinstance(v, (int, float)) and not isinstance(v, bool)]
-        if not any(token_matches(t, v) for t in tokens for v in cols):
-            return False
-    return True
+def _row_items(row: dict, file: str) -> list[tuple[str | None, float]]:
+    """(column, number) pairs of a row; a text file's line gives its numbers with no column."""
+    if file.endswith(".txt"):
+        return [(None, x) for x in numbers_in(str(row["values"].get("line", "")))]
+    return [(k, float(v)) for k, v in row["values"].items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+
 
 def _row_numbers(row: dict, file: str) -> list[float]:
     """The numbers a row holds: its numeric values, or the numbers written in a text file's line."""
-    if file.endswith(".txt"):
-        return numbers_in(str(row["values"].get("line", "")))
-    return [float(v) for v in row["values"].values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return [v for _, v in _row_items(row, file)]
 
 
 def token_error(token: str, value: float) -> float:
@@ -135,25 +135,74 @@ def token_matches(token: str, value: float) -> bool:
     return token_error(token, value) <= 1 + 1e-6
 
 
+def _fits(token: str, column: str | None) -> bool:
+    """A percent fits a rate column only (or a text line); any other number fits any column."""
+    return not token.endswith("%") or column is None or bool(RATE_PARTS & set(column.lower().split("_")))
+
+
+def _token_in(token: str, items: list) -> list[str | None]:
+    """The columns of a row whose value matches the token (and that it may match)."""
+    return [c for c, v in items if _fits(token, c) and token_matches(token, v)]
+
+
+def _metric_status(text: str, row: dict, file: str) -> tuple[list, list]:
+    """(named metrics a claim number matches in their column, named metrics the row has but no claim number
+    matches): the second list is a contradiction once the first pins the row."""
+    tokens, items = number_tokens(text), _row_items(row, file)
+    held, differ = [], []
+    for pat, family in _named_metrics(text):
+        if file.endswith(".txt"):
+            (held if re.search(pat, str(row["values"].get("line", "")).lower()) else differ).append(family)
+            continue
+        cols = [c for c, _ in items if _in_family(c, family)]
+        if not cols:
+            continue
+        if any(_in_family(c, family) for t in tokens for c in _token_in(t, items)):
+            held.append(family)
+        else:
+            differ.append(family)
+    return held, differ
+
+
 def row_holds(text: str, row: dict, file: str) -> bool:
-    """True when every number of the claim matches some value of the row and every metric the claim names is
-    among the matched columns (a claim with no number: False)."""
-    tokens, values = number_tokens(text), _row_numbers(row, file)
-    return (bool(tokens) and all(any(token_matches(t, v) for v in values) for t in tokens)
-            and _metrics_hold(text, row, file))
+    """True when every number of the claim matches a value of the row it may match (a percent: a rate column),
+    and every metric the claim names has a claim number in its column (a claim with no number: False)."""
+    tokens, items = number_tokens(text), _row_items(row, file)
+    if not tokens or not all(_token_in(t, items) for t in tokens):
+        return False
+    held, differ = _metric_status(text, row, file)
+    named = _named_metrics(text)
+    if file.endswith(".txt"):
+        return not differ
+    return not differ and all(any(_in_family(c, fam) for c, _ in items) for _, fam in named)
+
+
+def contradicting_row(text: str, present: list[dict]) -> str | None:
+    """A row that a claim's numbers pin by one named metric (e.g. cap 15%, round 7) while it holds a different
+    value for another the claim names (e.g. recall): the claim is contradicted, not just unchecked. Of several,
+    the row that matches the most of the claim's numbers (then the most named metrics), in file order."""
+    best, key = None, None
+    for src in present:
+        if src["file"].endswith(".txt"):
+            continue
+        for r in src["rows"]:
+            held, differ = _metric_status(text, r, src["file"])
+            if held and differ and (key is None or (_matched(text, r, src["file"]), len(held)) > key):
+                best, key = r["id"], (_matched(text, r, src["file"]), len(held))
+    return best
 
 
 def _matched(text: str, row: dict, file: str) -> int:
-    values = _row_numbers(row, file)
-    return sum(any(token_matches(t, v) for v in values) for t in number_tokens(text))
+    items = _row_items(row, file)
+    return sum(bool(_token_in(t, items)) for t in number_tokens(text))
 
 
 def _closeness(text: str, row: dict, file: str) -> tuple:
     """Sort key for rows that hold the claim: the closest values first (total rounding error), then the row
     whose text fields share the most words with the claim, then measured before projected. Picking the first
     holding row instead let a 49.6% / 31.6% grid row "support" a keyword-baseline claim of 50% / 32%."""
-    values = _row_numbers(row, file)
-    err = sum(min(token_error(t, v) for v in values) for t in number_tokens(text))
+    items = _row_items(row, file)
+    err = sum(min((token_error(t, v) for c, v in items if _fits(t, c)), default=1e9) for t in number_tokens(text))
     words = {w for w in text.lower().replace(",", " ").split() if w.isalpha() and len(w) > 3}
     labels = " ".join(str(v).lower() for v in row["values"].values() if isinstance(v, str))
     overlap = sum(w in labels for w in words)
@@ -188,6 +237,9 @@ def check_claims(payload: dict) -> dict:
                 else:
                     v = {"verdict": PROJECTED_V, "source": best["id"],
                          "note": "The closest row holding these numbers is projected, not measured."}
+            elif (bad := contradicting_row(text, present)) is not None:  # a present row says otherwise
+                v = {"verdict": UNSUPPORTED_V, "source": bad,
+                     "note": "This row matches the claim on one metric and holds a different value for another."}
             elif missing:  # a file that could hold it is not written yet: cannot say it is wrong
                 v = {"verdict": CANNOT, "source": "files: " + ", ".join(missing),
                      "note": "No present row holds it, and these results files are missing."}

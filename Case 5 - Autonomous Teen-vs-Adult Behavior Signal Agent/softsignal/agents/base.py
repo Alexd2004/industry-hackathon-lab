@@ -15,8 +15,8 @@ so an agent never breaks the round:
     insufficient_data   the input lacks what the agent needs; no model call is made
 
 Model: claude-opus-5 for all five agents (Crew Plan section 9: one setup to measure), effort "low".
-Timeouts: 4 s for agents on the decision path (Crew Plan section 6); A4 and A5 run after the round, off the
-path, so they get longer (TIMEOUTS; not measured yet, set after measuring). Overrides:
+Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A4, off the decision
+path, gets longer (TIMEOUTS; not measured yet, set after measuring); A5's one-off slide pass gets 60 s. Overrides:
 SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S /
 SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
 forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
