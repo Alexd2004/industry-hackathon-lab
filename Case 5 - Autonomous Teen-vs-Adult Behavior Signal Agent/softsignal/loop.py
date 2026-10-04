@@ -35,7 +35,7 @@ import io
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +237,9 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
 
 
 def make_row(env: Env, state: State, rnd: int, action: str, source: str, **kw) -> dict:
+    """rounds.csv row. mode, cap, t_soft, t_verify and the test columns (prec..auc) are end-of-round: after a
+    promote or in ACTIVE they belong to the new live rule, which scores the next batch. n_flagged, n_verify,
+    audit_ft and psi describe the rule that scored this round's batch."""
     live = state.live
     row = {
         "run": env.timer.run, "round": rnd, "mode": state.mode, "action": action, "applied_source": source,
@@ -266,6 +269,21 @@ def run_round(state: State, batch: Batch, env: Env) -> RoundResult:
 
 
 def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
+    """Run the round; if anything raises, put the state back to how the last finished round left it.
+
+    The oracle cannot undo a reveal and refuses a second one for the same round, so after a failure past
+    the reveal the run cannot be resumed: the restored state is only a consistent one to inspect.
+    """
+    before = replace(state)  # fields are reassigned during a round, never mutated in place
+    try:
+        return _apply_round(state, batch, env)
+    except Exception:
+        for f in fields(state):
+            setattr(state, f.name, getattr(before, f.name))
+        raise
+
+
+def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
     rows, ids, oracle = batch.rows, list(batch.ids), env.oracle
     prior = state.seen
 
@@ -348,8 +366,10 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
               decisions_path: Path = DECISIONS_JSONL) -> None:
     """Append this run to rounds.csv and decisions.jsonl (rows carry their run id; header written once).
 
-    Raises ValueError, writing nothing, if rounds.csv already has a different header. Both files are
-    built in full next to the originals and then swapped in, so a failure never leaves one half-written.
+    Raises ValueError, writing nothing, if rounds.csv already has a different header. Each file is built
+    in full next to the original and swapped in with os.replace, so neither is ever half-written. The two
+    swaps are separate, so a failure between them can leave rounds.csv with the run and decisions.jsonl
+    without it. Nothing checks for a run id that is already present, so a repeated run id appends twice.
     """
     rounds_path.parent.mkdir(parents=True, exist_ok=True)
     old_rounds = rounds_path.read_text(encoding="utf-8") if rounds_path.exists() else ""

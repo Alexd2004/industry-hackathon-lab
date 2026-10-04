@@ -1,4 +1,5 @@
 """Review loop (step 11, loop.py half): decisions, verify band, hold rule, label rules, determinism, files."""
+import dataclasses
 import json
 
 import numpy as np
@@ -337,3 +338,19 @@ def test_evidence_shows_the_streak_building_and_a_refused_promote(split, tmp_pat
     assert ev[0]["cand_t_verify"] == 0.9 and not any(e["promote_refused"] for e in ev)
     rounds, _, _ = run_rounds(split, tmp_path / "x", monkeypatch, 3, flags=("insufficient_teens",))
     assert [e["promote_refused"] for e in (r["evidence"] for r in rounds.attrs["records"])] == [False, True, True]
+
+
+def test_a_failure_after_the_reveal_restores_the_state(split, tmp_path, monkeypatch):
+    _, st, env = run_rounds(split, tmp_path, monkeypatch, 1)
+    before = {f.name: getattr(st, f.name) for f in dataclasses.fields(st)}
+    seen_rows = len(st.seen)
+
+    def boom(*a, **k):
+        raise RuntimeError("refit failed")
+
+    monkeypatch.setattr(lp, "refit", boom)
+    with pytest.raises(RuntimeError):
+        lp.run_round(st, next(iter(env.oracle)), env)
+    after = {f.name: getattr(st, f.name) for f in dataclasses.fields(st)}
+    assert after.keys() == before.keys() and len(st.seen) == seen_rows
+    assert all(after[k] is before[k] for k in before)  # same objects: streak 1, candidate, live_scores, ...
