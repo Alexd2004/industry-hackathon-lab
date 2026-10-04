@@ -49,7 +49,7 @@ def real_dir(tmp_path, monkeypatch):
 
 
 def row(run="20261003T150000Z", rnd=0, **kw) -> dict:
-    base = dict(run=run, round=rnd, mode="SHADOW", action="hold", applied_source="rule", cap=0.15, t_soft="",
+    base = dict(run=run, round=rnd, mode="SHADOW", action="hold", applied_source="rule", diff_count=0, cap=0.15, t_soft="",
                 t_verify=0.5, n_flagged=0, n_verify=0, n_labels=0, n_audit_adults=0, audit_ft="", psi="", prec=0.7, rec=0.8,
                 ft=0.3, mt=0.2, auc=0.85, refit_s="")
     return base | kw
@@ -151,6 +151,7 @@ def test_no_files_at_all_is_an_empty_state(tmp_path):
     (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(ft=34)[c]) for c in ROUNDS_COLS) + "\n", "ft has rates outside"),
     (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(n_flagged=-1)[c]) for c in ROUNDS_COLS) + "\n", "n_flagged must be whole"),
     (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(n_flagged=1.5)[c]) for c in ROUNDS_COLS) + "\n", "n_flagged must be whole"),
+    (",".join(ROUNDS_COLS) + "\n" + ",".join(str(row(diff_count=-1)[c]) for c in ROUNDS_COLS) + "\n", "diff_count must be whole"),
 ])
 def test_bad_rounds_file_raises_clear_error(tmp_path, content, msg):
     (tmp_path / "rounds.csv").write_text(content)

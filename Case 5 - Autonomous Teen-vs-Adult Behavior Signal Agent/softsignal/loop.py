@@ -269,7 +269,7 @@ def make_row(env: Env, state: State, rnd: int, action: str, source: str, **kw) -
     audit_ft and psi describe the rule that scored this round's batch."""
     live = state.live
     row = {
-        "run": env.timer.run, "round": rnd, "mode": state.mode, "action": action, "applied_source": source,
+        "run": env.timer.run, "round": rnd, "mode": state.mode, "action": action, "applied_source": source, "diff_count": 0,
         "cap": live.th.cap, "t_soft": None if live.model is None else live.th.t_soft,
         "t_verify": live.th.t_verify, "n_flagged": 0, "n_verify": 0,
         "n_labels": len(env.oracle.revealed("all")), "n_audit_adults": env.oracle.audit_counts()["adults"],
