@@ -29,7 +29,7 @@ import yaml
 from softsignal.data import ROOT, load_data
 from softsignal.features import ID_COL, TARGET
 from softsignal.metrics import DEFAULT_CAP, as_binary, cap_threshold, prf
-from softsignal.stack import STACK_OOF, Stack, meta_path, oof_cache_key
+from softsignal.stack import STACK_OOF, Stack, csv_sha256, meta_path, oof_cache_key
 
 POLICY_FILE = ROOT / "policy.yaml"
 POLICY_KEYS = {
@@ -88,13 +88,15 @@ class Thresholds:
 def load_audit_slice(train: pd.DataFrame, path: Path = STACK_OOF) -> pd.DataFrame:
     """Train labels joined to their nested-OOF stack scores: columns ID_COL, TARGET, stack_oof.
 
-    The static audit slice is the whole train set. Raises if the cache is stale: no sidecar, a sidecar
-    whose cache key differs from the current train rows, text model, posts or scoring code, or an id
-    set that is not exactly the train ids. Rerun python -m softsignal.stack to rebuild it.
+    The static audit slice is the whole train set. Raises if the cache is stale: no meta file, a meta
+    file whose csv hash differs from the csv (it was edited or swapped), whose cache key differs from the
+    current train rows, text model, posts or scoring code, or an id set that is not exactly the train
+    ids. Rerun python -m softsignal.stack to rebuild it.
     """
     try:
         meta = json.loads(meta_path(path).read_text(encoding="utf-8"))
-        ok = isinstance(meta, dict) and meta.get("use_text") is True and meta.get("n") == len(train)
+        ok = (isinstance(meta, dict) and meta.get("use_text") is True and meta.get("n") == len(train)
+              and meta.get("csv_sha256") == csv_sha256(path))
         stored = meta["cache_key"] if ok else None
     except (OSError, ValueError, KeyError):
         stored = None

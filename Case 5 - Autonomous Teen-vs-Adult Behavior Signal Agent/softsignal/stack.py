@@ -19,6 +19,7 @@ Run: python -m softsignal.stack
 import hashlib
 import inspect
 import json
+import platform
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,7 +167,7 @@ def oof_cache_key(train: pd.DataFrame, use_text: bool = True, tm_key: str | None
 
     Covers the train rows (ids, label, the 16 columns and their names), the text matrix (tm_key, which
     already covers the posts file, the vocabulary ids, the text settings and sklearn; None means the
-    default build_matrix(train ids) that policy.py would rebuild), the numpy, scipy and sklearn versions,
+    default build_matrix(train ids) that policy.py would rebuild), the Python, numpy, scipy and sklearn versions,
     and the source and signature of _key_functions. Any edit to those source texts, even a comment,
     changes it: the cost of a false alarm is rerunning stack.py.
     """
@@ -180,11 +181,17 @@ def oof_cache_key(train: pd.DataFrame, use_text: bool = True, tm_key: str | None
         "use_text": use_text,
         "text_matrix": tm_key if use_text else None,
         "text_params": [tmod.VECTORIZER_PARAMS, tmod.C, tmod.DOCS_VERSION] if use_text else None,
-        "versions": {"sklearn": sklearn.__version__, "numpy": np.__version__, "scipy": scipy.__version__},
+        "versions": {"python": platform.python_version(), "sklearn": sklearn.__version__, "numpy": np.__version__,
+                     "scipy": scipy.__version__},
         "clip": CLIP,
         "source": [inspect.getsource(f) + str(inspect.signature(f)) for f in _key_functions(use_text)],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def csv_sha256(path: Path) -> str:
+    """Hash of the OOF csv's bytes, kept in the meta file so an edited or swapped csv is detected."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def meta_path(path: Path) -> Path:
@@ -210,7 +217,7 @@ def write_oof(
     meta.unlink(missing_ok=True)
     pd.DataFrame({ID_COL: train[ID_COL].to_numpy(), "stack_oof": oof}).to_csv(path, index=False)
     meta.write_text(json.dumps({"cache_key": oof_cache_key(train, use_text, tm_key), "use_text": use_text,
-                                "n": len(train)}), encoding="utf-8")
+                                "n": len(train), "csv_sha256": csv_sha256(path)}), encoding="utf-8")
 
 
 @dataclass

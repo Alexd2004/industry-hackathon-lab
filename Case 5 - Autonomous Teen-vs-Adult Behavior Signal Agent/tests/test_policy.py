@@ -15,7 +15,7 @@ import softsignal.policy as pol
 from softsignal.data import load_data
 from softsignal.features import FEATURE_COLS, ID_COL, TARGET
 from softsignal.metrics import prf
-from softsignal.stack import STACK_OOF, meta_path, write_oof
+from softsignal.stack import STACK_OOF, csv_sha256, meta_path, write_oof
 
 
 def scores_and_labels(n=200, seed=0):
@@ -252,12 +252,20 @@ def make_train(ids=("B1", "B2", "B3"), labels=(0, 1, 0)):
     return train
 
 
+def reseal(p):
+    """Point the meta file at the csv's current bytes, as if write_oof had written that csv."""
+    meta = json.loads(meta_path(p).read_text())
+    meta["csv_sha256"] = csv_sha256(p)
+    meta_path(p).write_text(json.dumps(meta), encoding="utf-8")
+
+
 def make_oof(tmp_path, train, ids=None, meta=True):
     """An OOF cache with its meta file (written by the real write_oof), ids optionally altered."""
     p = tmp_path / "oof.csv"
     write_oof(train, np.linspace(0, 1, len(train)), p)
     if ids is not None:
         pd.DataFrame({ID_COL: ids, "stack_oof": np.linspace(0, 1, len(ids))}).to_csv(p, index=False)
+        reseal(p)  # so the id check, not the csv hash, is what rejects it
     if not meta:
         meta_path(p).unlink()
     return p
@@ -268,6 +276,7 @@ def test_audit_slice_joins_labels_by_id(tmp_path):
     p = make_oof(tmp_path, train)
     shuffled = pd.read_csv(p).iloc[[2, 0, 1]]  # file order differs from train order
     shuffled.to_csv(p, index=False)
+    reseal(p)
     got = pol.load_audit_slice(train, p).set_index(ID_COL)
     assert got.loc["B2", TARGET] == 1
     assert got.loc["B3", "stack_oof"] == 1.0
@@ -320,6 +329,26 @@ def test_audit_slice_rejects_a_tabular_only_cache(tmp_path):
 def test_audit_slice_accepts_a_matching_cache(tmp_path):
     train = make_train()
     assert len(pol.load_audit_slice(train, make_oof(tmp_path, train))) == 3
+
+
+def test_audit_slice_rejects_an_edited_csv_with_the_same_ids(tmp_path):
+    train = make_train()
+    p = make_oof(tmp_path, train)
+    edited = pd.read_csv(p)
+    edited["stack_oof"] = 1.0 - edited["stack_oof"]  # same ids, different scores, meta file untouched
+    edited.to_csv(p, index=False)
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(train, p)
+
+
+def test_audit_slice_rejects_a_meta_file_without_the_csv_hash(tmp_path):
+    train = make_train()
+    p = make_oof(tmp_path, train)
+    meta = json.loads(meta_path(p).read_text())
+    del meta["csv_sha256"]
+    meta_path(p).write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(train, p)
 
 
 def test_audit_slice_rejects_a_meta_file_with_the_wrong_row_count(tmp_path):

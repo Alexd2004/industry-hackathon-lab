@@ -430,6 +430,9 @@ def test_cache_key_changes_with_mode_text_params_and_versions(frame, posts, monk
     monkeypatch.undo()
     monkeypatch.setattr(stk.scipy, "__version__", "0.0.0")
     assert stk.oof_cache_key(frame, tm_key=key) != base
+    monkeypatch.undo()
+    monkeypatch.setattr(stk.platform, "python_version", lambda: "0.0.0")
+    assert stk.oof_cache_key(frame, tm_key=key) != base
 
 
 def test_tabular_cache_key_does_not_depend_on_posts_or_text_params(frame, monkeypatch):
@@ -478,6 +481,7 @@ def test_stack_writes_the_meta_file_with_the_matrix_key(posts, small_params, fra
     meta = json.loads(stk.meta_path(out).read_text())
     assert stk.meta_path(out).name == "stack_oof.meta.json"
     assert meta["use_text"] is True and meta["n"] == len(train)
+    assert meta["csv_sha256"] == stk.csv_sha256(out)
     assert meta["cache_key"] == stk.oof_cache_key(train, tm_key=tm.key)
     # the matrix came from the synthetic posts, not the default file, and the key says so
     assert meta["cache_key"] != stk.oof_cache_key(train)
@@ -502,3 +506,11 @@ def test_write_oof_removes_the_old_meta_file_if_the_csv_write_fails(frame, tmp_p
     with pytest.raises(OSError):
         stk.write_oof(frame, np.zeros(len(frame)), out, use_text=False)
     assert not stk.meta_path(out).exists()  # no old meta file left to bless a half-written csv
+
+
+def test_csv_sha256_changes_with_one_byte(tmp_path):
+    p = tmp_path / "a.csv"
+    p.write_bytes(b"blogger_id,stack_oof\nB1,0.5\n")
+    a = stk.csv_sha256(p)
+    p.write_bytes(b"blogger_id,stack_oof\nB1,0.6\n")
+    assert stk.csv_sha256(p) != a and len(a) == 64
