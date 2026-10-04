@@ -263,8 +263,10 @@ def run_rounds(split, tmp_path, monkeypatch, n, flags=()):
                       timer=AgentTimer(tmp_path / "calls.jsonl", run="t"))
     st = lp.new_state(env.policy)
     st.candidate = candidate()
-    rows = [lp.run_round(st, b, env).row for _, b in zip(range(n), env.oracle)]
-    return pd.DataFrame(rows), st, env
+    results = [lp.run_round(st, b, env) for _, b in zip(range(n), env.oracle)]
+    rounds = pd.DataFrame([r.row for r in results])
+    rounds.attrs["records"] = [r.record for r in results]
+    return rounds, st, env
 
 
 def test_two_good_rounds_promote_and_the_candidate_goes_live(split, tmp_path, monkeypatch):
@@ -315,3 +317,23 @@ def test_psi_compares_against_stored_scores_and_restarts_after_a_promote(split, 
     assert np.isnan(psis[2])  # promoted in round 2: no scores from the new live rule yet
     assert psis[3] == 0.0  # round 4 against round 3, both all-zero scores
     assert 0 < len(st.live_scores) < len(st.seen)  # only rounds 3 and 4 are kept after the restart
+
+
+def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
+    _, _, _, records, _ = full
+    assert "evidence" not in records[0] and all(valid_decision(r) for r in records)
+    for r in records[1:]:
+        ev = r["evidence"]
+        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "streak", "promote_refused"}
+        assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
+    hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
+    assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)
+
+
+def test_evidence_shows_the_streak_building_and_a_refused_promote(split, tmp_path, monkeypatch):
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 3)
+    ev = [r["evidence"] for r in rounds.attrs["records"]]
+    assert [e["streak"] for e in ev] == [1, 2, 2] and all(e["cand_ft"] == 0.0 for e in ev)
+    assert ev[0]["cand_t_verify"] == 0.9 and not any(e["promote_refused"] for e in ev)
+    rounds, _, _ = run_rounds(split, tmp_path / "x", monkeypatch, 3, flags=("insufficient_teens",))
+    assert [e["promote_refused"] for e in (r["evidence"] for r in rounds.attrs["records"])] == [False, True, True]

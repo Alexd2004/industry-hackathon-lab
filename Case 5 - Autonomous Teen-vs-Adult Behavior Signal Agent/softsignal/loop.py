@@ -221,11 +221,18 @@ def _decision_block(rule_dec: dict, live: Rule) -> dict:
     return {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
 
 
-def make_record(run: str, rnd: int, decision: dict, source: str) -> dict:
-    """decisions.jsonl line. Agents are not built yet, so every agent block is empty."""
+def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict | None = None) -> dict:
+    """decisions.jsonl line. Agents are not built yet, so every agent block is empty.
+
+    evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
+    cand_t_verify (the previous candidate, scored on this round's audit slice), streak (after this
+    round) and promote_refused (the new candidate carried an INSUFFICIENT_* flag).
+    """
     rec = {"run": run, "round": rnd}
     rec.update({k: {"status": None, "output": None, "fallback_reason": None} for k in AGENT_KEYS})
     rec.update({"rule_decision": dict(decision), "diff": {}, "applied": {"decision": dict(decision), "source": source}})
+    if evidence is not None:
+        rec["evidence"] = dict(evidence)
     return rec
 
 
@@ -289,10 +296,15 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     psi_val = psi(ref_scores, live_s) if len(ref_scores) else None
 
     # 4. decision: streak first, then the rule
+    round_adults = int((y_audit == 0).sum())
+    evidence = {"round_audit_adults": round_adults, "cand_ft": cand_ft, "streak": state.streak,
+                "cand_t_verify": None if state.candidate is None else float(state.candidate.th.t_verify),
+                "promote_refused": False}
     if state.mode == SHADOW:
-        enough = int((y_audit == 0).sum()) >= PROMOTE_MIN_ADULTS
+        enough = round_adults >= PROMOTE_MIN_ADULTS
         ok = enough and cand_ft is not None and cand_ft <= clamp_cap(env.policy["cap_false_teen"]) + PROMOTE_SLACK
         state.streak = state.streak + 1 if ok else 0
+        evidence["streak"] = state.streak
     rule_dec = rule_decision(state, env.policy, oracle.audit_counts()["adults"])
 
     # 5. apply it
@@ -305,6 +317,7 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
         if rule_dec["action"] == PROMOTE:
             if any(f in UNSAFE_FLAGS for f in state.candidate.th.flags):
                 rule_dec = {**rule_dec, "action": RETUNE}  # refused: try again next round
+                evidence["promote_refused"] = True
             else:
                 state.mode = ACTIVE
                 state.live_scores = np.empty(0)  # the starter's scores are not on the stack's scale
@@ -313,7 +326,7 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     decision = _decision_block(rule_dec, state.live)
     row = make_row(env, state, batch.round, rule_dec["action"], SOURCE_RULE, n_flagged=n_flagged,
                    n_verify=len(verify_ids), audit_ft=audit_ft, psi=psi_val, refit_s=refit_s)
-    return RoundResult(row, make_record(env.timer.run, batch.round, decision, SOURCE_RULE))
+    return RoundResult(row, make_record(env.timer.run, batch.round, decision, SOURCE_RULE, evidence))
 
 
 # ---- whole run ----
