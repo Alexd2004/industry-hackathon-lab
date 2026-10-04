@@ -44,8 +44,8 @@ from softsignal.agents.base import make_client, merge_block
 from softsignal.agents.a2_controller import run_a2
 from softsignal.agents.contracts import INSUFFICIENT_INPUT, a1_history, a1_input, a2_input
 from softsignal.data import load_data
-from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, DecisionContext, Env, State, make_env,
-                             run_loop, write_run)
+from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, DecisionContext, Env, State,
+                             check_rounds_header, make_env, run_loop, write_run)
 from softsignal.metrics import ROUNDS_COLS
 
 ROUNDS_RECORDED = ROUNDS_CSV.with_name("rounds_recorded.csv")
@@ -152,6 +152,8 @@ def main() -> None:
         ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
     if args.record and args.mode != "crew":
         ap.error("--record writes the crew run that a fresh clone shows; drop --mode rule")
+    if not (args.no_write or args.record):
+        check_rounds_header(ROUNDS_CSV, ROUNDS_COLS)  # fail now, not after every refit has run
     train, test = load_data(on_param_mismatch="error")
     env = make_env(train, test)
     client = make_client()

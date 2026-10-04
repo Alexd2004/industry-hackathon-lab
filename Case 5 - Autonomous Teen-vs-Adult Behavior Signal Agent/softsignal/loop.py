@@ -41,8 +41,9 @@ before the apply step). Its block and the code-computed diff against rule_decisi
 apply_a2 (crew mode) A2's own action and cap are applied, with the guards enforced again here (no refit before
 the audit floor, no promote unless the rule's pooled test passed) and the cap clamped; applied_source is then "A2".
 A FALLBACK, a missing block or a failing decider leaves the rule's decision applied. The promote gate always uses
-the policy cap, and so does the refit on a promote (the model that goes live is thresholded at the cap the gate
-tested); A2's cap steers the refit on re-tune rounds only. The evidence logs policy_cap, refit_cap and cap_differs.
+the policy cap, and the refit on a promote reuses the cap the evidence candidate was refit at (what the gate
+measured is what goes live, never an untested cap); A2's cap steers the refit on re-tune rounds. The evidence logs
+policy_cap, refit_cap and cap_differs.
 Without apply_a2 every round is applied_source "rule" ("starter" for R0). diff and the rounds.csv diff_count are
 A2's own proposal (action, cap) against the rule's, whether or not it was applied: the guards in step 4b and the
 promote cap override in step 5 can make the applied decision differ from A2's proposal, and that is not counted.
@@ -126,6 +127,7 @@ class State:
     live: Rule
     candidate: Rule | None = None
     candidate_round: int | None = None  # the round whose refit made the candidate (None: no candidate yet)
+    candidate_cap: float | None = None  # the cap that refit used: what the promote gate's evidence was gathered at
     mode: str = SHADOW
     streak: int = 0  # rounds in the window while it fills, then PROMOTE_STREAK if the pooled test passes, else 0
     window: list = field(default_factory=list)  # (audit adults, candidate false teens) of the last rounds, reassigned
@@ -279,7 +281,7 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
     pooled_adults and pooled_ft
     (the window the test used, None when it is empty), streak (after this round) and promote_refused
     (the new candidate carried an INSUFFICIENT_* flag). policy_cap is the cap the promote gate used, refit_cap
-    the cap this round's refit used (None on hold; the policy cap on a promote, A2's cap otherwise) and
+    the cap this round's refit used (None on hold; the evidence candidate's cap on a promote, A2's cap otherwise) and
     cap_differs says whether they differ, so an A2 cap that steered the thresholds is visible in the log.
     """
     rec = {"run": run, "round": rnd}
@@ -358,13 +360,14 @@ def _context(env: Env, state: State, rnd: int, rule_dec: dict, evidence: dict,
     )
 
 
-def _a2_block(decide: Decide | None, ctx: DecisionContext, blocks: dict) -> dict:
-    """The decider's {"a2": block}. Never raises (the reveal cannot be undone): a failing decider leaves A2
-    unrun, the error goes in the record (agent_error) and the rule decides."""
+def _a2_block(decide: Decide | None, make_ctx: Callable[[], DecisionContext], blocks: dict) -> dict:
+    """The decider's {"a2": block}. The context is built here, only when there is a decider, and inside the guard.
+    Never raises (the reveal cannot be undone): a failing context or decider leaves A2 unrun, the error goes in the
+    record (agent_error) and the rule decides."""
     if decide is None:
         return {}
     try:
-        out = decide(ctx, blocks)
+        out = decide(make_ctx(), blocks)
     except Exception as e:  # noqa: BLE001 - the contract is "agents never break the round"
         return {"agent_error": f"A2 {type(e).__name__}: {e}"[:500]}
     return {k: v for k, v in out.items() if k == "a2"}
@@ -492,15 +495,14 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
 
     # 4b. A2 (after the streak update, before the refit; mode and live rule are still this round's, pre-apply).
     # Its decision is always logged; it is applied only when apply_a2 (crew mode), and only if it has a decision
-    # of its own (not FALLBACK). The promote gate above used the policy cap; the refit on a promote does too (step 5).
-    ctx = _context(env, state, batch.round, rule_dec, evidence, cand_ft)
-    a2_blocks = _a2_block(decide, ctx, blocks)
+    # of its own (not FALLBACK). The promote gate above used the policy cap; the refit on a promote reuses the tested candidate's cap (step 5).
+    a2_blocks = _a2_block(decide, lambda: _context(env, state, batch.round, rule_dec, evidence, cand_ft), blocks)
     a2_block = a2_blocks.get("a2")
-    mine = _a2_applied(a2_block, rule_dec, not ctx.guards["hold_required"], ctx.guards["promote_allowed"])
+    floor_met = oracle.audit_counts()["adults"] >= int(env.policy["min_audit_adults"])
+    mine = _a2_applied(a2_block, rule_dec, floor_met, rule_dec["action"] == PROMOTE)
     source = "A2" if apply_a2 and mine is not None else SOURCE_RULE
     applied = dict(mine) if source == "A2" else dict(rule_dec)
     rule_orig = dict(rule_dec)
-    diff = side_by_side.diff(a2_block, rule_orig)  # A2's raw proposal against the rule, not the applied decision
 
     # 5. apply it
     refit_s = None
@@ -508,13 +510,14 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     evidence.update(policy_cap=policy_cap, refit_cap=None, cap_differs=False)
     if applied["action"] != HOLD:
         if applied["action"] == PROMOTE:
-            # the model that goes live is thresholded at the cap the promote gate tested (the policy cap), not A2's
-            applied = {**applied, "cap": policy_cap}
+            # the model that goes live is thresholded at the cap its evidence candidate was refit at (the one the
+            # gate measured), not at whatever cap A2 or the rule proposes now; the gate bar itself is the policy cap
+            applied = {**applied, "cap": policy_cap if state.candidate_cap is None else state.candidate_cap}
         evidence.update(refit_cap=applied["cap"], cap_differs=applied["cap"] != policy_cap)
         t0 = time.perf_counter()
         with env.timer.call(AGENT, "refit", "tool"):
             state.candidate = refit(env, state, applied["cap"])
-            state.candidate_round = batch.round
+            state.candidate_round, state.candidate_cap = batch.round, applied["cap"]
         refit_s = time.perf_counter() - t0
         if applied["action"] == PROMOTE:
             if _unsafe(state.candidate):
@@ -527,6 +530,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
             state.live = state.candidate
     if source == SOURCE_RULE:
         rule_orig = applied  # a refused promote shows as the rule's own decision, as before A2 existed
+    diff = side_by_side.diff(a2_block, rule_orig)  # A2's raw proposal against the rule decision in the record
     decision = _decision_block(applied, state.live)
     rule_block = _decision_block(rule_orig, state.live)
     if (rule_orig["action"], rule_orig["cap"]) != (applied["action"], applied["cap"]):
@@ -583,6 +587,19 @@ def _write_lock(folder: Path):
             yield
 
 
+def check_rounds_header(rounds_path: Path, columns: list[str]) -> str:
+    """The first line of rounds_path ("" when the file is missing or empty). Raises ValueError if it is not the
+    header of columns, so a run can fail before it starts, not after its last round (main() calls this first)."""
+    first = ""
+    if rounds_path.exists():
+        with open(rounds_path, encoding="utf-8") as f:
+            first = f.readline().strip()  # the header only: the file is never read in full
+    if first and first.split(",") != list(columns):
+        raise ValueError(f"{rounds_path.name} has header {first.split(',')}, this run has {list(columns)}. It is from "
+                         f"an older schema: move or delete {rounds_path} (a new run recreates it) and run again.")
+    return first
+
+
 def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROUNDS_CSV,
               decisions_path: Path = DECISIONS_JSONL) -> None:
     """Append rows to rounds.csv and records to decisions.jsonl (rows carry their run id; header written once).
@@ -596,15 +613,7 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
     with _write_lock(rounds_path.parent):
         for path in (rounds_path, decisions_path):
             _drop_torn_tail(path)
-        first = ""
-        if rounds_path.exists():
-            with open(rounds_path, encoding="utf-8") as f:
-                first = f.readline().strip()  # the header only: the file is never read in full
-        if first:
-            header = first.split(",")
-            if header != list(rounds.columns):
-                raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}. "
-                                 f"It is from an older schema: move or delete {rounds_path} (a new run recreates it) and run again.")
+        first = check_rounds_header(rounds_path, list(rounds.columns))
         buf = io.StringIO()
         rounds.to_csv(buf, header=not first, index=False, lineterminator="\n")
         new_dec = "".join(json.dumps(r) + "\n" for r in records)
@@ -642,6 +651,8 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=None)
     ap.add_argument("--no-write", action="store_true", help="print only, leave rounds.csv and decisions.jsonl alone")
     args = ap.parse_args()
+    if not args.no_write:
+        check_rounds_header(ROUNDS_CSV, ROUNDS_COLS)  # fail now, not after every refit has run
     train, test = load_data(on_param_mismatch="error")
     env = make_env(train, test, threshold_source=args.source)
     if args.mode == "crew":

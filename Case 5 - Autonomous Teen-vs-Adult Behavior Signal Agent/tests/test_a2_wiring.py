@@ -251,7 +251,7 @@ def test_rule_mode_never_differs_from_the_policy_cap(split_and_tm, tmp_path):
 
 @pytest.fixture(scope="module")
 def promote_run(split_and_tm, tmp_path_factory):
-    """A2 re-tunes at cap 0.10 from R5 and promotes the first time the rule's gate allows it, also at cap 0.10."""
+    """A2 re-tunes at cap 0.10 from R5 and, the first time the rule's gate allows it, asks to promote at cap 0.25."""
     env = make_env(split_and_tm, tmp_path_factory.mktemp("promote"))
     caps = []
     real = loop.refit
@@ -263,25 +263,26 @@ def promote_run(split_and_tm, tmp_path_factory):
     def decide(ctx, blocks):
         if ctx.guards["hold_required"]:
             return {"a2": a2_block(action="hold", cap=0.10)}
-        action = "promote" if ctx.guards["promote_allowed"] else "re-tune"
-        return {"a2": a2_block(action=action, cap=0.10)}
+        if ctx.guards["promote_allowed"]:
+            return {"a2": a2_block(action="promote", cap=0.25)}
+        return {"a2": a2_block(action="re-tune", cap=0.10)}
 
     with mock.patch.object(loop, "refit", spy):
         rounds, records = loop.run_loop(env, 8, decide=decide, apply_a2=True)
     return rounds, records, caps
 
 
-def test_a_promote_refits_at_the_policy_cap_not_a2s(promote_run):
+def test_a_promote_refits_at_the_cap_it_was_tested_at_not_the_cap_a2_asks_for(promote_run):
     rounds, records, caps = promote_run
     promoted = [r for r in records if r["applied"]["decision"]["action"] == "promote"]
     if not promoted:
         pytest.skip("the pooled gate never allowed a promote with this A2 script")
     r = promoted[0]
-    assert dict(caps)[r["round"]] == 0.15  # refit at the cap the gate tested
-    assert r["applied"]["decision"]["cap"] == 0.15 and r["applied"]["source"] == "A2"
-    assert r["evidence"]["refit_cap"] == 0.15 and r["evidence"]["cap_differs"] is False
-    assert r["a2"]["output"]["cap"] == 0.10 and r["diff"]["cap"] == [0.15, 0.10]  # A2's own cap is still logged
-    assert all(cap == 0.10 for rnd, cap in caps if rnd != r["round"])  # re-tune rounds still use A2's cap
+    assert dict(caps)[r["round"]] == 0.10  # the evidence candidate was refit at 0.10: that is what the gate measured
+    assert r["applied"]["decision"]["cap"] == 0.10 and r["applied"]["source"] == "A2"
+    assert r["evidence"]["refit_cap"] == 0.10 and r["evidence"]["cap_differs"] is True
+    assert r["a2"]["output"]["cap"] == 0.25 and r["diff"]["cap"] == [0.15, 0.25]  # A2's own ask is still logged
+    assert all(cap == 0.10 for rnd, cap in caps)
 
 
 # ---- the rule's cutoff in the record ----
