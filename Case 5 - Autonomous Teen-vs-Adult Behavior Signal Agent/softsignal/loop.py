@@ -123,6 +123,7 @@ def starter_rule(cap: float) -> Rule:
 class State:
     live: Rule
     candidate: Rule | None = None
+    candidate_round: int | None = None  # the round whose refit made the candidate (None: no candidate yet)
     mode: str = SHADOW
     streak: int = 0  # rounds in the window while it fills, then PROMOTE_STREAK if the pooled test passes, else 0
     window: list = field(default_factory=list)  # (audit adults, candidate false teens) of the last rounds, reassigned
@@ -270,7 +271,9 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
 
     evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
     cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
-    candidate carried an INSUFFICIENT_* flag, so the window is emptied), pooled_adults and pooled_ft
+    candidate carried an INSUFFICIENT_* flag, so the window is emptied), cand_age (rounds since that candidate was
+    refit: 1 when every round refits, more when a hold skipped refits, so the pooled evidence is on an older model),
+    pooled_adults and pooled_ft
     (the window the test used, None when it is empty), streak (after this round) and promote_refused
     (the new candidate carried an INSUFFICIENT_* flag). policy_cap is the cap the promote gate used, refit_cap
     the cap this round's refit used (None on hold; the policy cap on a promote, A2's cap otherwise) and
@@ -466,6 +469,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     evidence = {"round_audit_adults": round_adults, "cand_ft": cand_ft, "streak": state.streak,
                 "cand_t_verify": None if state.candidate is None else float(state.candidate.th.t_verify),
                 "cand_unsafe": state.candidate is not None and _unsafe(state.candidate),
+                "cand_age": None if state.candidate_round is None else batch.round - state.candidate_round,
                 "pooled_adults": None, "pooled_ft": None, "promote_refused": False}
     if state.mode == SHADOW:
         # a candidate with INSUFFICIENT_* flags holds the prior's cutoffs, which may be on another scale
@@ -504,6 +508,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
         t0 = time.perf_counter()
         with env.timer.call(AGENT, "refit", "tool"):
             state.candidate = refit(env, state, applied["cap"])
+            state.candidate_round = batch.round
         refit_s = time.perf_counter() - t0
         if applied["action"] == PROMOTE:
             if _unsafe(state.candidate):

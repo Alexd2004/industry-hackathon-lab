@@ -331,7 +331,7 @@ def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
     for r in records[1:]:
         ev = r["evidence"]
         assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "pooled_adults", "pooled_ft", "streak",
-                           "promote_refused", "policy_cap", "refit_cap", "cap_differs"}
+                           "promote_refused", "policy_cap", "refit_cap", "cap_differs", "cand_age"}
         assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
     hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
     assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)

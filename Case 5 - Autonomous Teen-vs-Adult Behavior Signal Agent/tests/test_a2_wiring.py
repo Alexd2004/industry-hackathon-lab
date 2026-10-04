@@ -6,6 +6,7 @@ what the loop enforces again in code. No network.
 import json
 from unittest import mock
 
+import pandas as pd
 import pytest
 
 from softsignal import crew, loop
@@ -324,3 +325,27 @@ def test_loop_tab_tells_the_user_how_to_fix_an_old_file(tmp_path):
     old.write_text(",".join(OLD_COLS) + "\n")
     with pytest.raises(ValueError, match=r"missing columns \['diff_count'\]\. It is from an older schema: regenerate it"):
         load_rounds(old, [])
+
+
+# ---- candidate age ----
+@pytest.fixture(scope="module")
+def hold_run(split_and_tm, tmp_path_factory):
+    """A2 re-tunes in R5 (the first refit) and then holds in R6 and R7, past the audit floor."""
+    env = make_env(split_and_tm, tmp_path_factory.mktemp("hold"))
+    script = {5: a2_block(action="re-tune", cap=0.15), 6: a2_block(action="hold", cap=0.15),
+              7: a2_block(action="hold", cap=0.15)}
+    return loop.run_loop(env, 7, decide=scripted(script), apply_a2=True)
+
+
+def test_evidence_shows_how_old_the_scored_candidate_is(hold_run):
+    _, records = hold_run
+    ages = [r["evidence"]["cand_age"] for r in records[1:]]
+    assert ages == [None, None, None, None, None, 1, 2]  # R5 refit, R6 and R7 score that same candidate
+
+
+def test_a_hold_past_the_floor_skips_the_refit_but_not_the_evidence(hold_run):
+    rounds, records = hold_run
+    assert [r["applied"]["decision"]["action"] for r in records[5:]] == ["re-tune", "hold", "hold"]
+    assert rounds["refit_s"].isna().tolist()[:5] == [True] * 5 and rounds.loc[5, "refit_s"] > 0
+    assert pd.isna(rounds.loc[6, "refit_s"]) and pd.isna(rounds.loc[7, "refit_s"])  # held: no refit
+    assert records[6]["evidence"]["cand_ft"] is not None and records[7]["evidence"]["cand_ft"] is not None
