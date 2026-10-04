@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from softsignal.agents.base import INSUFFICIENT
 from softsignal.data import SPLIT_FILE
 from softsignal.features import FORBIDDEN, ID_COL
 
@@ -115,7 +116,7 @@ def a4_input(frame: pd.DataFrame, verify_ids, round_id: int | None, test_ids=Non
     return payload
 
 
-INSUFFICIENT_INPUT = "insufficient_data"  # what an absent A1 / A3 output looks like to A2 (contract: no guessing)
+INSUFFICIENT_INPUT = INSUFFICIENT  # what an absent A1 / A3 output looks like to A2 (contract: no guessing)
 A2_ACTIONS = ("hold", "re-tune", "promote")
 A2_THRESHOLD_KEYS = ("t_verify", "t_soft", "cap", "flags")
 A2_AUDIT_KEYS = ("mode", "streak", "audit_adults", "audit_teens", "round_audit_adults", "pooled_adults",
@@ -139,8 +140,6 @@ def hard_limits() -> tuple[float, float, int]:
     from softsignal.policy import POLICY_FILE
 
     return _limits_from(str(POLICY_FILE), POLICY_FILE.stat().st_mtime_ns)
-
-
 
 
 def _pick(src: dict, keys, where: str) -> dict:

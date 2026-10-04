@@ -14,8 +14,8 @@ from softsignal.agents.a2_controller import (
     SYSTEM, clamp_output, fallback_output, guarded_action, percent_forms, run_a2, user_message, validate_output,
 )
 from softsignal.agents.base import (
-    AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL, TIMEOUT,
-    UNKNOWN_FIELD, merge_block,
+    AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL,
+    TIMEOUT, UNKNOWN_FIELD, merge_block,
 )
 from softsignal.agents.contracts import BarrierError, a2_input, dotted_paths, hard_limits
 from softsignal.agents.schemas import A2Output
@@ -111,7 +111,8 @@ def test_agent_output_carrying_a_forbidden_key_is_refused(key):
     ({"bounds": BOUNDS | {"min_audit_adults": 0}}, "looser than the code limits"),
     ({"bounds": BOUNDS | {"min_audit_adults": 119}}, "looser than the code limits"),
     ({"audit": AUDIT | {"mode": "shadow"}}, "mode must be"),
-    ({"guards": GUARDS | {"hold_required": True}, "audit": AUDIT | {"audit_adults": 10}}, "breaks guards.hold_required"),
+    ({"guards": GUARDS | {"hold_required": True}, "audit": AUDIT | {"audit_adults": 10}},
+     "breaks guards.hold_required"),
     ({"rule": RULE | {"action": "promote"}}, "breaks guards.promote_allowed"),
     ({"rule": RULE | {"cap": 0.5}}, "outside the bounds"),
     ({"rule": RULE | {"cap": 0.01}}, "outside the bounds"),
@@ -312,10 +313,15 @@ def test_the_request_is_one_fresh_prompt(payload):
     assert c.options and c.options[0]["max_retries"] == 0
 
 
-def test_prompt_has_no_test_metric_or_label_names(payload):
-    text = user_message(payload)
-    for word in ("label_teen", "is_teen", "account_age_days", "friend_count"):
-        assert word not in text
+def test_the_prompt_input_is_exactly_the_payload_and_carries_no_forbidden_key(payload):
+    from softsignal.agents.contracts import LABEL_KEYS, TEST_METRIC_KEYS, check_barrier
+
+    user = user_message(payload)
+    body = json.loads(user.split("<input>", 1)[1].rsplit("</input>", 1)[0])
+    assert body == payload  # nothing added to the prompt beyond the contract fields
+    check_barrier(body)  # parsed from the prompt itself, not from the payload object
+    assert not set(body) & (LABEL_KEYS | TEST_METRIC_KEYS)
+    assert user.count("<input>") == 1
 
 
 def test_offline_uses_the_rule_without_a_call(payload, tmp_path):
@@ -490,3 +496,101 @@ def test_the_payload_builds_from_a_real_loop_state_and_rule_decision():
                     and adults >= policy["min_audit_adults"]},
             rule=rule)
         assert p["rule"]["action"] == want
+
+
+# --- review 4: unit slips, limits failures, constants, a real loop run -----------------------------
+
+@pytest.mark.parametrize("cap", [15.0, 15, 1.5, -0.1, 100.0])
+def test_a_percent_scale_or_negative_cap_is_invalid_not_clamped(payload, cap):
+    out = good(cap=cap, reason="Cap 15% kept, 150 audit adults.")
+    assert validate_output(out, payload)[0] == INVALID
+    r = run_a2(payload, client=FakeClient(reply(out)))
+    assert r.status == FALLBACK and r.fallback_reason == INVALID
+    assert (r.output["action"], r.output["cap"]) == ("re-tune", 0.15)  # the rule's cap, not 0.3
+
+
+@pytest.mark.parametrize("cap", [0.0, 1.0, 0.5, 0.05])
+def test_a_fraction_outside_the_bounds_is_still_clamped(payload, cap):
+    r = run_a2(payload, client=FakeClient(reply(good(cap=cap))))
+    assert r.status == LIVE and r.output["cap"] == min(0.3, max(0.08, cap))
+
+
+def break_limits(monkeypatch):
+    def boom():
+        raise OSError("policy.yaml is gone")
+    monkeypatch.setattr("softsignal.agents.a2_controller.hard_limits", boom)
+
+
+def test_unreadable_limits_do_not_break_the_offline_fallback(payload, monkeypatch):
+    break_limits(monkeypatch)
+    r = run_a2(payload, client=None)
+    assert r.status == FALLBACK and r.fallback_reason == OFFLINE
+    assert (r.output["action"], r.output["cap"]) == ("re-tune", 0.15)
+    assert any("limits unavailable" in e for e in r.errors)
+    A2Output(**r.output)
+
+
+def test_unreadable_limits_on_a_live_reply_fall_back_not_raise(payload, monkeypatch):
+    break_limits(monkeypatch)
+    r = run_a2(payload, client=FakeClient(reply(good())))  # validate_output cannot read the limits either
+    assert r.status == FALLBACK and r.fallback_reason == INVALID
+    assert (r.output["action"], r.output["cap"]) == ("re-tune", 0.15)
+
+
+def test_clamp_failing_after_a_valid_reply_falls_back_not_raises(payload, monkeypatch):
+    monkeypatch.setattr("softsignal.agents.a2_controller.validate_output", lambda out, p: (None, []))
+    break_limits(monkeypatch)
+    r = run_a2(payload, client=FakeClient(reply(good())))
+    assert r.status == FALLBACK and r.fallback_reason == INVALID and r.rejected
+
+
+def test_action_constants_match_the_loops():
+    from softsignal import loop
+    from softsignal.agents.contracts import A2_ACTIONS, INSUFFICIENT_INPUT
+    from softsignal.agents.base import INSUFFICIENT
+
+    assert A2_ACTIONS == (loop.HOLD, loop.RETUNE, loop.PROMOTE)
+    assert INSUFFICIENT_INPUT == INSUFFICIENT
+
+
+@pytest.fixture(scope="module")
+def real_run(tmp_path_factory):
+    """A real R0-R7 loop run on the real data (the oracle, the stack, the hold rule and the promote test)."""
+    from softsignal import loop
+    from softsignal.agent_timer import AgentTimer as T
+    from softsignal.data import load_data
+
+    train, test = load_data(on_param_mismatch="error")
+    env = loop.make_env(train, test, timer=T(tmp_path_factory.mktemp("a2") / "calls.jsonl", run="t"))
+    rounds, records = loop.run_loop(env, None, loop.new_state(env.policy))
+    return env, rounds, records
+
+
+def test_the_payload_builds_from_every_round_of_a_real_loop_run(real_run):
+    """The contract fields exist in what a real round produces, and the guards agree with the rule each round."""
+    from softsignal import loop
+
+    env, rounds, records = real_run
+    pol, seen = env.policy, set()
+    for k in range(1, len(rounds)):
+        row, rec, prev = rounds.iloc[k], records[k], rounds.iloc[k - 1]
+        ev, adults = rec["evidence"], int(row["n_audit_adults"])
+        rule = {"action": rec["rule_decision"]["action"], "cap": rec["rule_decision"]["cap"]}
+        p = a2_input(
+            round_id=int(row["round"]),
+            thresholds={"t_verify": float(prev["t_verify"]), "t_soft": float(prev["t_soft"]), "cap": float(prev["cap"]),
+                        "flags": []},
+            audit={"mode": prev["mode"], "streak": ev["streak"], "audit_adults": adults,
+                   "audit_teens": int(row["n_labels"]) - adults, "round_audit_adults": ev["round_audit_adults"],
+                   "pooled_adults": ev["pooled_adults"], "pooled_false_teen_rate": ev["pooled_ft"],
+                   "candidate_false_teen": ev["cand_ft"]},
+            bounds={"cap_min": loop.CAP_MIN, "cap_max": loop.CAP_MAX, "min_audit_adults": pol["min_audit_adults"],
+                    "cap_default": pol["cap_false_teen"]},
+            guards={"hold_required": adults < pol["min_audit_adults"],
+                    "promote_allowed": prev["mode"] == loop.SHADOW and ev["streak"] >= loop.PROMOTE_STREAK
+                    and adults >= pol["min_audit_adults"]},
+            rule=rule)
+        assert p["rule"]["action"] == row["action"] or ev["promote_refused"]
+        assert validate_output(fallback_output(p), p) == (None, [])
+        seen.add(rule["action"])
+    assert {"hold", "re-tune"} <= seen  # the run covered both the hold rule and re-tuning
