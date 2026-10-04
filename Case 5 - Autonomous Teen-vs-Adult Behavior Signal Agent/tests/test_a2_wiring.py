@@ -154,3 +154,78 @@ def test_crew_offline_a2_falls_back_to_the_rule_every_round(split_and_tm, tmp_pa
         assert r["a2"]["status"] == FALLBACK and r["diff"] == {} and r["applied"]["source"] == "rule"
         assert r["a2"]["output"]["action"] == r["rule_decision"]["action"] == "hold"
     assert rounds["diff_count"].tolist() == [0, 0, 0]
+
+
+# ---- the --mode switch ----
+def run_main(module, monkeypatch, *argv):
+    monkeypatch.setattr("sys.argv", [module.__name__, *argv])
+    module.main()
+
+
+def test_loop_cli_default_is_rule_and_calls_no_agent(split_and_tm, monkeypatch, capsys):
+    train, test, tm = split_and_tm
+    monkeypatch.setattr(loop, "load_data", lambda **kw: (train, test))
+    monkeypatch.setattr(loop, "build_matrix", lambda *a, **kw: tm)
+    monkeypatch.setattr(crew, "run_crew", lambda *a, **kw: pytest.fail("rule mode must not run the crew"))
+    run_main(loop, monkeypatch, "--rounds", "1", "--no-write")
+    out = capsys.readouterr().out
+    assert "applied_source" in out and "starter" in out and "appended run" not in out
+
+
+def test_loop_cli_crew_mode_runs_the_crew_with_a2_applied(split_and_tm, monkeypatch, capsys):
+    train, test, tm = split_and_tm
+    monkeypatch.setattr(loop, "load_data", lambda **kw: (train, test))
+    monkeypatch.setattr(loop, "build_matrix", lambda *a, **kw: tm)
+    seen = {}
+    real = crew.run_crew
+
+    def spy(env, client, n_rounds, write=False, *a, **kw):
+        seen.update(client=client, n_rounds=n_rounds, write=write, apply=kw.get("apply_a2", True))
+        return real(env, None, n_rounds, write=False)  # offline, nothing written
+
+    monkeypatch.setattr(crew, "run_crew", spy)
+    run_main(loop, monkeypatch, "--mode", "crew", "--rounds", "1", "--no-write")
+    assert seen["n_rounds"] == 1 and seen["write"] is False and seen["apply"] is True
+    assert "applied_source" in capsys.readouterr().out
+
+
+def test_loop_cli_rejects_an_unknown_mode(monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        run_main(loop, monkeypatch, "--mode", "both")
+    assert e.value.code == 2
+
+
+class Stop(Exception):
+    """Raised by a spy to end main() right after run_crew was called."""
+
+
+@pytest.mark.parametrize("mode, applies", [("crew", True), ("rule", False)])
+def test_crew_cli_mode_sets_whether_a2_is_applied(split_and_tm, tmp_path, monkeypatch, mode, applies):
+    train, test, _ = split_and_tm
+    monkeypatch.setattr(crew, "load_data", lambda **kw: (train, test))
+    monkeypatch.setattr(crew, "make_env", lambda tr, te, **kw: make_env(split_and_tm, tmp_path))
+    monkeypatch.setattr(crew, "make_client", lambda: None)
+    seen = {}
+
+    def spy(env, client, n_rounds, write, *paths, apply_a2):
+        seen["apply"] = apply_a2
+        raise Stop
+
+    monkeypatch.setattr(crew, "run_crew", spy)
+    with pytest.raises(Stop):
+        run_main(crew, monkeypatch, "--mode", mode, "--no-write")
+    assert seen["apply"] is applies
+
+
+def test_crew_cli_record_needs_crew_mode(monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        run_main(crew, monkeypatch, "--mode", "rule", "--record")
+    assert e.value.code == 2
+
+
+def test_rule_mode_applies_the_rule_but_still_logs_a2(split_and_tm, tmp_path):
+    env = make_env(split_and_tm, tmp_path)
+    decide = scripted({1: a2_block(action="re-tune", cap=0.20)})
+    rounds, records = loop.run_loop(env, 1, decide=decide, apply_a2=False)
+    assert records[1]["applied"]["source"] == "rule" and records[1]["a2"]["output"]["cap"] == 0.20
+    assert rounds.loc[1, "diff_count"] == 2

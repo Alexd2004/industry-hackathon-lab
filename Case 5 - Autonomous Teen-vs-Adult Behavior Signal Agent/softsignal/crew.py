@@ -25,7 +25,10 @@ results/rounds_recorded.csv and decisions_recorded.jsonl instead (swapped in onl
 finished, so a failed run leaves the old one; --rounds is refused): the committed run a
 fresh clone shows.
 
-Run: python -m softsignal.crew [--rounds N] [--no-write | --record]   (agents offline unless ANTHROPIC_API_KEY)
+Run: python -m softsignal.crew [--mode crew|rule] [--rounds N] [--no-write | --record]   (agents offline unless
+ANTHROPIC_API_KEY)
+  --mode crew (default): A2's decision is applied. --mode rule: A1 and A2 still run and are logged next to the rule's
+  decision, but the rule is applied every round (the counterfactual run; --record needs crew).
 """
 import argparse
 import os
@@ -138,6 +141,7 @@ def start_background(results_dir: Path = ROUNDS_CSV.parent, n_rounds: int | None
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--mode", choices=("crew", "rule"), default="crew", help="crew: apply A2; rule: apply the rule")
     ap.add_argument("--rounds", type=int, default=None)
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--no-write", action="store_true", help="print only")
@@ -145,6 +149,8 @@ def main() -> None:
     args = ap.parse_args()
     if args.record and args.rounds is not None:
         ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
+    if args.record and args.mode != "crew":
+        ap.error("--record writes the crew run that a fresh clone shows; drop --mode rule")
     train, test = load_data(on_param_mismatch="error")
     env = make_env(train, test)
     client = make_client()
@@ -154,7 +160,7 @@ def main() -> None:
     for p in paths if args.record else ():
         p.unlink(missing_ok=True)
     try:
-        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths)
+        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, apply_a2=args.mode == "crew")
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)

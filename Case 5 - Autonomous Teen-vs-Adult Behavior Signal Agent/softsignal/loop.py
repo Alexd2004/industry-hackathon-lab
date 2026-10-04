@@ -44,7 +44,11 @@ A FALLBACK, a missing block or a failing decider leaves the rule's decision appl
 the policy cap: A2's cap steers the refit only. Without apply_a2 every round is applied_source "rule" ("starter"
 for R0).
 
-Run: python -m softsignal.loop [--source audit|all_verified] [--rounds N]
+Run: python -m softsignal.loop [--mode rule|crew] [--source audit|all_verified] [--rounds N] [--no-write]
+  --mode rule (default): the rule decides every round, no agents.
+  --mode crew: crew.run_crew (A1, A2; A2's decision applied; agents offline unless ANTHROPIC_API_KEY).
+Comparing the two modes' recall needs two full runs: the seed and the batch order are fixed, so both see the
+same batches, but the rule's decision is a counterfactual decision, not a counterfactual outcome.
 """
 import argparse
 import contextlib
@@ -77,6 +81,7 @@ DECISIONS_JSONL = ROOT / "results" / "decisions.jsonl"
 SHADOW, ACTIVE = "SHADOW", "ACTIVE"
 HOLD, RETUNE, PROMOTE, STARTER = "hold", "re-tune", "promote", "starter"
 SOURCE_RULE = "rule"
+RUN_MODES = ("rule", "crew")  # the CLI switch: who decides each round
 CAP_MIN, CAP_MAX = 0.08, 0.30  # clamp for any cap the loop or A2 applies (policy.py does not clamp)
 PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs the pooled audit false-teen <= cap + this ...
 PROMOTE_STREAK = 2  # ... pooled over this many rounds in a row
@@ -605,17 +610,28 @@ def _drop_torn_tail(path: Path, chunk: int = 4096) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--mode", choices=RUN_MODES, default="rule", help="rule: no agents; crew: A1 and A2 applied")
     ap.add_argument("--source", choices=THRESHOLD_SOURCES, default="audit")
     ap.add_argument("--rounds", type=int, default=None)
     ap.add_argument("--no-write", action="store_true", help="print only, leave rounds.csv and decisions.jsonl alone")
     args = ap.parse_args()
     train, test = load_data(on_param_mismatch="error")
     env = make_env(train, test, threshold_source=args.source)
-    rounds, records = run_loop(env, args.rounds)
+    if args.mode == "crew":
+        from softsignal import crew  # crew imports this module, so only here
+        from softsignal.agents.base import make_client
+
+        rounds, records = crew.run_crew(env, make_client(), args.rounds, write=not args.no_write)
+        written = not args.no_write  # run_crew appended each round as it landed
+    else:
+        rounds, records = run_loop(env, args.rounds)
+        written = False
+        if not args.no_write:
+            write_run(rounds, records)
+            written = True
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))
-    if not args.no_write:
-        write_run(rounds, records)
+    if written:
         print(f"appended run {env.timer.run} to {ROUNDS_CSV.name} and {DECISIONS_JSONL.name}")
 
 
