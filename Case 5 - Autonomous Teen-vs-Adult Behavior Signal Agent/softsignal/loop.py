@@ -26,7 +26,9 @@ decision A2 will later be compared against and fall back to.
 Run: python -m softsignal.loop [--source audit|all_verified] [--rounds N]
 """
 import argparse
+import io
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,7 +119,7 @@ class RoundResult:
 
 
 def new_state(policy: dict) -> State:
-    return State(live=starter_rule(policy["cap_false_teen"]))
+    return State(live=starter_rule(clamp_cap(policy["cap_false_teen"])))
 
 
 def make_env(
@@ -280,7 +282,7 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     # 4. decision: streak first, then the rule
     if state.mode == SHADOW:
         enough = int((y_audit == 0).sum()) >= PROMOTE_MIN_ADULTS
-        ok = enough and cand_ft is not None and cand_ft <= env.policy["cap_false_teen"] + PROMOTE_SLACK
+        ok = enough and cand_ft is not None and cand_ft <= clamp_cap(env.policy["cap_false_teen"]) + PROMOTE_SLACK
         state.streak = state.streak + 1 if ok else 0
     rule_dec = rule_decision(state, env.policy, oracle.audit_counts()["adults"])
 
@@ -321,12 +323,32 @@ def run_loop(env: Env, n_rounds: int | None = None, state: State | None = None) 
 
 def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROUNDS_CSV,
               decisions_path: Path = DECISIONS_JSONL) -> None:
-    """Append this run to rounds.csv and decisions.jsonl (rows carry their run id; header written once)."""
+    """Append this run to rounds.csv and decisions.jsonl (rows carry their run id; header written once).
+
+    Raises ValueError, writing nothing, if rounds.csv already has a different header. Both files are
+    built in full next to the originals and then swapped in, so a failure never leaves one half-written.
+    """
     rounds_path.parent.mkdir(parents=True, exist_ok=True)
-    new = not rounds_path.exists() or rounds_path.stat().st_size == 0
-    rounds.to_csv(rounds_path, mode="a", header=new, index=False, lineterminator="\n")
-    with decisions_path.open("a", encoding="utf-8") as f:
-        f.writelines(json.dumps(r) + "\n" for r in records)
+    old_rounds = rounds_path.read_text(encoding="utf-8") if rounds_path.exists() else ""
+    if old_rounds.strip():
+        header = old_rounds.splitlines()[0].split(",")
+        if header != list(rounds.columns):
+            raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}")
+    buf = io.StringIO()
+    rounds.to_csv(buf, header=not old_rounds.strip(), index=False, lineterminator="\n")
+    old_dec = decisions_path.read_text(encoding="utf-8") if decisions_path.exists() else ""
+    new_dec = "".join(json.dumps(r) + "\n" for r in records)
+    tmps = []
+    try:
+        for path, text in ((rounds_path, old_rounds + buf.getvalue()), (decisions_path, old_dec + new_dec)):
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(text, encoding="utf-8", newline="")
+            tmps.append((tmp, path))
+        for tmp, path in tmps:
+            os.replace(tmp, path)
+    finally:
+        for tmp, _ in tmps:
+            tmp.unlink(missing_ok=True)
 
 
 def main() -> None:

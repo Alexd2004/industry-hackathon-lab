@@ -114,6 +114,21 @@ def test_write_run_appends_with_one_header(tmp_path):
     assert len([json.loads(x) for x in d_path.read_text().splitlines()]) == 2
 
 
+def test_write_run_rejects_a_changed_header_and_writes_nothing(tmp_path):
+    rounds = pd.DataFrame([{c: 0 for c in ROUNDS_COLS}])
+    recs = [lp.make_record("r", 0, {"cutoff": 0.5, "cap": 0.15, "action": "starter"}, "starter")]
+    r_path, d_path = tmp_path / "rounds.csv", tmp_path / "decisions.jsonl"
+    r_path.write_text("run,round\nr,0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="header"):
+        lp.write_run(rounds, recs, r_path, d_path)
+    assert r_path.read_text(encoding="utf-8") == "run,round\nr,0\n"
+    assert not d_path.exists() and not list(tmp_path.glob("*.tmp"))
+
+
+def test_new_state_clamps_the_cap_once():
+    assert lp.new_state({**POL, "cap_false_teen": 0.5}).live.th.cap == 0.30
+
+
 # ---- whole loop on the real split ----
 def make(n_rounds, tmp_path, source="audit"):
     train, test = load_data(on_param_mismatch="error")
