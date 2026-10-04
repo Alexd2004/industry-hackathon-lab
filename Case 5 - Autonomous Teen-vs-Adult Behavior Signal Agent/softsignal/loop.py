@@ -42,8 +42,10 @@ apply_a2 (crew mode) A2's own action and cap are applied, with the guards enforc
 the audit floor, no promote unless the rule's pooled test passed) and the cap clamped; applied_source is then "A2".
 A FALLBACK, a missing block or a failing decider leaves the rule's decision applied. The promote gate always uses
 the policy cap, and so does the refit on a promote (the model that goes live is thresholded at the cap the gate
-tested); A2's cap steers the refit on re-tune rounds only. The evidence logs policy_cap, refit_cap and cap_differs. Without apply_a2 every round is applied_source "rule" ("starter"
-for R0).
+tested); A2's cap steers the refit on re-tune rounds only. The evidence logs policy_cap, refit_cap and cap_differs.
+Without apply_a2 every round is applied_source "rule" ("starter" for R0). diff and the rounds.csv diff_count are
+A2's own proposal (action, cap) against the rule's, whether or not it was applied: the guards in step 4b and the
+promote cap override in step 5 can make the applied decision differ from A2's proposal, and that is not counted.
 
 Run: python -m softsignal.loop [--mode rule|crew] [--source audit|all_verified] [--rounds N] [--no-write]
   --mode rule (default): the rule decides every round, no agents.
@@ -266,8 +268,9 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
                 rule_decision: dict | None = None) -> dict:
     """decisions.jsonl line. Every agent block starts empty; the round fills the ones that ran.
 
-    decision is what was applied; rule_decision is what the rule would have decided (None: the same); its cutoff is None when the rule was not
-    the one applied and chose another action or cap, because that cutoff is never computed.
+    decision is what was applied; rule_decision is what the rule would have decided (None: the same); its cutoff
+    is None when the rule was not the one applied and chose another action or cap, because that cutoff is never
+    computed.
 
     evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
     cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
@@ -294,7 +297,8 @@ def make_row(env: Env, state: State, rnd: int, action: str, source: str, **kw) -
     audit_ft and psi describe the rule that scored this round's batch."""
     live = state.live
     row = {
-        "run": env.timer.run, "round": rnd, "mode": state.mode, "action": action, "applied_source": source, "diff_count": 0,
+        "run": env.timer.run, "round": rnd, "mode": state.mode, "action": action, "applied_source": source,
+        "diff_count": 0,
         "cap": live.th.cap, "t_soft": None if live.model is None else live.th.t_soft,
         "t_verify": live.th.t_verify, "n_flagged": 0, "n_verify": 0,
         "n_labels": len(env.oracle.revealed("all")), "n_audit_adults": env.oracle.audit_counts()["adults"],
@@ -333,7 +337,8 @@ def _plain(d: dict) -> dict:
     return {k: _py(v) for k, v in d.items()}
 
 
-def _context(env: Env, state: State, rnd: int, rule_dec: dict, evidence: dict, cand_ft: "float | None") -> DecisionContext:
+def _context(env: Env, state: State, rnd: int, rule_dec: dict, evidence: dict,
+             cand_ft: "float | None") -> DecisionContext:
     """A2's view of the round. promote_allowed is the rule's own promote (SHADOW, pooled test passed, floor met)."""
     counts = env.oracle.audit_counts()
     floor = int(env.policy["min_audit_adults"])
@@ -368,7 +373,8 @@ def _a2_block(decide: Decide | None, ctx: DecisionContext, blocks: dict) -> dict
 def _a2_applied(a2_block: "dict | None", rule_dec: dict, floor_met: bool, promote_ok: bool) -> "dict | None":
     """A2's own {action, cap} as the loop will apply it, or None when A2 has no decision of its own (not run,
     FALLBACK, no output). The guards are enforced here again, in code: no refit before the audit floor, no promote
-    unless the pooled test passed (then re-tune), and the cap is clamped. The promote gate itself used the policy cap."""
+    unless the pooled test passed (then re-tune), and the cap is clamped. The promote gate itself used the policy
+    cap."""
     out = side_by_side.a2_decision(a2_block)
     if out is None or out.get("action") not in (HOLD, RETUNE, PROMOTE) or not isinstance(out.get("cap"), (int, float)):
         return None
@@ -494,7 +500,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     source = "A2" if apply_a2 and mine is not None else SOURCE_RULE
     applied = dict(mine) if source == "A2" else dict(rule_dec)
     rule_orig = dict(rule_dec)
-    diff = side_by_side.diff(a2_block, rule_orig)
+    diff = side_by_side.diff(a2_block, rule_orig)  # A2's raw proposal against the rule, not the applied decision
 
     # 5. apply it
     refit_s = None
@@ -524,7 +530,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     decision = _decision_block(applied, state.live)
     rule_block = _decision_block(rule_orig, state.live)
     if (rule_orig["action"], rule_orig["cap"]) != (applied["action"], applied["cap"]):
-        # the live cutoff is the applied decision's; the cutoff the rule would have picked is unknown without a second refit
+        # the live cutoff is the applied decision's; the rule's own cutoff is unknown without a second refit
         rule_block["cutoff"] = None
     row = make_row(env, state, batch.round, applied["action"], source, n_flagged=n_flagged,
                    n_verify=len(verify_ids), audit_ft=audit_ft, psi=psi_val, refit_s=refit_s, diff_count=len(diff))
@@ -539,7 +545,8 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
 # ---- whole run ----
 def run_loop(env: Env, n_rounds: int | None = None, state: State | None = None,
              before_decision: BeforeDecision | None = None,
-             on_round: OnRound | None = None, decide: Decide | None = None, apply_a2: bool = False) -> tuple[pd.DataFrame, list[dict]]:
+             on_round: OnRound | None = None, decide: Decide | None = None,
+             apply_a2: bool = False) -> tuple[pd.DataFrame, list[dict]]:
     """R0 then each batch the oracle has (at most n_rounds). Returns the rounds table and the records.
 
     Pass a state to read the final live rule and candidate afterwards (it is updated in place).

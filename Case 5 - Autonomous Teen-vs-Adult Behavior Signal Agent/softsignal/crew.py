@@ -13,8 +13,8 @@ Today that is loop.py's rule plus A1 (drift watcher) and A2 (controller), throug
     on_round(result)                           -> loop.write_run(this row, this record), when writing
 
 A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline (no key) A2 falls
-back to the rule's own decision every round, so an offline run's decisions are exactly loop.run_loop's. Score PSI goes to A1
-only while the live rule is the starter: once the stack is live every refit changes the model, and
+back to the rule's own decision every round, so an offline run's decisions are exactly loop.run_loop's. Score PSI goes
+to A1 only while the live rule is the starter: once the stack is live every refit changes the model, and
 score PSI would measure that change, not drift. A4 is not run here: while the loop is in SHADOW the
 starter blend picks the verify band and has no explanations; wire it once the live rule is the stack
 (agents/a4_triage.py). Every run has its own run id (its own AgentTimer).
@@ -44,8 +44,8 @@ from softsignal.agents.base import make_client, merge_block
 from softsignal.agents.a2_controller import run_a2
 from softsignal.agents.contracts import INSUFFICIENT_INPUT, a1_history, a1_input, a2_input
 from softsignal.data import load_data
-from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, SHADOW, DecisionContext, Env, State, make_env, run_loop,
-                             write_run)
+from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, DecisionContext, Env, State, make_env,
+                             run_loop, write_run)
 from softsignal.metrics import ROUNDS_COLS
 
 ROUNDS_RECORDED = ROUNDS_CSV.with_name("rounds_recorded.csv")
@@ -141,7 +141,8 @@ def start_background(results_dir: Path = ROUNDS_CSV.parent, n_rounds: int | None
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--mode", choices=("crew", "rule"), default="crew", help="crew: apply A2; rule: apply the rule")
+    ap.add_argument("--mode", choices=RUN_MODES, default="crew",
+                    help="crew: apply A2; rule: apply the rule")
     ap.add_argument("--rounds", type=int, default=None)
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--no-write", action="store_true", help="print only")
@@ -160,7 +161,8 @@ def main() -> None:
     for p in paths if args.record else ():
         p.unlink(missing_ok=True)
     try:
-        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, apply_a2=args.mode == "crew")
+        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths,
+                                   apply_a2=args.mode == "crew")
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)
