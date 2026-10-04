@@ -15,7 +15,11 @@ floor set or fewer errors than the floor returns insufficient_data without a mod
 invalid or timed-out reply does the same, badged FALLBACK with the reason.
 
 A3 runs on the decision path (stage 1, in parallel with A1), so it keeps the 4 s timeout (base.TIMEOUT_S).
+
+calibrate() measures the errors A3 would see in each round of an offline loop run (no agents, the rule applied):
+python -m softsignal.agents.a3_errors --calibrate. policy.yaml min_a3_errors is picked from it.
 """
+import argparse
 import json
 import re
 
@@ -155,3 +159,62 @@ def run_a3(payload: dict, client=None, timer: AgentTimer | None = None, round_id
     if reply.fallback_reason is not None:
         return _fallback(payload, h, reply.fallback_reason, reply.errors, timer, round_id, reply.raw)
     return AgentResult(AGENT, LIVE, reply.output, None, h)
+
+
+def calibrate(seeds=range(3), n_rounds: int | None = None) -> "pd.DataFrame":
+    """The measurement behind policy.yaml min_a3_errors: for each oracle seed, a full offline loop run (the rule
+    decides, no agents), and A3's input at every round, from crew.a3_payload with the policy floor left out.
+    One row per (seed, round): the audit counts A3 would see, its false and missed teens, whether any signal
+    exists to explain them, and the largest error group's account count."""
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from softsignal.agent_timer import AgentTimer
+    from softsignal.crew import a3_payload
+    from softsignal.data import load_data
+    from softsignal.features import ID_COL
+    from softsignal.loop import make_env, run_loop
+    from softsignal.policy import load_policy
+    from softsignal.text_model import build_matrix
+
+    train, test = load_data(on_param_mismatch="error")
+    tm = build_matrix(train[ID_COL])
+    log = Path(tempfile.mkdtemp()) / "calls.jsonl"  # the run's timer log is not wanted in results/
+    rows = []
+    for k in seeds:
+        policy = {**load_policy(), "min_a3_errors": None}
+        env = make_env(train, test, policy=policy, tm=tm, seed=42 + k, timer=AgentTimer(log))
+
+        def hook(state, batch, prior, psi_val, env=env, k=k):
+            p = a3_payload(env, state, batch, prior)
+            n = p["n_errors"]
+            rows.append({"seed": 42 + k, "round": p["round"], "audit_adults": p["audit"]["adults"],
+                         "audit_teens": p["audit"]["teens"], "false_teen": n["false_teen"],
+                         "missed_teen": n["missed_teen"], "errors": sum(n.values()),
+                         "has_signals": any(p[t]["signals"] for t in ("false_teen", "missed_teen")),
+                         "largest_group": max((s["n_accounts"] for t in ("false_teen", "missed_teen")
+                                               for s in p[t]["signals"]), default=0)})
+            return {}
+
+        run_loop(env, n_rounds, before_decision=hook)
+    return pd.DataFrame(rows)
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description="A3 error analyst tools")
+    ap.add_argument("--calibrate", action="store_true", help="measure the audit errors per round for min_a3_errors")
+    ap.add_argument("--seeds", type=int, default=3)
+    args = ap.parse_args(argv)
+    if not args.calibrate:
+        ap.print_help()
+        return
+    d = calibrate(range(args.seeds))
+    print(d.to_string(index=False))
+    print("\nerrors by round (min / median / max over seeds):")
+    print(d.groupby("round")["errors"].agg(["min", "median", "max"]).to_string())
+
+
+if __name__ == "__main__":
+    main()

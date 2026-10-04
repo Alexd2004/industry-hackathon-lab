@@ -39,7 +39,7 @@ def test_committed_policy_has_exactly_the_policy_keys_with_their_types():
     assert set(p) == set(pol.POLICY_KEYS) | set(pol.OPTIONAL_KEYS)
     assert all(type(p[k]) is kind for k, kind in pol.POLICY_KEYS.items())
     assert p["psi_drift"] == 0.25  # measured for A1, see policy.yaml
-    assert p["min_a3_errors"] is None  # not measured yet: A3 stays insufficient_data until it is set
+    assert p["min_a3_errors"] == 30  # picked from A3 errors per round, see policy.yaml
 
 
 def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):

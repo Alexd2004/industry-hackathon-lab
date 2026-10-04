@@ -181,3 +181,12 @@ def test_a3_exceptions_do_not_break_a1_or_the_round(tmp_path_factory):
         assert r["a3"]["status"] == FALLBACK and r["a3"]["fallback_reason"] == crew.A3_ERROR
         assert r["a3"]["output"] == a3_errors.fallback_output() and "boom" in r["a3"]["errors"][0]
         assert r["a1"]["status"] is not None  # A1 still ran
+
+
+def test_calibrate_reports_each_round_and_nothing_before_the_first_audit():
+    d = a3_errors.calibrate(range(1), n_rounds=2)
+    assert list(d["round"]) == [0, 1, 2]
+    assert set(d.columns) >= {"seed", "round", "audit_adults", "audit_teens", "false_teen", "missed_teen", "errors",
+                              "has_signals", "largest_group"}
+    assert list(d["errors"][:2]) == [0, 0] and d["audit_adults"][2] > 0  # round 2 is the first with earlier labels
+    assert (d["errors"] == d["false_teen"] + d["missed_teen"]).all() and not d["has_signals"].any()  # no stack yet
