@@ -1,0 +1,6 @@
+# Review policy (Combined Plan section 4). Read by softsignal/policy.py.
+cap_false_teen: 0.15    # max share of adults sent to verification
+review_budget: 0.25     # max share of a batch in the verify band (reported, not enforced: the cap wins)
+soft_recall: 0.90       # share of teens the soft band and above must reach
+min_audit_adults: 120   # hold rule floor: no re-tune before this many audit adults (enforced in loop.py)
+audit_per_batch: 60     # random audit accounts revealed per batch (used by oracle.py)
