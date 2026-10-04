@@ -2,7 +2,12 @@
 
 Each builder copies only the fields its agent's contract allows (Combined Plan section 7a). A1-A4 never get
 a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
-Only A4 is built so far; each owner adds theirs here.
+A1 and A4 are built; each owner adds theirs here.
+
+A1 (drift watcher) gets, for this batch: the PSI of each feature group against the batches the loop saw in
+earlier rounds (never the whole train set: later batches are not known yet), the loop's PSI of the live
+scores, the revealed audit counts (adults, teens) so far, the earlier rounds' PSI, and the policy.yaml
+threshold its fallback uses. No rows, no ids, no labels: counts only.
 
 A4 (verify-band triager) gets explain.py's output for the accounts sent to verification (score, band, the
 top 3 signed contributions, the teen-leaning words), summarised in code for the batch: score range and
@@ -21,12 +26,15 @@ import numpy as np
 import pandas as pd
 
 from softsignal.data import SPLIT_FILE
-from softsignal.features import FORBIDDEN, ID_COL
+from softsignal.features import ACTIVITY_COLS, FORBIDDEN, ID_COL, TEXT_COLS
+from softsignal.metrics import psi
 
 TEST_METRIC_KEYS = frozenset({"prec", "rec", "ft", "mt", "f1", "auc"})  # test-set metrics: never in A1-A4 input
 LABEL_KEYS = frozenset(FORBIDDEN | {"label", "labels", "in_verify", "in_audit"})
 A4_COLS = [ID_COL, "score", "band", "c1", "c2", "c3", "f1", "f2", "f3", "v1", "v2", "v3", "words"]
 A4_TOP_WORDS = 10
+PSI_GROUPS = {"activity": ACTIVITY_COLS, "text": TEXT_COLS}  # the 9 activity and 7 stylometry columns
+PSI_DECIMALS = 3
 
 
 class BarrierError(ValueError):
@@ -113,3 +121,64 @@ def a4_input(frame: pd.DataFrame, verify_ids, round_id: int | None, test_ids=Non
     }
     check_barrier(payload)
     return payload
+
+
+def group_psi(reference: pd.DataFrame, batch: pd.DataFrame) -> dict:
+    """PSI of each feature group, batch against reference: per group the largest feature PSI, the mean, and
+    which feature is largest. metrics.psi per column (bins from the reference's quantiles)."""
+    out = {}
+    for group, cols in PSI_GROUPS.items():
+        per = {c: psi(reference[c].to_numpy(dtype=float), batch[c].to_numpy(dtype=float)) for c in cols}
+        top = max(per, key=lambda c: (per[c], c))
+        out[f"{group}_max"] = round(per[top], PSI_DECIMALS)
+        out[f"{group}_mean"] = round(float(np.mean(list(per.values()))), PSI_DECIMALS)
+        out[f"{group}_top_feature"] = top
+    return out
+
+
+def _r(x):
+    return None if x is None or (isinstance(x, float) and np.isnan(x)) else round(float(x), PSI_DECIMALS)
+
+
+def a1_input(reference: pd.DataFrame, batch: pd.DataFrame, score_psi, audit_counts: dict, history: list[dict],
+             round_id: int, psi_drift: float | None) -> dict:
+    """A1's input for one round. reference: the rows of every earlier batch (loop state.seen before this
+    round); batch: this round's rows; score_psi: the loop's PSI of the live scores (rounds.csv psi, None
+    when it has no history, e.g. round 1 or the round after a promote); audit_counts: oracle.audit_counts()
+    after this round's reveal; history: earlier rounds' entries of this payload's "psi" (see a1_history);
+    psi_drift: policy.yaml's threshold. With no reference rows the PSI is not computed (n_reference 0: A1
+    returns insufficient_data without a model call).
+    """
+    n_ref, n_batch = len(reference), len(batch)
+    psi_block = {"score": _r(score_psi)}
+    if n_ref and n_batch:
+        psi_block |= group_psi(reference, batch)
+    payload = {
+        "agent": "A1",
+        "round": int(round_id),
+        "n_reference": int(n_ref),
+        "n_batch": int(n_batch),
+        "psi": psi_block,
+        "psi_drift": None if psi_drift is None else float(psi_drift),
+        "audit": {"adults": int(audit_counts["adults"]), "teens": int(audit_counts["teens"])},
+        "history": [dict(h) for h in history],
+    }
+    check_barrier(payload)
+    return payload
+
+
+def a1_history(payload: dict) -> dict:
+    """The compact entry a round adds to the next rounds' history: round and the PSI numbers."""
+    p = payload["psi"]
+    return {"round": payload["round"], **{k: p.get(k) for k in ("score", "activity_max", "text_max")}}
+
+
+def a1_fields(payload: dict) -> dict:
+    """Every numeric input field A1 may cite, by path: "psi.activity_max", "audit.adults",
+    "history.round3.score", ... (None values are left out: there is nothing to cite)."""
+    out = {k: payload[k] for k in ("n_reference", "n_batch", "psi_drift")}
+    out |= {f"psi.{k}": v for k, v in payload["psi"].items() if not isinstance(v, str)}
+    out |= {f"audit.{k}": v for k, v in payload["audit"].items()}
+    for h in payload["history"]:
+        out |= {f"history.round{h['round']}.{k}": v for k, v in h.items() if k != "round"}
+    return {k: float(v) for k, v in out.items() if v is not None}

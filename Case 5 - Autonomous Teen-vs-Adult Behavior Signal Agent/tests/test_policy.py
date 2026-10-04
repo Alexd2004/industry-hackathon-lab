@@ -38,7 +38,7 @@ def test_committed_policy_has_exactly_the_policy_keys_with_their_types():
     p = pol.load_policy()
     assert set(p) == set(pol.POLICY_KEYS) | set(pol.OPTIONAL_KEYS)
     assert all(type(p[k]) is kind for k, kind in pol.POLICY_KEYS.items())
-    assert p["psi_drift"] is None
+    assert p["psi_drift"] == 0.25  # measured for A1, see policy.yaml
 
 
 def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):

@@ -5,4 +5,6 @@ soft_recall: 0.90       # share of teens the soft band and above must reach
 min_audit_adults: 120   # hold rule floor: no re-tune before this many audit adults (enforced by loop.py)
 audit_per_batch: 60     # random audit accounts revealed per batch (read by oracle.py)
 cap_margin: 0.0        # verify cutoff aims at cap - margin. 0.0 = no margin; not yet measured, pick from train folds or audit labels, never test
-psi_drift: null       # A1 fallback PSI threshold. No value chosen yet: measure PSI over the loop runs first
+psi_drift: 0.25       # A1 fallback: drift is real when a feature-group or score PSI reaches this. Measured
+                      # (batch vs earlier batches, 10 oracle seeds x rounds 2-7 = 60 no-drift batches): max 0.161,
+                      # 99th pct 0.149; a 0.5 sd mean shift in one feature gives 0.66+. 0.25 = the usual 'large shift'.
