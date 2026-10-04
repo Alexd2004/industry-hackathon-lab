@@ -21,10 +21,12 @@ loop.run_loop's three callbacks:
 
 Offline (no client), each agent first asks replay.Replayer for a recorded LIVE output made from the same input
 (marked REPLAY); otherwise it uses its fallback. --record never replays: a recording holds live or fallback
-output only. A2 is not replayed: offline it always falls back to the rule's own decision.
+output only. A2 is replayed too (its recorded decision is applied, marked REPLAY, only when its input hash matches
+and it still passes validate_output). A recording made from a different input is not served and the agent block's
+errors say replay_hash_mismatch.
 
-A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline (no key) A2 falls
-back to the rule's own decision every round, so an offline run's decisions are exactly loop.run_loop's. Score PSI goes
+A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline with nothing recorded A2
+falls back to the rule's own decision every round, so such a run's decisions are exactly loop.run_loop's. Score PSI goes
 to A1 only while the live rule is the starter: once the stack is live every refit changes the model, and
 score PSI would measure that change, not drift. A4 is not run here: while the loop is in SHADOW the
 starter blend picks the verify band and has no explanations; wire it once the live rule is the stack
@@ -52,9 +54,9 @@ import numpy as np
 import pandas as pd
 
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
-from softsignal.agents import a1_drift, a3_errors, a5_audit
+from softsignal.agents import a1_drift, a2_controller, a3_errors, a5_audit
 from softsignal.agents.a2_controller import run_a2
-from softsignal.agents.base import FALLBACK, AgentResult, make_client, merge_block
+from softsignal.agents.base import FALLBACK, AgentResult, input_hash, make_client, merge_block
 from softsignal.agents.contracts import (
     A3_COLS, INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a3_input, a5_input, a5_sources, evidence_source,
     load_checklist, round_claims,
@@ -126,6 +128,18 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         except FileNotFoundError:
             checklist = []
 
+    def replay_or_run(key: str, rnd: int, payload: dict, validate, run) -> AgentResult:
+        """The recorded output when offline and the input matches (REPLAY), else run() as usual. If this round and
+        agent were recorded from a different input, the result's errors say so (replay_hash_mismatch)."""
+        got = serve(offline, key, rnd, payload, validate, env.timer)
+        if got is not None:
+            return got
+        result = run()
+        note = offline.mismatch_note(rnd, key, input_hash(payload)) if offline is not None else None
+        if note:
+            result.errors.append(note)
+        return result
+
     def block(result, rnd: int) -> dict:
         return merge_block(result, round_agent_summary(env.timer.records, rnd, env.timer.run).get(result.agent))
 
@@ -134,8 +148,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         rows = prior.iloc[0:0] if batch is None else batch.rows
         score_psi = psi_val if state.mode == SHADOW else None  # the live model changes every refit once ACTIVE
         payload = a1_input(prior, rows, score_psi, env.oracle.audit_counts(), history, rnd, psi_drift)
-        a1 = (serve(offline, "a1", rnd, payload, a1_drift.validate_output, env.timer)
-              or a1_drift.run_a1(payload, client, env.timer, rnd))
+        a1 = replay_or_run("a1", rnd, payload, a1_drift.validate_output,
+                           lambda: a1_drift.run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
         return {"a1": block(a1, rnd), "a3": block(_a3_round(state, batch, prior, rnd), rnd)}
@@ -144,8 +158,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         """A3 on this round's earlier-round errors. Never raises: an A3 error must not take A1 or the round down."""
         try:
             payload = a3_payload(env, state, batch, prior)
-            return (serve(offline, "a3", rnd, payload, a3_errors.validate_output, env.timer)
-                    or a3_errors.run_a3(payload, client, env.timer, rnd))
+            return replay_or_run("a3", rnd, payload, a3_errors.validate_output,
+                                 lambda: a3_errors.run_a3(payload, client, env.timer, rnd))
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A3", FALLBACK, a3_errors.fallback_output(), A3_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
@@ -161,9 +175,9 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             payload = a5_input(claims, sources, checklist, "round", rnd)
             # the round's own headline only (no A2 reason yet): the script checks it, no model call needed
             script_only = len(claims) == 1
-            return (serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer)
-                    or a5_audit.run_a5(payload, None if script_only else client, env.timer, rnd,
-                                       script_only=script_only))
+            return replay_or_run("a5", rnd, payload, a5_audit.validate_output,
+                                 lambda: a5_audit.run_a5(payload, None if script_only else client, env.timer, rnd,
+                                                         script_only=script_only))
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A5", FALLBACK, [], A5_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
@@ -174,7 +188,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
                            a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT,
                            a3=a3 if a3_ok else INSUFFICIENT_INPUT, policy=env.policy)
-        a2 = run_a2(payload, client, env.timer, ctx.round)
+        a2 = replay_or_run("a2", ctx.round, payload, a2_controller.validate_output,
+                           lambda: run_a2(payload, client, env.timer, ctx.round))
         return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
 
     def on_round(result) -> None:
@@ -196,6 +211,37 @@ def compact_decisions(path: Path) -> None:
     which only the live screen needs."""
     by_key = {(r["run"], r["round"]): r for r in read_records(path)}
     path.write_text("".join(json.dumps(by_key[k]) + "\n" for k in sorted(by_key)), encoding="utf-8")
+
+
+AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
+
+
+def run_fallbacks(records: list[dict]) -> int:
+    """FALLBACK blocks in one run that are not the expected "insufficient_data" (no model call was needed)."""
+    return sum(1 for r in records for k in AGENT_KEYS
+               if (r.get(k) or {}).get("status") == FALLBACK and (r[k].get("fallback_reason") != "insufficient_data"))
+
+
+def pick_canonical(records: list[dict], n_rounds: int) -> str | None:
+    """The run id to commit as the recording, or None if no run has all n_rounds rounds.
+
+    Rule, fixed before any run is looked at: among complete runs, the fewest unexpected FALLBACK blocks, ties to
+    the earliest run id. It never looks at recall, false-teen or any metric, so picking the recording cannot
+    be picking the best-looking numbers.
+    """
+    by_run: dict[str, list[dict]] = {}
+    for r in records:
+        by_run.setdefault(r["run"], []).append(r)
+    complete = {run: rs for run, rs in by_run.items() if len({r["round"] for r in rs}) == n_rounds}
+    return min(complete, key=lambda run: (run_fallbacks(complete[run]), run), default=None)
+
+
+def keep_run(paths: tuple[Path, Path], run: str) -> None:
+    """Rewrite the rounds csv and decisions jsonl at paths so they hold only this run."""
+    rounds = pd.read_csv(paths[0], dtype={"run": str})
+    rounds[rounds["run"] == run].to_csv(paths[0], index=False, lineterminator="\n")
+    kept = [r for r in read_records(paths[1]) if r["run"] == run]
+    paths[1].write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
 
 
 # ---- background run for the Loop tab ----
@@ -255,6 +301,9 @@ def main() -> None:
     ap.add_argument("--mode", choices=RUN_MODES, default="crew",
                     help="crew: apply A2; rule: apply the rule")
     ap.add_argument("--rounds", type=int, default=None)
+    ap.add_argument("--runs", type=int, default=1,
+                    help="repeat the full run N times, each with its own run id (timings for p50 / p95); "
+                         "with --record the canonical run (pick_canonical) is the one committed")
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--no-write", action="store_true", help="print only")
     out.add_argument("--record", action="store_true", help="replace the committed recorded run with this one")
@@ -264,10 +313,11 @@ def main() -> None:
         ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
     if args.record and args.mode != "crew":
         ap.error("--record writes the crew run that a fresh clone shows; drop --mode rule")
+    if args.runs < 1:
+        ap.error("--runs must be at least 1")
     if not (args.no_write or args.record):
         check_rounds_header(ROUNDS_CSV, ROUNDS_COLS)  # fail now, not after every refit has run
     train, test = load_data(on_param_mismatch="error")
-    env = make_env(train, test)
     client = make_client()
     recorded = (ROUNDS_RECORDED, DECISIONS_RECORDED)
     # --record builds the new run next to the committed one and swaps it in only once the run has finished
@@ -276,14 +326,37 @@ def main() -> None:
         p.unlink(missing_ok=True)
     try:
         replayer = None if args.record or args.no_replay else Replayer.from_file(DECISIONS_RECORDED)
-        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer,
-                                   apply_a2=args.mode == "crew")
+        all_rounds, all_records = [], []
+        for _ in range(args.runs):
+            # a fresh timer per run: its own run id, its calls logged next to the other runs' calls
+            env = make_env(train, test, timer=AgentTimer(DEFAULT_LOG) if args.runs > 1 else None)
+            rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer,
+                                       apply_a2=args.mode == "crew")
+            all_rounds.append(rounds)
+            all_records.append(records)
+            if args.runs > 1:
+                print(f"run {env.timer.run}: {run_fallbacks(records)} unexpected FALLBACK blocks")
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)
         raise
     if args.record:
         compact_decisions(paths[1])  # the committed file: one record per round (Crew Plan section 8)
+        if args.runs > 1:
+            canon = pick_canonical(read_records(paths[1]), len(all_rounds[0]))
+            if canon is None:
+                raise SystemExit("no run has every round; nothing recorded")
+            keep_run(paths, canon)
+            rounds = next(r for r in all_rounds if (r["run"] == canon).all())
+            records = [r for rs in all_records for r in rs if r["run"] == canon]
+            print(f"canonical run: {canon} (fewest unexpected FALLBACKs, ties to the earliest; metrics not used)")
+        from softsignal.recorded_check import scan_recorded  # lazy: recorded_check imports this module
+
+        problems = scan_recorded(*paths)  # the repo is public: nothing is swapped in if the new run is not clean
+        if problems:
+            for p in paths:
+                p.unlink(missing_ok=True)
+            raise SystemExit("recording not saved, safety scan found:\n  " + "\n  ".join(problems))
         for new, old in zip(paths, recorded):
             os.replace(new, old)
         paths = recorded

@@ -5,6 +5,7 @@ through a mocked HTTP transport so the request shape the API receives is checked
 """
 import copy
 import json
+import os
 from types import SimpleNamespace
 
 import anthropic
@@ -271,8 +272,8 @@ def test_the_request_is_one_fresh_prompt_with_the_contract_settings(payload, tmp
     run(payload, client, tmp_path)
     (kw,) = client.calls
     assert kw["model"] == base.MODEL and kw["system"] == SYSTEM and kw["max_tokens"] == base.MAX_TOKENS
-    assert kw["output_config"] == {"effort": base.EFFORT, "format": {
-        "type": "json_schema", "schema": anthropic.transform_schema(A4Output)}}
+    assert kw["output_config"] == base.output_config(A4Output)
+    assert ("effort" in kw["output_config"]) == bool(base.EFFORT)
     # A4 is off the decision path: its own, longer timeout, and never a retry
     assert client.options == [{"timeout": base.TIMEOUTS["A4"], "max_retries": 0}]
     assert base.TIMEOUTS["A4"] > base.TIMEOUT_S
@@ -357,7 +358,7 @@ def test_real_sdk_request_through_a_mocked_transport(payload, tmp_path):
     result, records = run(payload, client, tmp_path)
     assert (result.status, result.output) == (LIVE, out) and records[0]["tokens_in"] == 1500
     body = seen["body"]
-    assert body["model"] == base.MODEL and body["output_config"]["effort"] == base.EFFORT
+    assert body["model"] == base.MODEL and body["output_config"].get("effort") == (base.EFFORT or None)
     assert body["output_config"]["format"]["type"] == "json_schema" and body["max_tokens"] == base.MAX_TOKENS
     assert set(body["output_config"]["format"]["schema"]["properties"]) == {"batch_reason", "based_on"}
     assert "temperature" not in body and len(body["messages"]) == 1
@@ -448,3 +449,18 @@ def test_model_text_is_shown_as_typed_not_rendered():
     at = AppTest.from_function(card, kwargs={"rec": record}).run()
     shown = next(c.value for c in at.caption if "evil" in c.value)
     assert "](http" not in shown and r"\[this\]" in shown and r"\$x\$" in shown and r"\*\*now\*\*" in shown
+
+
+def test_env_file_sets_missing_variables_only(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_text('# note\nexport SS_TEST_A=one\nSS_TEST_B = "two"\nSS_TEST_KEEP=new\nbad line\n', encoding="utf-8")
+    monkeypatch.delenv("SS_TEST_A", raising=False)
+    monkeypatch.delenv("SS_TEST_B", raising=False)
+    monkeypatch.setenv("SS_TEST_KEEP", "old")
+    try:
+        assert base.load_env_file(f) == ["SS_TEST_A", "SS_TEST_B"]
+        assert (os.environ["SS_TEST_A"], os.environ["SS_TEST_B"], os.environ["SS_TEST_KEEP"]) == ("one", "two", "old")
+    finally:
+        os.environ.pop("SS_TEST_A", None)
+        os.environ.pop("SS_TEST_B", None)
+    assert base.load_env_file(tmp_path / "missing.env") == []

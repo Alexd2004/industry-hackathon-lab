@@ -14,13 +14,15 @@ so an agent never breaks the round:
     number_not_in_input / cites_unknown_field / age_claim / unsupported_verdict / guardrail   the agents' checks
     insufficient_data   the input lacks what the agent needs; no model call is made
 
-Model: claude-opus-5 for all five agents (Crew Plan section 9: one setup to measure), effort "low".
+Model: claude-haiku-4-5-20251001 for all five agents (cheap and fast; Crew Plan section 9: one setup to measure).
+No effort setting is sent by default (not verified for Haiku 4.5); set SOFTSIGNAL_AGENT_EFFORT to send one.
 Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A4, off the decision
 path, gets longer (TIMEOUTS; not measured yet, set after measuring); A5's one-off slide pass gets 60 s. Overrides:
 SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S /
 SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
 forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
-The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. Refusals go to the
+The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. For local use it can sit in a
+`.env` file in the case folder (gitignored), read by load_env_file below; a variable already set wins. Refusals go to the
 deterministic fallback, as the plan says, not to a server-side model fallback.
 """
 from __future__ import annotations
@@ -35,14 +37,42 @@ from typing import Any, Callable
 
 from softsignal.agent_timer import AgentTimer
 
-MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-opus-5")
-EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "low")
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def load_env_file(path: Path = ENV_FILE) -> list[str]:
+    """Set KEY=value lines of a .env file into os.environ and return the names set. Variables already set are
+    kept, blank lines and # comments are skipped, one pair of quotes around a value is removed. A missing or
+    unreadable file sets nothing."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return []
+    names = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.removeprefix("export ").strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            names.append(key)
+    return names
+
+
+load_env_file()  # before the settings below, so SOFTSIGNAL_* in .env applies too
+
+MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-haiku-4-5-20251001")
+EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "")  # empty: no effort sent
 TIMEOUT_S = float(os.environ.get("SOFTSIGNAL_AGENT_TIMEOUT_S", "4.0"))  # decision-path agents (A1-A3)
 TIMEOUTS = {"A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
             # A5 per round is a live call (Crew Plan section 9: 4 s); its one-off slide pass uses 60 s
             "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}
 MAX_RETRIES = 0  # the SDK retries twice by default, which turns a 4 s timeout into about 12 s
-MAX_TOKENS = 4096  # adaptive thinking at low effort shares this with the short JSON answer
+MAX_TOKENS = 4096  # room for the short JSON answer (and any thinking, if an effort is set)
 MAX_REJECTED_CHARS = 2000  # a rejected reply is kept (truncated) for A5 and prompt tuning
 
 LIVE, FALLBACK, REPLAY = "LIVE", "FALLBACK", "REPLAY"
@@ -211,6 +241,14 @@ def _read_reply(resp, schema: type, check: Check | None) -> ModelReply:
     return ModelReply(output=output)
 
 
+def output_config(schema: type) -> dict:
+    """output_config for one call: the JSON schema format, plus effort only when EFFORT is set."""
+    import anthropic
+
+    cfg: dict = {"format": {"type": "json_schema", "schema": anthropic.transform_schema(schema)}}
+    return {"effort": EFFORT, **cfg} if EFFORT else cfg
+
+
 def call_model(client, *, agent: str, step: str, system: str, user: str, schema: type, check: Check | None = None,
                timer: AgentTimer | None = None, round_id: Any = None, timeout: float | None = None) -> ModelReply:
     """One structured-output call (messages.create with output_config.format = the schema), timed if a timer
@@ -219,14 +257,11 @@ def call_model(client, *, agent: str, step: str, system: str, user: str, schema:
     """
     def _call(c=None) -> ModelReply:
         try:
-            import anthropic
-
             api = client.with_options(timeout=timeout or timeout_for(agent), max_retries=MAX_RETRIES) \
                 if hasattr(client, "with_options") else client
             resp = api.messages.create(
                 model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=[{"role": "user", "content": user}],
-                output_config={"effort": EFFORT, "format": {"type": "json_schema",
-                                                             "schema": anthropic.transform_schema(schema)}})
+                output_config=output_config(schema))
         except Exception as e:  # noqa: BLE001 - the contract is "never raise"; classify what we can
             return ModelReply(fallback_reason=_classify(e), errors=[_error(e)])
         try:

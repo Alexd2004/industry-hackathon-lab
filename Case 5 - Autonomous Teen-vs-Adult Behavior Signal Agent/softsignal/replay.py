@@ -83,6 +83,14 @@ class Replayer:
         hit = self.blocks.get((int(round_id), key))
         return hit[1] if hit is not None and hit[0] == payload_hash else None
 
+    def mismatch_note(self, round_id: int, key: str, payload_hash: str) -> str | None:
+        """A note when this round and agent were recorded LIVE from a different input (so the recording was not
+        served), else None. Not the same as "nothing recorded": the caller puts it in the agent block's errors."""
+        hit = self.blocks.get((int(round_id), key))
+        if hit is None or hit[0] == payload_hash:
+            return None
+        return f"replay_hash_mismatch: recorded input {hit[0]}, now {payload_hash}; recording not served"
+
 
 def serve(replayer: "Replayer | None", key: str, round_id: int, payload: dict,
           validate: Callable[[object, dict], tuple], timer: AgentTimer | None = None) -> AgentResult | None:
