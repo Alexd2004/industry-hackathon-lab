@@ -336,6 +336,13 @@ def cap_limits() -> tuple[float, float]:
     return CAP_MIN, CAP_MAX
 
 
+def window_min() -> int:
+    """loop.WINDOW_MIN: the shortest refit window A2 may ask for. Lazy import, as cap_limits."""
+    from softsignal.loop import WINDOW_MIN
+
+    return WINDOW_MIN
+
+
 def hard_limits(policy: dict | None = None) -> tuple[float, float, int]:
     """(cap_min, cap_max, min_audit_adults). The audit floor is the policy the loop runs with when it is passed
     (loop.rule_decision reads env.policy), else policy.yaml, read once per modification time."""

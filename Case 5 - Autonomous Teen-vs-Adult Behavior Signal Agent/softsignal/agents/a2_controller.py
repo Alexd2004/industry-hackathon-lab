@@ -39,7 +39,7 @@ from softsignal.agents.base import (
     AGE_CLAIM, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, age_claims,
     call_model, input_hash, numbers_in, numbers_not_in_input,
 )
-from softsignal.agents.contracts import cap_limits, dotted_paths
+from softsignal.agents.contracts import cap_limits, dotted_paths, window_min
 from softsignal.agents.schemas import A2_MAX_REASON_CHARS, A2Output
 
 AGENT = "A2"
@@ -62,7 +62,9 @@ promote).
 - rule: the rule-based decision (action and cap). Follow it unless the input gives a reason not to.
 
 Actions: hold keeps the current thresholds. re-tune refits the model and recomputes the thresholds. promote \
-moves SHADOW to ACTIVE. cap is the share of adults you accept being sent to verification, as a fraction.
+moves SHADOW to ACTIVE. cap is the share of adults you accept being sent to verification, as a fraction. refit_window (2 or more, or \
+null for all rounds) makes a re-tune use only the labels of the last that-many rounds: use it, with a small number \
+such as 2 or 3, only when a1 reports real drift, so the refit forgets data from before the shift.
 
 Rules:
 - Use only the input. Never state or guess an age, an identity, or anything the input does not say.
@@ -114,6 +116,8 @@ def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]
     if unknown or len(set(cites)) != len(cites):
         return UNKNOWN_FIELD, [f"cites {unknown or cites}: not distinct fields of the input"]
     own_cap = [output["cap"], round(output["cap"] * 100, 10)]
+    if output.get("refit_window") is not None:
+        own_cap.append(output["refit_window"])
     invented = numbers_not_in_input(output["reason"], [payload, percent_forms(payload), own_cap])
     if invented:
         return NUMBER_NOT_IN_INPUT, [f"numbers not in the input: {invented}"]
@@ -137,15 +141,20 @@ def clamp_output(output: dict, payload: dict) -> tuple[dict, list[str]]:
     lo_code, hi_code = cap_limits()
     lo, hi = max(payload["bounds"]["cap_min"], lo_code), min(payload["bounds"]["cap_max"], hi_code)
     cap = float(min(hi, max(lo, output["cap"])))
-    if cap == output["cap"]:
+    window = output.get("refit_window")
+    new_window = None if window is None else max(window_min(), window)
+    if cap == output["cap"] and new_window == window:
         return output, []
-    note = f" (cap clamped from {output['cap']} to {cap})"
+    changes = ([f"CLAMPED cap {output['cap']} -> {cap}"] if cap != output["cap"] else []) + (
+        [f"CLAMPED refit_window {window} -> {new_window}"] if new_window != window else [])
+    note = "".join([f" (cap clamped from {output['cap']} to {cap})" if cap != output["cap"] else "",
+                    f" (refit_window clamped from {window} to {new_window})" if new_window != window else ""])
     room = A2_MAX_REASON_CHARS - len(note)
     text = output["reason"]
     if len(text) > room:  # cut at a word boundary, so a number is never cut in half
         text = text[:room].rsplit(" ", 1)[0].rstrip(",;:")
     reason = text + note  # the text must match the applied cap
-    return {**output, "cap": cap, "reason": reason}, [f"CLAMPED cap {output['cap']} -> {cap}"]
+    return {**output, "cap": cap, **({} if window is None else {"refit_window": new_window}), "reason": reason}, changes
 
 
 def _rule_output(payload: dict) -> tuple[dict, list[str]]:

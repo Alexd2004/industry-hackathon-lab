@@ -87,6 +87,8 @@ HOLD, RETUNE, PROMOTE, STARTER = "hold", "re-tune", "promote", "starter"
 SOURCE_RULE = "rule"
 RUN_MODES = ("rule", "crew")  # the CLI switch: who decides each round
 CAP_MIN, CAP_MAX = 0.08, 0.30  # clamp for any cap the loop or A2 applies (policy.py does not clamp)
+WINDOW_MIN = 2  # fewest rounds of labels a refit window may keep: fewer leaves too few audit adults for thresholds
+MIN_WINDOW_ROWS = 100  # a window with fewer labelled rows (or only one class) is not used: the refit keeps all rounds
 PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs the pooled audit false-teen <= cap + this ...
 PROMOTE_STREAK = 2  # ... pooled over this many rounds in a row
 PROMOTE_MIN_ADULTS = 40  # ... and over at least this many pooled audit adults (2 x 20, the old per-round floor)
@@ -98,6 +100,11 @@ AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
 
 def clamp_cap(cap: float) -> float:
     return float(min(CAP_MAX, max(CAP_MIN, cap)))
+
+
+def clamp_window(window: int) -> int:
+    """A refit window of at least WINDOW_MIN rounds (no upper limit: a long window is the same as all rounds)."""
+    return max(WINDOW_MIN, int(window))
 
 
 def starter_score(df: pd.DataFrame) -> np.ndarray:
@@ -128,6 +135,7 @@ class State:
     candidate: Rule | None = None
     candidate_round: int | None = None  # the round whose refit made the candidate (None: no candidate yet)
     candidate_cap: float | None = None  # the cap that refit used: what the promote gate's evidence was gathered at
+    candidate_window: int | None = None  # the refit window that refit used (None: all rounds), kept with the cap
     mode: str = SHADOW
     streak: int = 0  # rounds in the window while it fills, then PROMOTE_STREAK if the pooled test passes, else 0
     window: list = field(default_factory=list)  # (audit adults, candidate false teens) of the last rounds, reassigned
@@ -218,19 +226,33 @@ def false_teen(y: np.ndarray, scores: np.ndarray, t_verify: float) -> float | No
 
 
 # ---- refit ----
-def labelled_rows(env: Env, state: State) -> pd.DataFrame:
-    """Every revealed label joined to its features: ID_COL, FEATURE_COLS, TARGET, in_audit."""
-    lab = env.oracle.revealed("all")[[ID_COL, TARGET, "in_audit"]]
+def labelled_rows(env: Env, state: State, window: int | None = None) -> pd.DataFrame:
+    """Every revealed label joined to its features: ID_COL, FEATURE_COLS, TARGET, in_audit. window keeps only the
+    labels revealed in the last `window` rounds (None: all of them), so a refit can drop data from before a drift."""
+    lab = env.oracle.revealed("all")
+    if window is not None:
+        lab = lab[lab["round"] > state.round - window]
+    lab = lab[[ID_COL, TARGET, "in_audit"]]
     return lab.merge(state.seen, on=ID_COL, how="left", validate="one_to_one").reset_index(drop=True)
 
 
-def refit(env: Env, state: State, cap: float) -> Rule:
-    """A new candidate: a stack fit on all revealed labels, thresholds from out-of-fold scores.
+def effective_window(env: Env, state: State, window: int | None) -> int | None:
+    """The window a refit will really use: None (all rounds) when none was asked for, when the window already
+    covers every round, or when the windowed labels are too few or one-class to fit and threshold on."""
+    if window is None or window >= state.round:
+        return None
+    frame = labelled_rows(env, state, window)
+    return window if len(frame) >= MIN_WINDOW_ROWS and frame[TARGET].nunique() == 2 else None
+
+
+def refit(env: Env, state: State, cap: float, window: int | None = None) -> Rule:
+    """A new candidate: a stack fit on the revealed labels (the last `window` rounds, None: all), thresholds from
+    out-of-fold scores.
 
     Each revealed row is scored by a stack fit without it (5 folds), so the audit rows the thresholds
     come from are never scored by a model that saw them.
     """
-    frame = labelled_rows(env, state)
+    frame = labelled_rows(env, state, window)
     fit = lambda df: Stack.fit(df, tm=env.tm, train_ids=env.train_ids)  # noqa: E731
     oof = np.full(len(frame), np.nan)
     for fit_idx, val_idx in cv_folds(frame):
@@ -250,7 +272,10 @@ def report_metrics(rule: Rule, test: pd.DataFrame) -> dict:
 
 
 def _decision_block(rule_dec: dict, live: Rule) -> dict:
-    return {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
+    block = {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
+    if rule_dec.get("refit_window") is not None:
+        block["refit_window"] = rule_dec["refit_window"]
+    return block
 
 
 def pooled_test(window: list, cap: float) -> tuple[int, int, bool]:
@@ -388,7 +413,11 @@ def _a2_applied(a2_block: "dict | None", rule_dec: dict, floor_met: bool, promot
         action = HOLD
     elif action == PROMOTE and not promote_ok:
         action = RETUNE
-    return {"action": action, "cap": clamp_cap(float(out["cap"]))}
+    applied = {"action": action, "cap": clamp_cap(float(out["cap"]))}
+    window = out.get("refit_window")
+    if isinstance(window, int) and not isinstance(window, bool):
+        applied["refit_window"] = clamp_window(window)
+    return applied
 
 
 def _agent_blocks(before_decision: BeforeDecision | None, state: State, batch: "Batch | None",
@@ -509,17 +538,23 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     # 5. apply it
     refit_s = None
     policy_cap = clamp_cap(env.policy["cap_false_teen"])
-    evidence.update(policy_cap=policy_cap, refit_cap=None, cap_differs=False)
+    evidence.update(policy_cap=policy_cap, refit_cap=None, cap_differs=False, refit_window=None, window_differs=False)
     if applied["action"] != HOLD:
         if applied["action"] == PROMOTE:
             # the model that goes live is thresholded at the cap its evidence candidate was refit at (the one the
             # gate measured), not at whatever cap A2 or the rule proposes now; the gate bar itself is the policy cap
-            applied = {**applied, "cap": policy_cap if state.candidate_cap is None else state.candidate_cap}
-        evidence.update(refit_cap=applied["cap"], cap_differs=applied["cap"] != policy_cap)
+            applied = {**applied, "cap": policy_cap if state.candidate_cap is None else state.candidate_cap,
+                       "refit_window": state.candidate_window}  # the window goes with the cap: same model as tested
+        window = effective_window(env, state, applied.get("refit_window"))
+        applied = {k: v for k, v in applied.items() if k != "refit_window"} | (
+            {} if window is None else {"refit_window": window})  # what the refit really uses
+        evidence.update(refit_cap=applied["cap"], cap_differs=applied["cap"] != policy_cap,
+                        refit_window=window, window_differs=window is not None)
         t0 = time.perf_counter()
         with env.timer.call(AGENT, "refit", "tool"):
-            state.candidate = refit(env, state, applied["cap"])
+            state.candidate = refit(env, state, applied["cap"], window)
             state.candidate_round, state.candidate_cap = batch.round, applied["cap"]
+            state.candidate_window = window
         refit_s = time.perf_counter() - t0
         if applied["action"] == PROMOTE:
             if _unsafe(state.candidate):

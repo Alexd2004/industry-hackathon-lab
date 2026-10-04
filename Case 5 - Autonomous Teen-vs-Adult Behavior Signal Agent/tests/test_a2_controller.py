@@ -159,8 +159,8 @@ def test_dotted_paths_name_nodes_and_leaves(payload):
 
 # --- schema ---------------------------------------------------------------------------------------
 
-def test_schema_has_action_and_cap_only():
-    assert set(A2Output.model_fields) == {"action", "cap", "reason", "cites"}  # no blend_w, no cutoff
+def test_schema_has_action_cap_and_window_only():
+    assert set(A2Output.model_fields) == {"action", "cap", "refit_window", "reason", "cites"}  # no blend_w, no cutoff
 
 
 @pytest.mark.parametrize("bad", [
@@ -293,7 +293,7 @@ def test_live_reply_is_used(payload, tmp_path):
     timer = AgentTimer(path=tmp_path / "calls.jsonl", run="t")
     r = run_a2(payload, client=FakeClient(reply(good())), timer=timer, round_id=3)
     assert r.status == LIVE and r.fallback_reason is None and r.errors == []
-    assert r.output == good()
+    assert r.output == good() | {"refit_window": None}
     assert round_agent_summary(load_records(timer.path), 3, "t")["A2"]["status"] == LIVE
 
 
@@ -640,3 +640,30 @@ def test_cap_limits_read_no_file(monkeypatch):
     monkeypatch.setattr(contracts, "_limits_from", lambda *a: (_ for _ in ()).throw(AssertionError("read the file")))
     assert contracts.cap_limits() == (0.08, 0.3)
     assert hard_limits({"min_audit_adults": 77}) == (0.08, 0.3, 77)
+
+
+@pytest.mark.parametrize("window,want", [(3, 3), (2, 2), (1, 2), (0, 2), (-5, 2), (9, 9), (None, None)])
+def test_refit_window_is_clamped_to_the_code_minimum(payload, window, want):
+    out, notes = clamp_output(good(refit_window=window), payload)
+    assert out.get("refit_window") == want and bool(notes) == (window != want)
+    assert all(n.startswith("CLAMPED refit_window") for n in notes)
+
+
+def test_clamped_reason_names_the_window(payload):
+    out, _ = clamp_output(good(refit_window=1, reason="Short."), payload)
+    assert out["reason"].endswith("(refit_window clamped from 1 to 2)")
+
+
+def test_own_window_may_be_named_in_the_reason(payload):
+    assert validate_output(good(refit_window=3, reason="A1 reports drift, so refit on the last 3 rounds."), payload) == (None, [])
+
+
+@pytest.mark.parametrize("bad", ["3", 2.5, True])
+def test_schema_rejects_a_non_integer_window(bad):
+    with pytest.raises(Exception):
+        A2Output(**good(refit_window=bad))
+
+
+def test_fallback_never_sets_a_window(payload):
+    assert fallback_output(payload).get("refit_window") is None
+    assert run_a2(payload, client=None).output.get("refit_window") is None

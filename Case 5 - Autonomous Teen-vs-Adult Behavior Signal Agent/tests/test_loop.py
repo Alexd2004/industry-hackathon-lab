@@ -257,15 +257,17 @@ def split():
 
 
 def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=(), min_adults=1, decide=None, apply_a2=False,
-               caps=None):
+               caps=None, windows=None):
     """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place.
     decide / apply_a2: A2's callback (see loop.run_round); caps, if a list, collects the cap of every refit."""
     train, test, tm = split
     monkeypatch.setattr(lp, "PROMOTE_MIN_ADULTS", min_adults)  # these test the promote logic, not the real floor
     seq = list(flags) if isinstance(flags, list) else [flags]  # a list gives each refit its own flags, the last repeats
-    def stub_refit(env, st, cap):
+    def stub_refit(env, st, cap, window=None):
         if caps is not None:
             caps.append(cap)
+        if windows is not None:
+            windows.append(window)
         return candidate(seq.pop(0) if len(seq) > 1 else seq[0])
 
     monkeypatch.setattr(lp, "refit", stub_refit)
@@ -338,7 +340,8 @@ def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
     for r in records[1:]:
         ev = r["evidence"]
         assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "pooled_adults", "pooled_ft", "streak",
-                           "promote_refused", "policy_cap", "refit_cap", "cap_differs", "cand_age"}
+                           "promote_refused", "policy_cap", "refit_cap", "cap_differs", "cand_age",
+                           "refit_window", "window_differs"}
         assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
     hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
     assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)
@@ -418,9 +421,9 @@ def test_pooled_test_counts_adults_and_false_teens():
 
 
 # ---- A2 inside the round (step 15) ----
-def a2_says(action, cap):
+def a2_says(action, cap, refit_window=None):
     block = {"status": "LIVE", "fallback_reason": None,
-             "output": {"action": action, "cap": cap, "reason": "test", "cites": ["audit"]}}
+             "output": {"action": action, "cap": cap, "refit_window": refit_window, "reason": "test", "cites": ["audit"]}}
     return lambda ctx, blocks: {"a2": block}
 
 
@@ -484,3 +487,59 @@ def test_a_stale_header_fails_before_any_round_runs(tmp_path, monkeypatch, mode)
     monkeypatch.setattr("sys.argv", ["loop", "--mode", mode, "--no-write"])
     with pytest.raises(pytest.fail.Exception, match="must not load"):  # --no-write skips the check and goes on to run
         lp.main()
+
+
+# ---- A2's refit_window (step 3) ----
+def test_a2_window_reaches_the_refit_and_is_logged(split, tmp_path, monkeypatch):
+    windows = []
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 4, decide=a2_says("re-tune", 0.15, 2),
+                               apply_a2=True, windows=windows)
+    ev = [r["evidence"] for r in rounds.attrs["records"]]
+    assert windows[0] is None and windows[-1] == 2  # round 1 has no earlier round to drop: all rounds
+    assert ev[-1]["refit_window"] == 2 and ev[-1]["window_differs"] is True
+    assert rounds.attrs["records"][-1]["applied"]["decision"]["refit_window"] == 2
+    assert st.candidate_window == 2
+
+
+def test_a_window_of_one_is_clamped_to_the_minimum(split, tmp_path, monkeypatch):
+    windows = []
+    run_rounds(split, tmp_path, monkeypatch, 4, decide=a2_says("re-tune", 0.15, 1), apply_a2=True, windows=windows)
+    assert windows[-1] == lp.WINDOW_MIN
+
+
+def test_rule_mode_never_uses_the_window(split, tmp_path, monkeypatch):
+    windows = []
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 4, decide=a2_says("re-tune", 0.15, 2), windows=windows)
+    assert set(windows) == {None} and rounds.attrs["records"][-1]["evidence"]["window_differs"] is False
+
+
+def test_a_promote_keeps_the_window_the_evidence_candidate_was_refit_at(split, tmp_path, monkeypatch):
+    windows = []
+
+    def decide(ctx, blocks):
+        if ctx.guards["promote_allowed"]:
+            return a2_says("promote", 0.15, 5)(ctx, blocks)
+        return a2_says("re-tune", 0.15, 2)(ctx, blocks)
+
+    # the first refit is flagged, so the gate only passes after a few rounds, when a window of 2 is already in use
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 6, flags=[("insufficient_adults",), ()],
+                               decide=decide, apply_a2=True, windows=windows)
+    promoted = list(rounds.index[rounds["action"] == lp.PROMOTE])
+    assert len(promoted) == 1 and promoted[0] >= 3
+    assert windows[promoted[0]] == 2 and 5 not in windows  # the tested window, not A2's 5
+
+
+def test_effective_window_falls_back_to_all_rounds(split, tmp_path, monkeypatch):
+    _, st, env = run_rounds(split, tmp_path, monkeypatch, 4)
+    assert lp.effective_window(env, st, None) is None
+    assert lp.effective_window(env, st, st.round) is None  # covers every round
+    assert lp.effective_window(env, st, 2) == 2
+    monkeypatch.setattr(lp, "MIN_WINDOW_ROWS", 10**6)  # too few rows in the window
+    assert lp.effective_window(env, st, 2) is None
+
+
+def test_labelled_rows_keep_only_the_last_rounds(split, tmp_path, monkeypatch):
+    _, st, env = run_rounds(split, tmp_path, monkeypatch, 4)
+    all_rows, last2 = lp.labelled_rows(env, st), lp.labelled_rows(env, st, 2)
+    rev = env.oracle.revealed("all")
+    assert len(last2) == int((rev["round"] > st.round - 2).sum()) and len(last2) < len(all_rows)

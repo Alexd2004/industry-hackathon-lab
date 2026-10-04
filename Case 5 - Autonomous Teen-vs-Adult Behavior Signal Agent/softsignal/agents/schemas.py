@@ -72,6 +72,11 @@ class A2Output(BaseModel):
         description="Cap on the false-teen rate (share of adults sent to verification) for this round, "
                     "as a fraction, e.g. 0.15. Stay within input.bounds.",
     )
+    refit_window: int | None = Field(
+        default=None, strict=True,
+        description="Refit on the labels of only the last this-many rounds (at least 2), to drop data from before "
+                    "a drift. null refits on all rounds. Leave null unless A1 reports real drift.",
+    )
     reason: str = Field(
         min_length=1, max_length=A2_MAX_REASON_CHARS,
         description="Why this action and cap, under 400 characters. Every number in it must appear in the "
