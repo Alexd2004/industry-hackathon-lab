@@ -1,0 +1,44 @@
+# The Combined Plan section 8 risk list, as A5's checklist (softsignal/agents/a5_audit.py).
+# A claim is tagged with a risk id when every term of one of its `watch` groups appears in the claim
+# (case-insensitive substring match). Tags are flags for a person; they never change a verdict on their own.
+# risk: what can go wrong. say: how to say it honestly on a slide.
+- id: over_cap
+  risk: The logistic stack lands at about 17% false-teen on held-out accounts, over the 15% cap (inside the +/-3.3-point CI).
+  say: "15% cap on training data; 17% on held-out, within the CI."
+  watch: [["15%", "false-teen"], ["15%", "cap"]]
+- id: loop_below_static
+  risk: The loop's end point (R7) is below the static stack, which uses all 2,100 training labels.
+  say: The loop starts from zero labels; the trend is the claim.
+  watch: [["loop"], ["round 7"], ["promote"]]
+- id: projected_numbers
+  risk: Some ladder and trajectory numbers are projected, not measured.
+  say: Label projected numbers as projected, or measure them first.
+  watch: [["projected"], ["expected"], ["will reach"]]
+- id: cutoff_move
+  risk: Much of the 34% to 14% false-teen drop is a cutoff move that tune() already gets.
+  say: Compare with the tune() ladder row, which isolates what the text and the loop add.
+  watch: [["34%"], ["cutoff"]]
+- id: synthetic_data
+  risk: Activity data is synthetic, verification is simulated from the answer key, and the text is 2004 blogs with no 18-22 authors.
+  say: Keep the footer on screen and say what is synthetic.
+  watch: [["activity"], ["real users"], ["meta"], ["verified teens"]]
+- id: missed_teen_cost
+  risk: A 3% missed-teen requirement costs 37.5% false-teen.
+  say: Position the system as pre-verification triage, not the verdict.
+  watch: [["missed-teen"], ["missed teen"]]
+- id: agents_accuracy
+  risk: The crew may be slower or no better than the rule-based loop; accuracy comes from the model.
+  say: The agents explain, adapt and audit; quote ladder rows 11-12 for anything more.
+  watch: [["agent", "accura"], ["crew", "accura"], ["agent", "better"], ["crew", "better"], ["agent", "improv"]]
+- id: market_figures
+  risk: Market figures ($13.8B to $32.6B, per-check costs, 29 states) are unverified.
+  say: Verify them or drop them before they reach a slide.
+  watch: [["$"], ["market"], ["billion"], ["29 states"]]
+- id: legal_age
+  risk: The output is a likelihood, not legal age; the strongest action is a verification request, never a ban.
+  say: Say likelihood, and request verification.
+  watch: [["legal age"], [" ban"], ["prove"], ["identif"]]
+- id: latency
+  risk: No latency figure may be quoted before it is measured.
+  say: Quote p50 / p95 from agent_calls.jsonl only.
+  watch: [["latency"], [" ms"], ["seconds per"]]

@@ -1,0 +1,9 @@
+claim,verdict,source,risks,note,status,fallback_reason
+SoftSignal catches 92% of teens at a 15% false-teen cap on the 900 held-out accounts.,supported,policy_grid.csv:cap=0.15,over_cap,Every number matches this row.,FALLBACK,offline
+"At a 15% cap, 17.1% of held-out adults are flagged, and 15.0% on training data.",supported,policy_grid.csv:cap=0.15,over_cap,Every number matches this row.,FALLBACK,offline
+"225 accounts are sent to verification now, at 99.1% precision.",supported,policy_grid.csv:cap=0.08,,Every number matches this row.,FALLBACK,offline
+The keyword baseline catches 50% of teens at 32% false-teen.,projected,eval_placeholder.csv:1,,"The closest row holding these numbers is projected, not measured.",FALLBACK,offline
+The loop promotes the stack at round 7 and reaches 88.7% recall at 16.9% false-teen.,supported,rounds_recorded.csv:R7,loop_below_static,Every number matches this row.,FALLBACK,offline
+The stack's AUC is 0.955.,projected,eval_placeholder.csv:6,,"The closest row holding these numbers is projected, not measured.",FALLBACK,offline
+The five-agent crew makes the model more accurate.,cannot_check,,agents_accuracy,No number to check against a results file.,FALLBACK,offline
+The top 100 accounts in the ranked list are all teens.,unsupported,,,No results row holds every number of the claim.,FALLBACK,offline

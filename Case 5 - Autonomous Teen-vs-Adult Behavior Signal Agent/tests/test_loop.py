@@ -369,15 +369,17 @@ def test_a_candidate_with_insufficient_flags_does_not_build_the_streak(split, tm
     assert rounds["mode"].tolist() == [lp.SHADOW, lp.SHADOW, lp.ACTIVE]
 
 
-def test_write_run_starts_the_new_rows_on_their_own_line(tmp_path):
+def test_write_run_cuts_a_torn_last_line_and_starts_on_its_own_line(tmp_path):
+    # an unterminated last line is what a killed writer leaves; readers already skip it, and completing it with a
+    # newline would turn it into a malformed row, so write_run cuts it back to the last newline first
     rounds = pd.DataFrame([{c: 0 for c in ROUNDS_COLS}])
     recs = [lp.make_record("r", 0, {"cutoff": 0.5, "cap": 0.15, "action": "starter"}, "starter")]
     r_path, d_path = tmp_path / "rounds.csv", tmp_path / "decisions.jsonl"
     lp.write_run(rounds, recs, r_path, d_path)
-    r_path.write_text(r_path.read_text().strip(), encoding="utf-8")  # no final newline, as if edited by hand
-    d_path.write_text(d_path.read_text().strip(), encoding="utf-8")
+    r_path.write_text(r_path.read_text() + "run,1,SHAD", encoding="utf-8")  # torn mid-append
+    d_path.write_text(d_path.read_text() + '{"run": "r", "rou', encoding="utf-8")
     lp.write_run(rounds, recs, r_path, d_path)
-    assert len(pd.read_csv(r_path)) == 2
+    assert len(pd.read_csv(r_path)) == 2 and r_path.read_text().endswith("\n")
     assert [json.loads(x)["round"] for x in d_path.read_text().splitlines()] == [0, 0]
 
 

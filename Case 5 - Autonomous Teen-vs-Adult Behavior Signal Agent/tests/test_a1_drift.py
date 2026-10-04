@@ -16,7 +16,7 @@ from softsignal.agents.base import (
     AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, INSUFFICIENT, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL,
     TIMEOUT, UNKNOWN_FIELD,
 )
-from softsignal.agents.contracts import PSI_GROUPS, a1_fields, a1_history, a1_input, group_psi
+from softsignal.agents.contracts import PSI_GROUPS, a1_fields, a1_history, a1_input, floor_psi, group_psi
 from softsignal.agents.schemas import A1Output
 from softsignal.data import load_data
 from softsignal.features import ACTIVITY_COLS, FEATURE_COLS, ID_COL, TARGET, TEXT_COLS
@@ -54,7 +54,9 @@ def run(p, client, tmp_path, rnd=3):
 
 def test_input_is_counts_and_psi_only():
     p = payload(history=[{"round": 2, "score": 0.07, "activity_max": 0.16, "text_max": 0.13}])
-    assert set(p) == {"agent", "round", "n_reference", "n_batch", "psi", "psi_drift", "audit", "history"}
+    assert set(p) == {"agent", "round", "n_reference", "n_batch", "psi", "psi_drift", "psi_conventions", "n_features",
+                      "audit", "history"}
+    assert p["psi_conventions"] == {"stable": 0.10, "large": 0.25} and p["n_features"] == {"activity": 9, "text": 7}
     assert set(p["psi"]) == {"score", *(f"{g}_{k}" for g in PSI_GROUPS for k in ("max", "mean", "top_feature"))}
     text = json.dumps(p)
     assert "T1-" not in text and "T2-" not in text and f'"{TARGET}"' not in text  # no ids, no label
@@ -65,9 +67,9 @@ def test_group_psi_is_metrics_psi_per_column():
     g = group_psi(ref, batch)
     per = {c: psi(ref[c], batch[c]) for c in ACTIVITY_COLS}
     assert g["activity_top_feature"] == "pct_active_late_night" == max(per, key=per.get)
-    assert g["activity_max"] == round(max(per.values()), 3)
-    assert g["activity_mean"] == round(float(np.mean(list(per.values()))), 3)
-    assert g["text_max"] == round(max(psi(ref[c], batch[c]) for c in TEXT_COLS), 3)
+    assert g["activity_max"] == floor_psi(max(per.values()))  # floored: the shown value gives the exact verdict
+    assert g["activity_mean"] == floor_psi(float(np.mean(list(per.values()))))
+    assert g["text_max"] == floor_psi(max(psi(ref[c], batch[c]) for c in TEXT_COLS))
 
 
 def test_input_never_carries_a_label_even_if_the_rows_do():

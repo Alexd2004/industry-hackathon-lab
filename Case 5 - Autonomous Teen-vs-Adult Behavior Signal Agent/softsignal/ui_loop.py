@@ -5,11 +5,14 @@ together with the committed recorded run (rounds_recorded.csv, decisions_recorde
 hides the recorded run (it is marked "(recorded)" in the picker); the placeholders only when neither exists. While a run started here is going, the tab re-reads the files every REFRESH_S seconds (a
 fragment), so rounds show up as they land; otherwise it does not poll. "Run loop" starts crew.py in a
 background thread; the tab itself only reads, never writes anything an agent reads, and never calls a model.
-Replay is still a stub.
+"Replay" plays the committed recorded run (replay.py): one round every 3 s, every agent badge REPLAY, each card
+still saying what the agent did when it was recorded. A5's slide claims check (results/claims_check.csv) shows in
+an expander.
 """
 import io
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,7 +20,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from softsignal import crew
+from softsignal import crew, replay
 from softsignal.agents.contracts import TEST_METRIC_KEYS
 from softsignal.explain import FEATURE_NAMES
 from softsignal.metrics import DEFAULT_CAP, ROUNDS_COLS
@@ -246,6 +249,11 @@ def _pct(v) -> str:
     return f"{v:.0%}" if isinstance(v, (int, float)) and not isinstance(v, bool) else _fmt(v)
 
 
+def was(block: dict) -> str | None:
+    """The status an agent block had when it ran: a replayed block keeps it in recorded_status."""
+    return block.get("recorded_status") or block.get("status")
+
+
 def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
     """One plain-English line per round for the decision log. tag marks the test metrics, e.g. " (projected)"."""
     d, src = decision["applied"]["decision"], decision["applied"]["source"]
@@ -259,7 +267,7 @@ def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
                             for k, v in decision["diff"].items())
         parts.append(f"A2 differs from the rule on {changes}")
     fallbacks = [f"{a.upper()} ({decision[a]['fallback_reason'] or 'no reason'})" for a in AGENTS
-                 if decision.get(a) is not None and decision[a]["status"] == "FALLBACK"]
+                 if decision.get(a) is not None and was(decision[a]) == "FALLBACK"]
     if fallbacks:
         parts.append("Fallback: " + ", ".join(fallbacks))
     if decision.get("agent_error"):
@@ -321,6 +329,9 @@ def _card_body(key: str, block: dict, decision: dict) -> None:
     elif key == "a5" and isinstance(out, list):
         verdicts = pd.Series([str(c.get("verdict")) for c in _dicts(out)]).value_counts()
         st.caption(", ".join(f"{n} {v}" for v, n in verdicts.items()) or "No claims checked.")
+        for c in _dicts(out):  # flags for a person: anything not supported, with where A5 looked
+            if c.get("verdict") != "supported":
+                st.caption(plain(f"{c.get('verdict')}: {c.get('claim', '?')} ({c.get('source') or 'no source'})"))
 
 
 def agent_card(key: str, decision: dict | None, placeholder: bool = False) -> None:
@@ -339,18 +350,20 @@ def agent_card(key: str, decision: dict | None, placeholder: bool = False) -> No
         if block["status"]:
             label = f"{block['status']} (placeholder)" if placeholder else block["status"]  # no agent was called
             st.badge(label, color=BADGE_COLOR[block["status"]])
+        if block["status"] == "REPLAY" and block.get("recorded_status") and block["recorded_status"] != "REPLAY":
+            st.caption(f"Replayed from the recording, where it was {block['recorded_status']}.")
         if _is_insufficient(block):
             st.caption(INSUFFICIENT_TEXT.get(key, INSUFFICIENT_TEXT["default"]))
             return
-        if block["status"] == "FALLBACK":
+        if was(block) == "FALLBACK":
             st.caption(f"Fallback reason: {block['fallback_reason'] or 'not given'}")
         if block["output"] is None:
             if key == "a2" and decision["applied"]["source"] == "starter":
                 st.caption("Starter rule (no A2 decision at round 0).")
                 st.dataframe(diff_table(decision), hide_index=True, width="stretch")
-            elif key == "a2" and block["status"] == "FALLBACK":  # the rule decided: show what was applied
+            elif key == "a2" and was(block) == "FALLBACK":  # the rule decided: show what was applied
                 st.dataframe(diff_table(decision), hide_index=True, width="stretch")
-            elif block["status"] != "FALLBACK":
+            elif was(block) != "FALLBACK":
                 st.caption("Not run this round.")
             return
         _card_body(key, block, decision)
@@ -419,7 +432,32 @@ def _start_run() -> None:
     st.session_state["loop_started_run"] = run_id  # this session's run: only it sees that run's error
 
 
-def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisions: list, running: bool) -> None:
+def _start_replay() -> None:
+    """Replay toggle callback: start the clock (one round every replay.REPLAY_STEP_S seconds)."""
+    if st.session_state.get("loop_replay"):
+        st.session_state["replay_t0"] = time.time()
+
+
+def replay_state(results_dir: Path | None = None) -> dict | None:
+    """While Replay is on: {"rounds", "records" (REPLAY-marked), "shown", "total"} of the recorded run, else None."""
+    if not st.session_state.get("loop_replay"):
+        return None
+    rounds, records = replay.load_recorded(RESULTS if results_dir is None else results_dir)
+    total = max(len(rounds), len(records))
+    shown = replay.revealed_rounds(st.session_state.get("replay_t0", time.time()), total=max(total, 1))
+    return {"rounds": rounds, "records": records, "shown": shown, "total": total}
+
+
+def _wants_polling() -> bool:
+    """Poll while a run started here is going, or while a replay is still revealing rounds."""
+    if crew.status()["running"]:
+        return True
+    rp = replay_state()
+    return rp is not None and rp["shown"] < rp["total"]
+
+
+def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisions: list, running: bool,
+                  can_replay: bool = False, replaying: bool = False) -> None:
     latest = rounds.iloc[-1] if len(rounds) else None
     seen = [int(r) for r in rounds["round"]] + [d["round"] for d in decisions]
     rnd = max(seen) if seen else None
@@ -432,27 +470,30 @@ def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisio
         st.badge(mode, color=BADGE_COLOR[mode])
     with c2:
         st.caption(f"Run {run or '-'}. Round {'-' if rnd is None else rnd} of {LAST_ROUND}, cap {cap:.0%}."
-                   + (" Running..." if running else ""))
+                   + (" Running..." if running else "") + (" Replaying the recorded run." if replaying else ""))
     with c3:
-        st.button("Run loop", disabled=running, on_click=_start_run,
-                  help="Runs loop.py R0-R7 with the agents built so far (A1) in the background. Each round is "
-                       "appended as it ends and this tab follows it. Agents are live only with ANTHROPIC_API_KEY set.")
+        st.button("Run loop", disabled=running or replaying, on_click=_start_run,
+                  help="Runs loop.py R0-R7 with the agents built so far (A1, A5) in the background. Each round is "
+                       "appended as it ends and this tab follows it. Agents are live only with ANTHROPIC_API_KEY set; "
+                       "offline they replay recorded live output for the same input, else use their fallbacks.")
     with c4:
-        st.toggle("Replay", disabled=True, help="Stub: replay is not wired yet.")
+        st.toggle("Replay", key="loop_replay", disabled=not can_replay or running, on_change=_start_replay,
+                  help="Plays the committed recorded run, one round every 3 seconds. Every agent badge reads REPLAY."
+                  if can_replay else "No recorded run (python -m softsignal.crew --record writes one).")
 
 
 def render_loop_tab() -> None:
-    """The tab as a fragment that polls every REFRESH_S seconds only while a run is going (no idle polling)."""
-    running = crew.status()["running"]
-    st.session_state["loop_polling"] = running
-    st.fragment(run_every=REFRESH_S if running else None)(_loop_fragment)()
+    """The tab as a fragment that polls every REFRESH_S seconds only while a run or a replay is going."""
+    polling = _wants_polling()
+    st.session_state["loop_polling"] = polling
+    st.fragment(run_every=REFRESH_S if polling else None)(_loop_fragment)()
 
 
 def _loop_fragment() -> None:
     """The whole tab; while polling it re-runs on its own, without re-running the Results tab."""
     status = crew.status()
-    if status["running"] != st.session_state.get("loop_polling", False):
-        st.rerun()  # a run started or ended: rebuild the fragment with (or without) polling
+    if _wants_polling() != st.session_state.get("loop_polling", False):
+        st.rerun()  # a run or replay started or ended: rebuild the fragment with (or without) polling
     if status["error"] and status["run"] == st.session_state.get("loop_started_run"):
         st.error(f"The loop run you started failed: {status['error']}")
     try:
@@ -481,8 +522,16 @@ def _loop_fragment() -> None:
                        format_func=lambda r: f"{r} (running)" if r == live_run
                        else f"{r} (recorded)" if r in data.recorded else r) if all_runs else None
     rounds, decisions = for_run(data, run)
+    rp = replay_state()
+    if rp is not None:  # the recorded run, revealed one round at a time, every agent badge REPLAY
+        rounds = rp["rounds"][rp["rounds"]["round"] < rp["shown"]]
+        decisions = [d for d in rp["records"] if d["round"] < rp["shown"]]
+        run = rp["rounds"]["run"].iloc[0] if len(rp["rounds"]) else run
+        st.caption(f"Replay: round {rp['shown'] - 1} of {rp['total'] - 1} of the recorded run, one every "
+                   f"{replay.REPLAY_STEP_S:.0f} s. Agents were not called; each card says what it did when recorded.")
     tag = " (projected)" if data.is_placeholder else ""
-    render_header(data, run, rounds, decisions, status["running"])
+    render_header(data, run, rounds, decisions, status["running"], can_replay=bool(data.recorded) or rp is not None,
+                  replaying=rp is not None)
     if run is None:
         st.info("No loop run yet. Press Run loop (or run python -m softsignal.crew).")
 
@@ -491,7 +540,8 @@ def _loop_fragment() -> None:
     t1.metric("Round", "-" if latest is None else str(int(latest["round"])))
     t2.metric(f"Labels learned{tag}", "-" if latest is None else f"{int(latest['n_labels']):,}")
     t3.metric(f"Cutoff (t_verify){tag}", "-" if latest is None else _num(latest["t_verify"], "{:.2f}"))
-    t4.metric("Fallbacks this run", str(statuses(decisions).count("FALLBACK")))
+    t4.metric("Fallbacks this run", str(sum(was(d[a]) == "FALLBACK" for d in decisions for a in AGENTS
+                                             if d.get(a) is not None)))  # a replay counts what was recorded
     t5.metric(f"PSI{tag}", "n/a" if latest is None else _num(latest["psi"], "{:.2f}"))
 
     cap = DEFAULT_CAP if latest is None else float(latest["cap"])
@@ -523,5 +573,27 @@ def _loop_fragment() -> None:
     if not by_round:
         st.caption("No decisions yet.")
 
+    render_claims_check()
     st.divider()
     st.caption(FOOTER)
+
+
+CLAIMS_CHECK = "claims_check.csv"
+
+
+def render_claims_check(results_dir: Path | None = None) -> None:
+    """A5's slide pass (results/claims_check.csv), for Q&A: every claim with its verdict, source and risk tags."""
+    path = (RESULTS if results_dir is None else results_dir) / CLAIMS_CHECK
+    if not path.exists():
+        return
+    try:
+        df = pd.read_csv(path, keep_default_na=False)
+    except (pd.errors.ParserError, pd.errors.EmptyDataError, OSError) as e:
+        st.caption(f"{CLAIMS_CHECK} cannot be read: {e}")
+        return
+    with st.expander("Slide claims check (A5)"):
+        if "verdict" in df.columns:
+            counts = df["verdict"].value_counts()
+            st.caption(", ".join(f"{n} {v}" for v, n in counts.items())
+                       + ". Flags for a person: projected means only a projected row holds the number.")
+        st.dataframe(df, hide_index=True, width="stretch")

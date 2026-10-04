@@ -530,3 +530,16 @@ def test_a1_card_shows_evidence_and_its_own_insufficient_note(real_dir):
     caps = [c.value for c in at.caption]
     assert any(c == "Evidence: " + ui_loop.plain("psi.activity_max = 0.062") for c in caps)
     assert any(c.startswith("insufficient_data: no earlier batch") for c in caps)
+
+
+def test_a5_card_lists_what_is_not_supported_and_the_claims_check_shows(real_dir):
+    flags = [{"claim": "AUC 0.955", "verdict": "projected", "source": "eval_placeholder.csv:6"},
+             {"claim": "R3 recall 80%", "verdict": "supported", "source": "rounds.csv:R3"}]
+    write_decisions(real_dir, [decision(a5=agent("FALLBACK", flags, "offline"))])
+    pd.DataFrame([{"claim": "x", "verdict": "unsupported", "source": "", "risks": "", "note": "n", "status": "FALLBACK",
+                   "fallback_reason": "offline"}]).to_csv(real_dir / "claims_check.csv", index=False)
+    at = AppTest.from_function(render).run()
+    caps = [c.value for c in at.caption]
+    assert "1 projected, 1 supported" in caps
+    assert any(c.startswith("projected: AUC 0") for c in caps) and not any(c.startswith("supported:") for c in caps)
+    assert [e.label for e in at.expander][-1] == "Slide claims check (A5)"

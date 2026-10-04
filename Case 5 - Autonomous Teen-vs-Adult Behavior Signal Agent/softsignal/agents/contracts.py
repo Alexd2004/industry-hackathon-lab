@@ -2,7 +2,11 @@
 
 Each builder copies only the fields its agent's contract allows (Combined Plan section 7a). A1-A4 never get
 a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
-A1, A2 and A4 are built so far; each owner adds theirs here.
+A1, A2, A4 and A5 are built so far; A3's owner adds its builder here.
+
+A5 (honesty auditor) is the one agent that reads test-set metrics: claims plus the results files as rows
+(a5_sources), and the section 8 risk list (load_checklist). It runs after the round, and nothing it writes
+reaches A1-A4: the other builders copy fixed keys and never read decisions.jsonl or rounds.csv.
 
 A1 (drift watcher) gets, for this batch: the PSI of each feature group against the batches the loop saw in
 earlier rounds (never the whole train set: later batches are not known yet), the loop's PSI of the live
@@ -321,3 +325,167 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     check_barrier(payload)
     json.dumps(payload)  # must be plain JSON: fail here, not inside the prompt
     return payload
+
+
+# ---- A5: claims, results files as rows, the risk checklist ----
+A5_DECIMALS = 4  # source values are rounded for the prompt; a claim states at most this precision
+CLAIMS_DIR = Path(__file__).resolve().parents[2] / "claims"
+CLAIMS_FILE, CHECKLIST_FILE = CLAIMS_DIR / "claims.md", CLAIMS_DIR / "risks.yaml"
+MEASURED, PROJECTED = "measured", "projected"
+
+
+def load_claims(path: Path = CLAIMS_FILE) -> list[str]:
+    """The claims of a markdown file: every line that starts with "- " (the rest is instructions)."""
+    return [ln[2:].strip() for ln in Path(path).read_text(encoding="utf-8").splitlines()
+            if ln.startswith("- ") and ln[2:].strip()]
+
+
+def load_checklist(path: Path = CHECKLIST_FILE) -> list[dict]:
+    """The section 8 risk list: [{id, risk, say, watch: [[term, ...], ...]}]. Raises ValueError if malformed."""
+    import yaml
+
+    items = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    ok = isinstance(items, list) and all(
+        isinstance(i, dict) and {"id", "risk", "say", "watch"} <= set(i)
+        and all(isinstance(g, list) and g and all(isinstance(w, str) for w in g) for g in i["watch"])
+        for i in items)
+    if not ok or len({i["id"] for i in items}) != len(items):
+        raise ValueError(f"{path} must be a list of unique {{id, risk, say, watch: [[term, ...]]}} items")
+    return items
+
+
+def _value(v):
+    """A CSV cell for the prompt: numbers rounded to A5_DECIMALS, blanks dropped by the caller."""
+    if v is None:
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        return None if math.isnan(v) else round(float(v), A5_DECIMALS)
+    return str(v)
+
+
+def _csv_rows(df: pd.DataFrame, file: str, row_id, kind) -> list[dict]:
+    rows = []
+    for i, r in enumerate(df.to_dict("records"), start=1):
+        values = {k: _value(v) for k, v in r.items()}
+        rows.append({"id": f"{file}:{row_id(i, r)}", "kind": kind(r),
+                     "values": {k: v for k, v in values.items() if v is not None and v != ""}})
+    return rows
+
+
+def a5_sources(results_dir: Path, rounds: pd.DataFrame | None = None, rounds_file: str = "rounds_recorded.csv",
+               files: tuple = ("eval", "rounds", "policy_grid", "sanity", "ablations")) -> list[dict]:
+    """The results files A5 checks claims against, as [{file, status, rows: [{id, kind, values}]}].
+
+    eval: eval.csv (rows with eval_set "projected" are projected), else eval_placeholder.csv (all projected).
+    rounds: the given rows (a run in progress: its rounds.csv rows so far), else rounds_file's latest run.
+    policy_grid: policy_grid.csv (what the Results tab shows; an addition to the plan's four files).
+    sanity: sanity.txt, one row per line with a number. ablations: ablations.csv. A missing file is listed with
+    status "missing", so A5 can say cannot_check instead of guessing.
+    """
+    out = []
+
+    def missing(name: str) -> None:
+        out.append({"file": name, "status": "missing", "rows": []})
+
+    for f in files:
+        if f == "eval":
+            real, ph = results_dir / "eval.csv", results_dir / "eval_placeholder.csv"
+            path = real if real.exists() else ph if ph.exists() else None
+            if path is None:
+                missing("eval.csv")
+                continue
+            df = pd.read_csv(path)
+            proj = path == ph
+            out.append({"file": path.name, "status": "present", "rows": _csv_rows(
+                df, path.name, lambda i, r: i,
+                lambda r: PROJECTED if proj or str(r.get("eval_set")) == "projected" else MEASURED)})
+        elif f == "rounds":
+            if rounds is None:
+                path = results_dir / rounds_file
+                if not path.exists():
+                    missing(rounds_file)
+                    continue
+                df = pd.read_csv(path, dtype={"run": str})
+                df = df[df["run"] == df["run"].max()]  # run ids are UTC timestamps: the latest recorded run
+                name = rounds_file
+            else:
+                df, name = rounds, "rounds.csv"
+            out.append({"file": name, "status": "present", "rows": _csv_rows(
+                df, name, lambda i, r: f"R{int(r['round'])}", lambda r: MEASURED)})
+        elif f == "policy_grid":
+            path = results_dir / "policy_grid.csv"
+            if not path.exists():
+                missing(path.name)
+                continue
+            out.append({"file": path.name, "status": "present", "rows": _csv_rows(
+                pd.read_csv(path), path.name, lambda i, r: f"cap={r['cap']:g}", lambda r: MEASURED)})
+        elif f == "sanity":
+            path = results_dir / "sanity.txt"
+            if not path.exists():
+                missing(path.name)
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            out.append({"file": path.name, "status": "present", "rows": [
+                {"id": f"{path.name}:line {n}", "kind": MEASURED, "values": {"line": ln.strip()}}
+                for n, ln in enumerate(lines, start=1) if any(ch.isdigit() for ch in ln)]})
+        elif f == "ablations":
+            path = results_dir / "ablations.csv"
+            if not path.exists():
+                missing(path.name)
+                continue
+            out.append({"file": path.name, "status": "present", "rows": _csv_rows(
+                pd.read_csv(path), path.name, lambda i, r: i, lambda r: MEASURED)})
+        else:
+            raise ValueError(f"unknown A5 source {f!r}")
+    return out
+
+
+def round_claims(row: dict, record: dict) -> list[str]:
+    """What the screen shows for one finished round, as claims for A5's per-round check: the round's headline
+    numbers (as the Loop tab renders them, from rounds.csv) and A2's reason when A2 decided."""
+    claims = [f"Round {int(row['round'])}: {row['mode']}, {row['action']}; test recall {row['rec']:.1%} at "
+              f"{row['ft']:.1%} false-teen; {int(row['n_audit_adults'])} audit adults so far."]
+    a2 = (record.get("a2") or {}).get("output")
+    if isinstance(a2, dict) and isinstance(a2.get("reason"), str) and a2["reason"]:
+        claims.append(f"A2: {a2['reason']}")
+    return claims
+
+
+def a5_input(claims: list[str], sources: list[dict], checklist: list[dict], mode: str,
+             round_id: int | None = None) -> dict:
+    """A5's input: the claims (with ids c1, c2, ...), the results files as rows, and the risk checklist.
+
+    mode is "round" (after a round: its numbers and A2's reason) or "slides" (the slide pass). A5 may read
+    test metrics; check_barrier still runs for labels (no per-account label is ever in a results file).
+    """
+    if mode not in ("round", "slides"):
+        raise ValueError(f"mode must be round or slides, got {mode!r}")
+    payload = {
+        "agent": "A5",
+        "mode": mode,
+        "round": None if round_id is None else int(round_id),
+        "claims": [{"id": f"c{i}", "text": t} for i, t in enumerate(claims, start=1)],
+        "sources": sources,
+        "checklist": [{"id": i["id"], "risk": i["risk"], "say": i["say"], "watch": i["watch"]} for i in checklist],
+    }
+    _check_labels(payload)
+    json.dumps(payload)
+    return payload
+
+
+def _check_labels(payload) -> None:
+    """check_barrier for labels only: A5 is allowed test metrics (prec, rec, ft, ...), never a per-account label."""
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            bad = LABEL_KEYS & set(node)
+            if bad:
+                raise BarrierError(f"A5 input carries label keys {sorted(bad)}")
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)

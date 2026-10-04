@@ -1,11 +1,19 @@
 """Crew run (Tier 3): loop.py with the agents built so far, each round appended as it lands.
 
-Today that is loop.py's rule plus A1 (drift watcher), through loop.run_loop's two callbacks:
+Today that is loop.py's rule plus A1 (drift watcher) and A5 (honesty auditor), through loop.run_loop's two
+callbacks:
 
     before_decision(state, batch, prior, psi)  -> A1 on (prior = the earlier batches, the batch rows, the score
                                                   PSI while the live rule is the starter, audit counts, earlier
                                                   rounds' PSI); its block goes into the round's record
-    on_round(result)                           -> loop.write_run(this row, this record), when writing
+    on_round(result)                           -> A5 on the finished round (its headline numbers and A2's reason,
+                                                  against this run's rounds.csv rows so far), after the decision,
+                                                  so nothing A5 writes can reach A1-A4; then loop.write_run(this
+                                                  row, this record), when writing
+
+Offline (no client), each agent first asks replay.Replayer for a recorded LIVE output made from the same input
+(marked REPLAY); otherwise it uses its fallback. --record never replays: a recording holds live or fallback
+output only.
 
 A1 runs after the reveal and the PSI, before the decision, where A2 will read it. With no A2 yet its
 verdict informs no decision, so the rule's decisions are exactly loop.run_loop's. Score PSI goes to A1
@@ -31,12 +39,15 @@ from pathlib import Path
 import pandas as pd
 
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
+from softsignal.agents import a1_drift, a5_audit
 from softsignal.agents.a1_drift import run_a1
+from softsignal.agents.a5_audit import run_a5
 from softsignal.agents.base import make_client, merge_block
-from softsignal.agents.contracts import a1_history, a1_input
+from softsignal.agents.contracts import a1_history, a1_input, a5_input, a5_sources, load_checklist, round_claims
 from softsignal.data import load_data
 from softsignal.loop import DECISIONS_JSONL, ROUNDS_CSV, SHADOW, Env, State, make_env, run_loop, write_run
 from softsignal.metrics import ROUNDS_COLS
+from softsignal.replay import Replayer, serve
 
 ROUNDS_RECORDED = ROUNDS_CSV.with_name("rounds_recorded.csv")
 DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
@@ -44,24 +55,43 @@ DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
 
 def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = False,
              rounds_path: Path = ROUNDS_CSV, decisions_path: Path = DECISIONS_JSONL,
-             state: State | None = None) -> tuple[pd.DataFrame, list[dict]]:
-    """R0 then each oracle batch (at most n_rounds) with A1 on every round. Returns (rounds, records) like
-    loop.run_loop. write=True appends each round to rounds_path / decisions_path when it ends.
-    client: base.make_client() (None = offline, the agents use their fallbacks)."""
+             state: State | None = None, replayer: Replayer | None = None,
+             checklist: list[dict] | None = None) -> tuple[pd.DataFrame, list[dict]]:
+    """R0 then each oracle batch (at most n_rounds) with A1 and A5 on every round. Returns (rounds, records)
+    like loop.run_loop. write=True appends each round to rounds_path / decisions_path when it ends.
+    client: base.make_client() (None = offline). replayer: recorded outputs to serve while offline (None = none).
+    checklist: A5's risk list (default claims/risks.yaml; [] if that file is missing)."""
     psi_drift = env.policy.get("psi_drift")
     history: list[dict] = []
+    rows_so_far: list[dict] = []
+    offline = replayer if client is None else None  # live when online, recorded replay when offline
+    if checklist is None:
+        try:
+            checklist = load_checklist()
+        except FileNotFoundError:
+            checklist = []
+
+    def block(result, rnd: int) -> dict:
+        return merge_block(result, round_agent_summary(env.timer.records, rnd, env.timer.run).get(result.agent))
 
     def before_decision(state: State, batch, prior: pd.DataFrame, psi_val) -> dict:
         rnd = 0 if batch is None else batch.round
         rows = prior.iloc[0:0] if batch is None else batch.rows
         score_psi = psi_val if state.mode == SHADOW else None  # the live model changes every refit once ACTIVE
         payload = a1_input(prior, rows, score_psi, env.oracle.audit_counts(), history, rnd, psi_drift)
-        a1 = run_a1(payload, client, env.timer, rnd)
+        a1 = (serve(offline, "a1", rnd, payload, a1_drift.validate_output, env.timer)
+              or run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
-        return {"a1": merge_block(a1, round_agent_summary(env.timer.records, rnd, env.timer.run).get(a1.agent))}
+        return {"a1": block(a1, rnd)}
 
     def on_round(result) -> None:
+        rnd = int(result.row["round"])
+        rows_so_far.append(result.row)
+        sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), files=("rounds",))
+        payload = a5_input(round_claims(result.row, result.record), sources, checklist, "round", rnd)
+        a5 = serve(offline, "a5", rnd, payload, a5_audit.validate_output, env.timer) or run_a5(payload, client, env.timer, rnd)
+        result.record["a5"] = block(a5, rnd)  # before the write: the record on disk carries A5
         if write:
             write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
 
@@ -95,7 +125,8 @@ def _background(run: BackgroundRun, timer: AgentTimer, results_dir: Path, n_roun
     try:
         train, test = load_data(on_param_mismatch="error")
         env = make_env(train, test, timer=timer)
-        run_crew(env, make_client(), n_rounds, True, results_dir / ROUNDS_CSV.name, results_dir / DECISIONS_JSONL.name)
+        run_crew(env, make_client(), n_rounds, True, results_dir / ROUNDS_CSV.name, results_dir / DECISIONS_JSONL.name,
+                 replayer=Replayer.from_file(results_dir / DECISIONS_RECORDED.name))
     except Exception as e:  # noqa: BLE001 - shown in the Loop tab instead of dying silently in a thread
         run.error = f"{type(e).__name__}: {e}"[:500]
 
@@ -125,6 +156,7 @@ def main() -> None:
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--no-write", action="store_true", help="print only")
     out.add_argument("--record", action="store_true", help="replace the committed recorded run with this one")
+    ap.add_argument("--no-replay", action="store_true", help="offline, use the fallbacks, never the recording")
     args = ap.parse_args()
     if args.record and args.rounds is not None:
         ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
@@ -137,7 +169,8 @@ def main() -> None:
     for p in paths if args.record else ():
         p.unlink(missing_ok=True)
     try:
-        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths)
+        replayer = None if args.record or args.no_replay else Replayer.from_file(DECISIONS_RECORDED)
+        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer)
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)
@@ -148,12 +181,13 @@ def main() -> None:
         paths = recorded
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))
-    print(f"\nA1 ({'live' if client else 'offline: policy.yaml threshold'}):")
+    print(f"\nA1 and A5 ({'live' if client else 'offline'}):")
     for r in records:
-        a1 = r["a1"]
+        a1, a5 = r["a1"], r["a5"]
         o = a1["output"]
-        print(f"  R{r['round']}: {a1['status']}" + (f" ({a1['fallback_reason']})" if a1["fallback_reason"] else "")
-              + f" -> {o['drift']}: {o['reason']}")
+        counts = pd.Series([v["verdict"] for v in a5["output"] or []]).value_counts().to_dict()
+        print(f"  R{r['round']}: A1 {a1['status']}" + (f" ({a1['fallback_reason']})" if a1["fallback_reason"] else "")
+              + f" -> {o['drift']}; A5 {a5['status']} -> {counts}")
     if not args.no_write:
         print(f"appended run {env.timer.run} to {paths[0].name} and {paths[1].name}")
 
