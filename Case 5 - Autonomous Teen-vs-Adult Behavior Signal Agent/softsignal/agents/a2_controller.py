@@ -22,6 +22,13 @@ obeys the guards too (guarded_action), and a2_input rejects a rule that breaks t
 Missing A1 / A3 output arrives as "insufficient_data" and A2 still decides, from the rest of its input.
 Fallback: loop.rule_decision()'s {action, cap}, with a templated reason. Wiring into run_round and the
 side-by-side decisions.jsonl diff is step 15.
+
+How loop.py will call it (step 15), after the streak update and before the refit; a2_input raises on an inconsistent
+input, so the caller wraps both calls and uses rule_decision() if it fails (logged as FALLBACK):
+
+    payload = a2_input(rnd, thresholds, audit, bounds, guards, rule_decision(state, policy, n_audit_adults), a1, a3)
+    result = run_a2(payload, client=client, timer=timer, round_id=rnd)
+    record["a2"] = merge_block(result, round_agent_summary(load_records(), rnd, timer.run).get("A2"))
 """
 import json
 
@@ -44,9 +51,9 @@ The input is JSON:
 "insufficient_data". Either may be missing: decide from the rest and say so.
 - thresholds: the live rule (t_verify, t_soft, cap, flags).
 - audit: the audit slice so far. audit_adults and audit_teens count revealed accounts; round_audit_adults is \
-this round's share; pooled_adults and pooled_false_teen cover the last rounds together; candidate_false_teen is \
-the new model's false-teen rate on them (null if not measured yet); mode is SHADOW or ACTIVE; streak counts \
-rounds toward promotion.
+this round's share; pooled_adults (a count) and pooled_false_teen_rate (a rate) cover the last rounds together; \
+candidate_false_teen is the new model's false-teen rate on this round's audit adults only (null if not measured \
+yet); mode is SHADOW or ACTIVE; streak counts rounds toward promotion.
 - bounds: cap_min and cap_max (the cap must stay inside), min_audit_adults, cap_default.
 - guards: hold_required (true means you must choose hold) and promote_allowed (false means you must not choose \
 promote).
@@ -128,7 +135,11 @@ def clamp_output(output: dict, payload: dict) -> tuple[dict, list[str]]:
     if cap == output["cap"]:
         return output, []
     note = f" (cap clamped from {output['cap']} to {cap})"
-    reason = output["reason"][:A2_MAX_REASON_CHARS - len(note)] + note  # the text must match the applied cap
+    room = A2_MAX_REASON_CHARS - len(note)
+    text = output["reason"]
+    if len(text) > room:  # cut at a word boundary, so a number is never cut in half
+        text = text[:room].rsplit(" ", 1)[0].rstrip(",;:")
+    reason = text + note  # the text must match the applied cap
     return {**output, "cap": cap, "reason": reason}, [f"CLAMPED cap {output['cap']} -> {cap}"]
 
 

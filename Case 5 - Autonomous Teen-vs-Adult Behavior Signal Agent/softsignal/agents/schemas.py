@@ -43,7 +43,7 @@ class A2Output(BaseModel):
                     "SHADOW to ACTIVE. Only choose what input.guards allows.",
     )
     cap: float = Field(
-        allow_inf_nan=False,
+        strict=True, allow_inf_nan=False,  # a bool or a string is not a cap (lax mode would take true as 1.0)
         description="Cap on the false-teen rate (share of adults sent to verification) for this round, "
                     "as a fraction, e.g. 0.15. Stay within input.bounds.",
     )

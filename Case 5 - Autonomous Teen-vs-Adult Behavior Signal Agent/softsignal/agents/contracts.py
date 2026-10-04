@@ -119,18 +119,28 @@ INSUFFICIENT_INPUT = "insufficient_data"  # what an absent A1 / A3 output looks 
 A2_ACTIONS = ("hold", "re-tune", "promote")
 A2_THRESHOLD_KEYS = ("t_verify", "t_soft", "cap", "flags")
 A2_AUDIT_KEYS = ("mode", "streak", "audit_adults", "audit_teens", "round_audit_adults", "pooled_adults",
-                 "pooled_false_teen", "candidate_false_teen")
+                 "pooled_false_teen_rate", "candidate_false_teen")
 A2_BOUND_KEYS = ("cap_min", "cap_max", "min_audit_adults", "cap_default")
 A2_GUARD_KEYS = ("hold_required", "promote_allowed")
 
 
-def hard_limits() -> tuple[float, float, int]:
-    """(cap_min, cap_max, min_audit_adults): the code constants (loop.CAP_MIN / CAP_MAX, policy.yaml's floor) that
-    the payload's own bounds may never loosen. Imported here, not at module level: loop.py will import the agents."""
+@lru_cache(maxsize=4)
+def _limits_from(path: str, mtime_ns: int) -> tuple[float, float, int]:
     from softsignal.loop import CAP_MAX, CAP_MIN
     from softsignal.policy import load_policy
 
-    return CAP_MIN, CAP_MAX, int(load_policy()["min_audit_adults"])
+    return CAP_MIN, CAP_MAX, int(load_policy(Path(path))["min_audit_adults"])
+
+
+def hard_limits() -> tuple[float, float, int]:
+    """(cap_min, cap_max, min_audit_adults): the code constants (loop.CAP_MIN / CAP_MAX, policy.yaml's floor) that
+    the payload's own bounds may never loosen. Imported lazily (loop.py will import the agents) and cached per
+    policy.yaml modification time, so it is read once, not on every check."""
+    from softsignal.policy import POLICY_FILE
+
+    return _limits_from(str(POLICY_FILE), POLICY_FILE.stat().st_mtime_ns)
+
+
 
 
 def _pick(src: dict, keys, where: str) -> dict:

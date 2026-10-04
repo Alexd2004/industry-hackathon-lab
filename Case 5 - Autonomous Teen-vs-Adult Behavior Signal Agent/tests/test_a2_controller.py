@@ -22,7 +22,7 @@ from softsignal.agents.schemas import A2Output
 
 THRESHOLDS = {"t_verify": 0.81, "t_soft": 0.42, "cap": 0.15, "flags": []}
 AUDIT = {"mode": "SHADOW", "streak": 1, "audit_adults": 150, "audit_teens": 140, "round_audit_adults": 30,
-         "pooled_adults": 60, "pooled_false_teen": 0.12, "candidate_false_teen": 0.1}
+         "pooled_adults": 60, "pooled_false_teen_rate": 0.12, "candidate_false_teen": 0.1}
 BOUNDS = {"cap_min": 0.08, "cap_max": 0.3, "min_audit_adults": 120, "cap_default": 0.15}
 GUARDS = {"hold_required": False, "promote_allowed": False}
 RULE = {"action": "re-tune", "cap": 0.15}
@@ -137,7 +137,7 @@ def test_hard_limits_are_the_loop_and_policy_constants():
     from softsignal.loop import CAP_MAX, CAP_MIN
     from softsignal.policy import load_policy
 
-    assert hard_limits() == (CAP_MIN, CAP_MAX, load_policy()["min_audit_adults"]) == (0.08, 0.3, 120)
+    assert hard_limits() == (CAP_MIN, CAP_MAX, int(load_policy()["min_audit_adults"]))
 
 
 def test_non_json_input_is_refused():
@@ -176,6 +176,17 @@ def test_schema_rejects_a_non_finite_cap(cap):
     body = json.dumps(good()).replace("0.15", cap)
     with pytest.raises(ValidationError):
         A2Output.model_validate_json(body)
+
+
+@pytest.mark.parametrize("cap", ["true", "false", '"0.2"', "null", "[0.2]"])
+def test_schema_rejects_a_bool_or_string_cap(cap):
+    body = json.dumps(good()).replace("0.15", cap)
+    with pytest.raises(ValidationError):
+        A2Output.model_validate_json(body)
+
+
+def test_schema_accepts_an_integer_cap():
+    assert A2Output.model_validate_json(json.dumps(good()).replace("0.15", "1")).cap == 1.0  # clamped later
 
 
 def test_schema_accepts_an_out_of_range_cap():
@@ -424,3 +435,58 @@ def test_hold_rule_end_to_end_through_the_model_path():
                      rule={"action": "hold", "cap": 0.15})
     r = run_a2(p, client=FakeClient(reply(good(action="re-tune", reason="90 audit adults."))))
     assert r.status == FALLBACK and r.fallback_reason == GUARDRAIL and r.output["action"] == "hold"
+
+
+def test_a_bool_cap_from_the_model_falls_back_not_live(payload):
+    bad = json.dumps(good()).replace("0.15", "true")
+    r = run_a2(payload, client=FakeClient(reply(text=bad)))
+    assert r.status == FALLBACK and r.fallback_reason == INVALID
+
+
+def test_clamp_note_cuts_the_reason_at_a_word_boundary(payload):
+    long = "Cap 0.15 holds with 150 audit adults. " * 12  # over 400 characters
+    out, _ = clamp_output(good(cap=0.5, reason=long.strip()), payload)
+    note = " (cap clamped from 0.5 to 0.3)"
+    assert len(out["reason"]) <= 400 and out["reason"].endswith(note)
+    body = out["reason"].removesuffix(note)
+    assert body and long.startswith(body)  # a whole-word prefix of the model's text
+    assert long[len(body)] in " ."  # the cut did not land inside a number or word
+
+
+def test_hard_limits_are_cached_per_policy_file():
+    from softsignal.agents import contracts
+
+    contracts._limits_from.cache_clear()
+    hard_limits()
+    hard_limits()
+    info = contracts._limits_from.cache_info()
+    assert info.hits >= 1 and info.misses == 1
+
+
+def test_the_payload_builds_from_a_real_loop_state_and_rule_decision():
+    """The contract fields exist on loop.py's State and rule_decision, and the guards agree with the rule."""
+    from softsignal import loop
+    from softsignal.policy import load_policy
+
+    policy = load_policy()
+    for adults, streak, mode, want in ((90, 0, "SHADOW", "hold"), (150, 0, "SHADOW", "re-tune"),
+                                       (150, loop.PROMOTE_STREAK, "SHADOW", "promote"),
+                                       (150, loop.PROMOTE_STREAK, "ACTIVE", "re-tune")):
+        state = loop.new_state(policy)
+        state.mode, state.streak = mode, streak
+        rule = loop.rule_decision(state, policy, adults)
+        assert rule["action"] == want
+        th = state.live.th
+        p = a2_input(
+            round_id=3,
+            thresholds={"t_verify": th.t_verify, "t_soft": th.t_soft, "cap": th.cap, "flags": list(th.flags)},
+            audit={"mode": state.mode, "streak": state.streak, "audit_adults": adults, "audit_teens": adults,
+                   "round_audit_adults": 30, "pooled_adults": 60, "pooled_false_teen_rate": 0.1,
+                   "candidate_false_teen": None},
+            bounds={"cap_min": loop.CAP_MIN, "cap_max": loop.CAP_MAX, "min_audit_adults": policy["min_audit_adults"],
+                    "cap_default": policy["cap_false_teen"]},
+            guards={"hold_required": adults < policy["min_audit_adults"],
+                    "promote_allowed": state.mode == loop.SHADOW and state.streak >= loop.PROMOTE_STREAK
+                    and adults >= policy["min_audit_adults"]},
+            rule=rule)
+        assert p["rule"]["action"] == want
