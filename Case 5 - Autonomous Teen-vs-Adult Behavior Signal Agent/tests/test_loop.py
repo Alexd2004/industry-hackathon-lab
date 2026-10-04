@@ -10,7 +10,9 @@ from softsignal.agent_timer import AgentTimer, load_records
 from softsignal.data import load_data
 from softsignal.features import ID_COL, TARGET
 from softsignal.metrics import ROUNDS_COLS, prf, psi
-from softsignal.policy import load_policy
+from softsignal.oracle import OracleError
+from softsignal.policy import Thresholds, load_policy
+from softsignal.text_model import build_matrix
 from softsignal.tier1 import STARTER_CUT, STARTER_W, activity_score, blend, flag, style_score
 from softsignal.ui_loop import valid_decision
 
@@ -216,3 +218,73 @@ def test_biased_toggle_picks_a_different_candidate_cutoff(tmp_path):
     a, b = make(5, tmp_path / "a"), make(5, tmp_path / "b", source="all_verified")
     assert a[4].candidate.th.t_verify != b[4].candidate.th.t_verify
     assert a[1][TARGET].equals(b[1][TARGET])  # same frozen test set either way
+
+
+# ---- promote path, on the real batches with refit stubbed ----
+class ZeroModel:
+    """Scores everything 0, so a candidate with t_verify above 0 never flags anyone (false-teen 0)."""
+
+    def score(self, df):
+        return np.zeros(len(df))
+
+
+def candidate(flags=()):
+    return lp.Rule(Thresholds(0.9, 0.5, 0.15, 0.0, 50, 50, flags), ZeroModel())
+
+
+@pytest.fixture(scope="module")
+def split():
+    train, test = load_data(on_param_mismatch="error")
+    return train, test, build_matrix(tuple(train[ID_COL].astype(str)))
+
+
+def run_rounds(split, tmp_path, monkeypatch, n, flags=()):
+    """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place."""
+    train, test, tm = split
+    monkeypatch.setattr(lp, "refit", lambda env, st, cap: candidate(flags))
+    env = lp.make_env(train, test, policy={**POL, "min_audit_adults": 1}, tm=tm,
+                      timer=AgentTimer(tmp_path / "calls.jsonl", run="t"))
+    st = lp.new_state(env.policy)
+    st.candidate = candidate()
+    rows = [lp.run_round(st, b, env).row for _, b in zip(range(n), env.oracle)]
+    return pd.DataFrame(rows), st, env
+
+
+def test_two_good_rounds_promote_and_the_candidate_goes_live(split, tmp_path, monkeypatch):
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 3)
+    assert rounds["action"].tolist() == [lp.RETUNE, lp.PROMOTE, lp.RETUNE]
+    assert rounds["mode"].tolist() == [lp.SHADOW, lp.ACTIVE, lp.ACTIVE]  # no way back
+    assert st.live is st.candidate and st.live.model is not None
+    assert rounds["t_soft"].iloc[0] != rounds["t_soft"].iloc[0]  # NaN: starter still live in round 1
+    assert rounds["t_soft"].iloc[1:].eq(0.5).all() and rounds["t_verify"].iloc[1:].eq(0.9).all()
+
+
+def test_promote_is_refused_for_a_candidate_with_insufficient_flags(split, tmp_path, monkeypatch):
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 3, flags=("insufficient_adults",))
+    assert rounds["action"].tolist() == [lp.RETUNE] * 3
+    assert (rounds["mode"] == lp.SHADOW).all() and st.live.model is None
+
+
+def test_a_soft_capped_candidate_can_still_promote(split, tmp_path, monkeypatch):
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 2, flags=("soft_capped",))
+    assert rounds["mode"].tolist() == [lp.SHADOW, lp.ACTIVE]
+
+
+def test_rounds_with_too_few_audit_adults_do_not_build_the_streak(split, tmp_path, monkeypatch):
+    monkeypatch.setattr(lp, "PROMOTE_MIN_ADULTS", 10**6)
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 4)
+    assert (rounds["mode"] == lp.SHADOW).all() and st.streak == 0
+
+
+def test_a_failed_reveal_leaves_the_state_untouched(split, tmp_path, monkeypatch):
+    _, st, env = run_rounds(split, tmp_path, monkeypatch, 1)
+    seen, rnd = len(st.seen), st.round
+    batch = next(iter(env.oracle))
+
+    def boom(*a, **k):
+        raise OracleError("nope")
+
+    monkeypatch.setattr(env.oracle, "reveal", boom)
+    with pytest.raises(OracleError):
+        lp.run_round(st, batch, env)
+    assert len(st.seen) == seen and st.round == rnd

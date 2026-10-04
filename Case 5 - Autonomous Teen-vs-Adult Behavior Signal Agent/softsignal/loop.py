@@ -7,7 +7,9 @@ Two rules at a time. `live` decides who goes to the verify band. `candidate` is 
 the last round, shadowing live. While the mode is SHADOW the starter stays live: each round the candidate
 is scored on that round's audit slice before the refit, and after PROMOTE_STREAK rounds in a row within
 cap + PROMOTE_SLACK the newest candidate becomes live (mode ACTIVE). Evidence is on the previous
-candidate, the promoted one is the one refit on this round's labels too.
+candidate, the promoted one is the one refit on this round's labels too. A round only counts toward
+the streak with at least PROMOTE_MIN_ADULTS audit adults, and a promote is refused (action re-tune,
+mode stays SHADOW) when the new candidate's thresholds carry an INSUFFICIENT_* flag.
 
 Hold rule (enforced here, from policy.yaml): no refit and no new thresholds until the cumulative
 revealed audit adults reach min_audit_adults. Until then the starter stays live and action is "hold".
@@ -37,7 +39,8 @@ from softsignal.data import ROOT, cv_folds, load_data
 from softsignal.features import FEATURE_COLS, ID_COL, SEED, TARGET
 from softsignal.metrics import ROUNDS_COLS, auc, prf, psi
 from softsignal.oracle import Batch, Oracle
-from softsignal.policy import Thresholds, assign_bands, load_policy, pick_thresholds
+from softsignal.policy import (INSUFFICIENT_ADULTS, INSUFFICIENT_TEENS, Thresholds, assign_bands, load_policy,
+                               pick_thresholds)
 from softsignal.stack import Stack
 from softsignal.text_model import TextMatrix, build_matrix
 from softsignal.tier1 import STARTER_CUT, STARTER_W, activity_score, blend, style_score
@@ -51,6 +54,8 @@ SOURCE_RULE = "rule"
 CAP_MIN, CAP_MAX = 0.08, 0.30  # clamp for any cap the loop or A2 applies (policy.py does not clamp)
 PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs audit false-teen <= cap + this ...
 PROMOTE_STREAK = 2  # ... in this many rounds in a row
+PROMOTE_MIN_ADULTS = 20  # a round's audit slice needs this many adults to count toward the streak
+UNSAFE_FLAGS = (INSUFFICIENT_ADULTS, INSUFFICIENT_TEENS)  # a candidate with these is never promoted
 THRESHOLD_SOURCES = ("audit", "all_verified")
 AGENT = "loop"
 AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
@@ -247,8 +252,6 @@ def run_round(state: State, batch: Batch, env: Env) -> RoundResult:
 def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     rows, ids, oracle = batch.rows, list(batch.ids), env.oracle
     prior = state.seen
-    state.seen = pd.concat([prior, rows], ignore_index=True) if len(prior) else rows.copy()
-    state.round = batch.round
 
     # 1. score with the live rule, band, cut the verify band to the budget
     live_s = state.live.score(rows)
@@ -263,6 +266,9 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     pos = {i: k for k, i in enumerate(ids)}
     a_idx = [pos[i] for i in audit_ids]
     y_audit = lab.loc[audit_ids, TARGET].to_numpy()
+    # state moves only once the reveal has succeeded; refit reads state.seen with this round in it
+    state.seen = pd.concat([prior, rows], ignore_index=True) if len(prior) else rows.copy()
+    state.round = batch.round
 
     # 3. this round's audit slice, scored BEFORE the refit, so these false-teen rates are never in-sample
     audit_ft = false_teen(y_audit, live_s[a_idx], state.live.th.t_verify)
@@ -273,7 +279,8 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
 
     # 4. decision: streak first, then the rule
     if state.mode == SHADOW:
-        ok = cand_ft is not None and cand_ft <= env.policy["cap_false_teen"] + PROMOTE_SLACK
+        enough = int((y_audit == 0).sum()) >= PROMOTE_MIN_ADULTS
+        ok = enough and cand_ft is not None and cand_ft <= env.policy["cap_false_teen"] + PROMOTE_SLACK
         state.streak = state.streak + 1 if ok else 0
     rule_dec = rule_decision(state, env.policy, oracle.audit_counts()["adults"])
 
@@ -285,7 +292,10 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
             state.candidate = refit(env, state, rule_dec["cap"])
         refit_s = time.perf_counter() - t0
         if rule_dec["action"] == PROMOTE:
-            state.mode = ACTIVE
+            if any(f in UNSAFE_FLAGS for f in state.candidate.th.flags):
+                rule_dec = {**rule_dec, "action": RETUNE}  # refused: try again next round
+            else:
+                state.mode = ACTIVE
         if state.mode == ACTIVE:
             state.live = state.candidate
     decision = _decision_block(rule_dec, state.live)
