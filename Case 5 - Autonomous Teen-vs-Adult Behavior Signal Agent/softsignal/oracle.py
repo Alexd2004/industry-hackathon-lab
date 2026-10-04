@@ -7,6 +7,11 @@ never handed out or revealed: test metrics never come from the oracle.
 
 Simulation choice: batches are stratified on the label, so every batch is 150 teens / 150 adults
 and round-to-round changes come from learning, not from batch mix.
+
+Drift (optional, off by default): a Drift shifts chosen feature columns, in train standard deviations, on every batch
+from its start_round on. Labels are untouched and the stored rows stay as they were, so the shift is a pure covariate
+shift added at hand-out. It uses only the train features' spread, never a label. shift_frame() applies the same shift
+to any frame (the test report in step 2), so a drifted run can be scored against drifted test rows.
 """
 import math
 from collections.abc import Iterable, Iterator
@@ -36,6 +41,22 @@ LOG_KEYS = ["round", "verify_ids", "audit_ids", "n_verify", "n_audit", "n_overla
 
 class OracleError(ValueError):
     """A reveal or setup that would break the loop rules (test id, repeat, over budget, wrong batch)."""
+
+
+@dataclass(frozen=True)
+class Drift:
+    """A covariate shift: from start_round on, each column in columns moves by shift train standard deviations."""
+
+    start_round: int
+    shift: float
+    columns: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.start_round < 1 or not math.isfinite(self.shift) or not self.columns:
+            raise OracleError(f"a drift needs start_round >= 1, a finite shift and columns, got {self}")
+        bad = [c for c in self.columns if c not in FEATURE_COLS]
+        if bad:
+            raise OracleError(f"a drift may only move allowed feature columns, not {bad}")
 
 
 @dataclass(frozen=True)
@@ -69,6 +90,7 @@ class Oracle:
         batch_size: int = BATCH_SIZE,
         audit_per_batch: int = AUDIT_PER_BATCH,
         review_budget: float = REVIEW_BUDGET,
+        drift: Drift | None = None,
     ) -> None:
         missing = [c for c in (ID_COL, TARGET, *FEATURE_COLS) if c not in train.columns]
         if missing:
@@ -91,6 +113,9 @@ class Oracle:
 
         self.seed = seed
         self.review_budget = review_budget
+        self.drift = drift
+        self._lo, self._hi = self._rows.min(), self._rows.max()  # a shifted value stays inside the train range
+        self._std = self._rows.std(ddof=0)
         self._batches = self._make_batches(batch_size)
         self._audit = [
             tuple(sorted(np.random.default_rng([seed, r]).choice(
@@ -130,6 +155,15 @@ class Oracle:
         """
         return math.floor(self.review_budget * len(batch.ids) + 1e-9)
 
+    def shift_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+        """df with the drift applied (a copy; df unchanged). No drift: an unchanged copy."""
+        out = df.copy()
+        if self.drift is None:
+            return out
+        for c in self.drift.columns:
+            out[c] = (out[c] + self.drift.shift * self._std[c]).clip(self._lo[c], self._hi[c])
+        return out
+
     def next_batch(self) -> Batch | None:
         """The next round's batch (features only), or None after the last round."""
         if self._cursor >= len(self._batches):
@@ -137,6 +171,8 @@ class Oracle:
         self._cursor += 1
         ids = self._batches[self._cursor - 1]
         rows = self._rows.loc[list(ids)].reset_index()
+        if self.drift is not None and self._cursor >= self.drift.start_round:
+            rows = self.shift_frame(rows)
         return Batch(round=self._cursor, ids=ids, rows=rows)
 
     def __iter__(self) -> Iterator[Batch]:

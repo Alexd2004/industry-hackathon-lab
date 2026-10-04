@@ -385,3 +385,58 @@ def test_from_split_on_the_committed_split():
     assert o.n_rounds == 7 and set(seen) == set(train[ID_COL])
     assert not test_set & set(o.revealed()[ID_COL])
     assert not test_set & set(o._labels)
+
+
+# ---- drift (covariate shift added at hand-out) ----
+def drifted(train, test_ids, **kw):
+    from softsignal.oracle import Drift
+    return Oracle(train, test_ids, drift=Drift(**({"start_round": 4, "shift": 1.0, "columns": ("sessions_per_day",)} | kw)))
+
+
+def test_no_drift_changes_nothing(train, test_ids):
+    a, b = all_batches(Oracle(train, test_ids)), all_batches(Oracle(train, test_ids, drift=None))
+    assert all(x.rows.equals(y.rows) for x, y in zip(a, b))
+
+
+def test_drift_moves_only_its_columns_from_its_start_round(train, test_ids):
+    plain, shifted = all_batches(Oracle(train, test_ids)), all_batches(drifted(train, test_ids))
+    for p, d in zip(plain, shifted):
+        assert p.ids == d.ids  # the batches are the same accounts
+        same_other = p.rows.drop(columns="sessions_per_day").equals(d.rows.drop(columns="sessions_per_day"))
+        assert same_other  # no other column moves
+        moved = not p.rows["sessions_per_day"].equals(d.rows["sessions_per_day"])
+        assert moved == (p.round >= 4)
+
+
+def test_drift_shifts_by_train_std_and_stays_in_the_train_range(train, test_ids):
+    plain, shifted = all_batches(Oracle(train, test_ids)), all_batches(drifted(train, test_ids, shift=0.5))
+    col, std = "sessions_per_day", train[FEATURE_COLS].std(ddof=0)["sessions_per_day"]
+    p, d = plain[4].rows[col], shifted[4].rows[col]
+    room = p + 0.5 * std <= train[col].max()
+    assert ((d - p)[room] - 0.5 * std).abs().max() < 1e-9
+    assert d.max() <= train[col].max() and d.min() >= train[col].min()
+
+
+def test_drift_leaves_labels_and_the_stored_rows_alone(train, test_ids):
+    o = drifted(train, test_ids)
+    all_batches(o)
+    assert o._labels == labels_of(train)
+    assert o._rows.equals(Oracle(train, test_ids)._rows)
+
+
+def test_shift_frame_shifts_any_frame_and_is_a_copy(train, test_ids):
+    o = drifted(train, test_ids)
+    test = make_frame(N_TEST, prefix="X")
+    out = o.shift_frame(test)
+    assert not out["sessions_per_day"].equals(test["sessions_per_day"])
+    assert test.equals(make_frame(N_TEST, prefix="X"))  # the input is untouched
+    assert Oracle(train, test_ids).shift_frame(test).equals(test)
+
+
+@pytest.mark.parametrize("kw", [{"start_round": 0}, {"shift": float("nan")}, {"columns": ()},
+                                {"columns": ("age",)}, {"columns": ("label_teen",)}])
+def test_a_bad_drift_is_refused(kw):
+    from softsignal.oracle import Drift, OracleError
+    base = {"start_round": 4, "shift": 1.0, "columns": ("sessions_per_day",)}
+    with pytest.raises(OracleError):
+        Drift(**(base | kw))
