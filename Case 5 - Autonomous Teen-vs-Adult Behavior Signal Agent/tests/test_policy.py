@@ -1,8 +1,11 @@
 """Review policy (step 9): policy.yaml loading, thresholds at a cap, bands, edge cases, audit slice.
 
 Small tests use synthetic scores. The real-data tests read the committed results/split.json and
-cache/stack_oof.csv and skip when that cache is missing (it is gitignored).
+cache/stack_oof.csv. That cache is gitignored, so they skip when it is missing, unless the environment
+variable REQUIRE_STACK_CACHE is set (use it in CI), which turns the skip into a failure.
 """
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,10 +33,10 @@ def write_policy(tmp_path, **over):
 
 
 # ---- policy.yaml ----
-def test_committed_policy_has_the_five_keys():
+def test_committed_policy_has_exactly_the_policy_keys_with_their_types():
     p = pol.load_policy()
-    assert p == {"cap_false_teen": 0.15, "review_budget": 0.25, "soft_recall": 0.90,
-                 "min_audit_adults": 120, "audit_per_batch": 60}
+    assert set(p) == set(pol.POLICY_KEYS)
+    assert all(type(p[k]) is kind for k, kind in pol.POLICY_KEYS.items())
 
 
 def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):
@@ -47,7 +50,8 @@ def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):
 
 
 @pytest.mark.parametrize("over", [{"cap_false_teen": 1.5}, {"soft_recall": -0.1}, {"min_audit_adults": 0},
-                                  {"audit_per_batch": 2.5}, {"cap_false_teen": "x"}, {"review_budget": "true"}])
+                                  {"audit_per_batch": 2.5}, {"cap_false_teen": "x"}, {"review_budget": "true"},
+                                  {"min_audit_adults": ".inf"}, {"cap_false_teen": ".nan"}])
 def test_load_policy_rejects_bad_values(tmp_path, over):
     with pytest.raises(ValueError):
         pol.load_policy(write_policy(tmp_path, **over))
@@ -86,12 +90,43 @@ def test_soft_threshold_reaches_soft_recall():
     assert th.t_soft <= th.t_verify
 
 
+@pytest.mark.parametrize("n_teens", [23, 57, 100, 101])
+def test_soft_threshold_reaches_soft_recall_for_awkward_teen_counts(n_teens):
+    # with 23 or 57 teens the non-conservative quantile methods fall below the target, "lower" does not
+    rng = np.random.default_rng(n_teens)
+    s = np.r_[rng.beta(2, 5, 100), rng.beta(5, 2, n_teens)]
+    y = np.r_[np.zeros(100), np.ones(n_teens)].astype(int)
+    target = pol.load_policy()["soft_recall"]
+    th = pol.pick_thresholds(s, y, cap=0.05, soft_recall=target)
+    _, rec, _, _ = prf(y, (s >= th.t_soft).astype(int))
+    assert rec >= target
+
+
+def test_tied_scores_keep_false_teen_within_cap():
+    s = np.round(scores_and_labels()[0], 1)  # heavy ties: about 10 distinct values
+    y = scores_and_labels()[1]
+    for cap in (0.05, 0.15, 0.30):
+        th = pol.pick_thresholds(s, y, cap=cap)
+        _, _, ft, _ = prf(y, (s >= th.t_verify).astype(int))
+        assert ft <= cap
+
+
+def test_all_adults_tied_pushes_verify_just_above_the_tie():
+    s = np.r_[np.full(50, 0.5), np.linspace(0.4, 1.0, 50)]
+    y = np.r_[np.zeros(50), np.ones(50)].astype(int)
+    th = pol.pick_thresholds(s, y, cap=0.15)
+    assert th.t_verify > 0.5  # cannot flag some of the tied adults without flagging all of them
+    assert pol.SOFT_CAPPED not in th.flags or th.t_soft == th.t_verify
+
+
 def test_soft_threshold_is_lowered_to_verify_when_it_would_sit_above():
     # teens all score above adults: the 90% teen recall point sits above the 15% cap cutoff
     s = np.r_[np.linspace(0.0, 0.5, 100), np.linspace(0.6, 1.0, 100)]
     y = np.r_[np.zeros(100), np.ones(100)].astype(int)
     th = pol.pick_thresholds(s, y, cap=0.15, soft_recall=0.9)
-    assert "soft_capped" in th.flags and th.t_soft == th.t_verify
+    assert pol.SOFT_CAPPED in th.flags and th.t_soft == th.t_verify
+    _, rec, _, _ = prf(y, (s >= th.t_soft).astype(int))
+    assert rec >= 0.9  # lowering t_soft to t_verify keeps the recall target
 
 
 def test_fewer_than_five_adults_returns_prior_with_flag():
@@ -99,9 +134,11 @@ def test_fewer_than_five_adults_returns_prior_with_flag():
     prior = pol.pick_thresholds(s, y)
     keep = np.r_[np.where(y == 1)[0], np.where(y == 0)[0][:4]]
     th = pol.pick_thresholds(s[keep], y[keep], cap=0.10, prior=prior)
-    assert th.flags == ("insufficient_adults",)
+    assert th.flags == (pol.INSUFFICIENT_ADULTS,)
     assert (th.t_verify, th.t_soft) == (prior.t_verify, prior.t_soft)
-    assert th.cap == 0.10 and th.n_adults == 4
+    # the record keeps the cap and margin its cutoffs were picked for, with the new counts
+    assert (th.cap, th.margin) == (prior.cap, prior.margin)
+    assert (th.n_adults, th.n_teens) == (4, int((y == 1).sum()))
 
 
 def test_fewer_than_five_adults_without_prior_raises():
@@ -114,7 +151,7 @@ def test_fewer_than_five_adults_without_prior_raises():
 def test_exactly_five_adults_is_enough():
     s, y = scores_and_labels()
     keep = np.r_[np.where(y == 1)[0], np.where(y == 0)[0][:5]]
-    assert "insufficient_adults" not in pol.pick_thresholds(s[keep], y[keep]).flags
+    assert pol.INSUFFICIENT_ADULTS not in pol.pick_thresholds(s[keep], y[keep]).flags
 
 
 def test_fewer_than_five_teens_keeps_prior_soft_threshold():
@@ -122,14 +159,14 @@ def test_fewer_than_five_teens_keeps_prior_soft_threshold():
     prior = pol.pick_thresholds(s, y)
     keep = np.r_[np.where(y == 0)[0], np.where(y == 1)[0][:3]]
     th = pol.pick_thresholds(s[keep], y[keep], prior=prior)
-    assert "insufficient_teens" in th.flags and th.t_soft == min(prior.t_soft, th.t_verify)
+    assert pol.INSUFFICIENT_TEENS in th.flags and th.t_soft == min(prior.t_soft, th.t_verify)
 
 
 def test_fewer_than_five_teens_without_prior_uses_verify():
     s, y = scores_and_labels()
     keep = np.r_[np.where(y == 0)[0], np.where(y == 1)[0][:3]]
     th = pol.pick_thresholds(s[keep], y[keep])
-    assert "insufficient_teens" in th.flags and th.t_soft == th.t_verify
+    assert pol.INSUFFICIENT_TEENS in th.flags and th.t_soft == th.t_verify
 
 
 @pytest.mark.parametrize("kw", [{"cap": 1.2}, {"cap": 0.1, "margin": 0.2}, {"margin": -0.1}, {"soft_recall": 0.0},
@@ -220,15 +257,24 @@ def test_audit_slice_rejects_stale_or_duplicate_cache(tmp_path, ids):
 
 
 # ---- real data ----
-@pytest.mark.skipif(not STACK_OOF.exists(), reason="cache/stack_oof.csv not built (python -m softsignal.stack)")
+@pytest.fixture
+def stack_cache():
+    if not STACK_OOF.exists():
+        msg = "cache/stack_oof.csv not built (python -m softsignal.stack)"
+        if os.environ.get("REQUIRE_STACK_CACHE"):
+            pytest.fail(msg)
+        pytest.skip(msg)
+
+
 @pytest.mark.parametrize("cap", [0.05, 0.10, 0.15])
-def test_real_oof_false_teen_within_cap(cap):
+def test_real_oof_false_teen_within_cap(stack_cache, cap):
     train, _ = load_data(on_param_mismatch="error")
     audit = pol.load_audit_slice(train)
-    assert len(audit) == 2100
-    th = pol.pick_thresholds(audit["stack_oof"], audit[TARGET], cap=cap)
+    assert len(audit) == len(train)
+    target = pol.load_policy()["soft_recall"]
+    th = pol.pick_thresholds(audit["stack_oof"], audit[TARGET], cap=cap, soft_recall=target)
     bands = pol.assign_bands(audit["stack_oof"], th)
     out = pol.band_summary(bands, 0.25, audit[TARGET])
     assert out["ft_verify"] <= cap
-    assert out["rec_soft_up"] >= 0.9
+    assert out["rec_soft_up"] >= target
     assert th.t_soft <= th.t_verify

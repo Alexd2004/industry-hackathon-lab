@@ -14,11 +14,13 @@ ladder rows use 5% and 10%. The A1 PSI key is added to policy.yaml in step 11.
 
 Run: python -m softsignal.policy
 """
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from softsignal.data import ROOT, load_data
 from softsignal.features import ID_COL, TARGET
@@ -35,12 +37,13 @@ POLICY_KEYS = {
 }
 MIN_CLASS = 5  # fewer audit adults (or teens) than this: keep the prior threshold
 BANDS = ("verify", "soft", "none")
+INSUFFICIENT_ADULTS = "insufficient_adults"
+INSUFFICIENT_TEENS = "insufficient_teens"
+SOFT_CAPPED = "soft_capped"
 
 
 def load_policy(path: Path = POLICY_FILE) -> dict:
     """policy.yaml as a dict. Raises on missing or unknown keys, wrong types or out-of-range values."""
-    import yaml
-
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     if not isinstance(raw, dict):
@@ -51,7 +54,8 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
     out = {}
     for key, kind in POLICY_KEYS.items():
         v = raw[key]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or (kind is int and v != int(v)):
+        if (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                or (kind is int and v != int(v))):
             raise ValueError(f"{key} must be a {kind.__name__}, got {v!r}")
         out[key] = kind(v)
     for key in ("cap_false_teen", "review_budget", "soft_recall"):
@@ -65,7 +69,7 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
 
 @dataclass(frozen=True)
 class Thresholds:
-    """cap is the nominal cap; the verify cutoff targets cap - margin. flags are strings (see pick_thresholds)."""
+    """cap is the nominal cap; the verify cutoff targets cap - margin. flags hold the *_ constants (see pick_thresholds)."""
 
     t_verify: float
     t_soft: float
@@ -100,9 +104,11 @@ def pick_thresholds(
     """t_verify and t_soft from out-of-fold scores and revealed labels (teen = 1).
 
     margin aims the verify cutoff at cap - margin ("cap minus 1 pt" is margin=0.01).
-    Flags: insufficient_adults (fewer than MIN_CLASS adults: both thresholds are the prior's, and
-    prior is required); insufficient_teens (t_soft is the prior's, else t_verify); soft_capped
-    (t_soft would sit above t_verify, so it is lowered to t_verify and the soft band is empty).
+    Flags: INSUFFICIENT_ADULTS (fewer than MIN_CLASS adults: the prior is returned as is, with this
+    flag and the new counts, so its cap and margin stay the ones its cutoffs were picked for; prior is
+    required); INSUFFICIENT_TEENS (t_soft is the prior's, else t_verify); SOFT_CAPPED (t_soft would sit
+    above t_verify, so it is lowered to t_verify and the soft band is empty; recall is then still at
+    least soft_recall, because that many teens already score above t_verify).
     """
     scores, y = np.asarray(scores, dtype=float), as_binary(y)
     if scores.shape != y.shape:
@@ -118,16 +124,16 @@ def pick_thresholds(
     if n_a < MIN_CLASS:
         if prior is None:
             raise ValueError(f"only {n_a} audit adults and no prior thresholds to keep")
-        return Thresholds(prior.t_verify, prior.t_soft, cap, margin, n_a, n_t, ("insufficient_adults",))
+        return replace(prior, n_adults=n_a, n_teens=n_t, flags=(INSUFFICIENT_ADULTS,))
     flags = []
     t_verify = cap_threshold(scores, y, cap - margin)
     if n_t < MIN_CLASS:
-        flags.append("insufficient_teens")
+        flags.append(INSUFFICIENT_TEENS)
         t_soft = prior.t_soft if prior is not None else t_verify
     else:
         t_soft = float(np.quantile(teens, 1.0 - soft_recall, method="lower"))
     if t_soft > t_verify:
-        flags.append("soft_capped")
+        flags.append(SOFT_CAPPED)
         t_soft = t_verify
     return Thresholds(t_verify, t_soft, cap, margin, n_a, n_t, tuple(flags))
 
