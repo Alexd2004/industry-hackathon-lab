@@ -1,6 +1,6 @@
 """Output schemas for the agents (Combined Plan section 7a, per-agent contract). One Pydantic model per agent,
-sent as output_config.format and checked again in code. A1, A2 and A4 are built; each owner adds
-theirs here (A3 patterns, A5 verdicts).
+sent as output_config.format and checked again in code. A1, A2, A4 and A5 are built; A3's owner adds
+its patterns schema here.
 """
 from typing import Literal
 
@@ -83,3 +83,32 @@ class A2Output(BaseModel):
         description="1 to 5 dotted field paths copied exactly from the input (for example audit.audit_adults) "
                     "that the reason relies on, most important first.",
     )
+
+
+A5_VERDICTS = ("supported", "unsupported", "projected", "cannot_check")
+A5_MAX_NOTE_CHARS = 200
+A5_MAX_RISKS = 4
+A5_MAX_CLAIMS = 40
+
+
+class A5Verdict(BaseModel):
+    """A5's verdict on one claim (Combined Plan 7a: {claim, verdict, source: file + row}, plus the risk tags)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str = Field(description="The claim's id, copied exactly from input.claims.")
+    verdict: Literal["supported", "unsupported", "projected", "cannot_check"]
+    source: str | None = Field(description="supported / projected: the id of the row that holds every number of "
+                                           "the claim. unsupported: that row id, a file name, or null. "
+                                           "cannot_check: a file name or null.")
+    risks: list[str] = Field(max_length=A5_MAX_RISKS, description="Ids from input.checklist that apply, or [].")
+    note: str = Field(max_length=A5_MAX_NOTE_CHARS, description="Why, under 200 characters. Every number in it "
+                                                                "must appear in the input exactly as written.")
+
+
+class A5Output(BaseModel):
+    """A5 honesty auditor: one verdict per input claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdicts: list[A5Verdict] = Field(min_length=1, max_length=A5_MAX_CLAIMS)

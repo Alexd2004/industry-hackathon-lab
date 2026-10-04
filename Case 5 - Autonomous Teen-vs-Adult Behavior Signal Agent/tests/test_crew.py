@@ -32,7 +32,7 @@ def env(split_and_tm, tmp_path, run):
 def crew_run(split_and_tm, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("results")
     (tmp / "eval_placeholder.csv").write_text(PLACEHOLDER_CSV.read_text())
-    rounds, records = crew.run_crew(env(split_and_tm, tmp, "20261004T000000.000000Z-crew"), None, N_ROUNDS,
+    rounds, records = crew.run_crew(env(split_and_tm, tmp, "20261004T000000.000000Z-crew"), None, N_ROUNDS, write=True,
                                     rounds_path=tmp / "rounds.csv", decisions_path=tmp / "decisions.jsonl")
     return tmp, rounds, records
 
@@ -42,7 +42,8 @@ def test_crew_changes_nothing_the_rule_decides(split_and_tm, tmp_path, crew_run)
     plain_rounds, plain_records = loop.run_loop(env(split_and_tm, tmp_path, "20261004T000000.000000Z-crew"), N_ROUNDS)
     pd.testing.assert_frame_equal(rounds, plain_rounds)
     for got, want in zip(records, plain_records):
-        assert {k: v for k, v in got.items() if k != "a1"} == {k: v for k, v in want.items() if k != "a1"}
+        agents = ("a1", "a5")  # the crew's own blocks; everything the rule decides must be identical
+        assert {k: v for k, v in got.items() if k not in agents} == {k: v for k, v in want.items() if k not in agents}
 
 
 def test_every_round_has_an_a1_block_and_a_valid_record(crew_run):
@@ -64,9 +65,9 @@ def test_each_round_is_appended_as_it_lands(split_and_tm, tmp_path, monkeypatch)
         seen.append((len(rounds), len(pd.read_csv(rounds_path))))
 
     monkeypatch.setattr(crew, "write_run", spy)
-    crew.run_crew(env(split_and_tm, tmp_path, "r-append"), None, 2, rounds_path=tmp_path / "rounds.csv",
+    crew.run_crew(env(split_and_tm, tmp_path, "r-append"), None, 2, write=True, rounds_path=tmp_path / "rounds.csv",
                   decisions_path=tmp_path / "decisions.jsonl")
-    assert seen == [(1, 1), (1, 2), (1, 3)]  # one row per call, the file growing round by round
+    assert seen == [(1, 1), (0, 1), (1, 2), (0, 2), (1, 3), (0, 3)]  # the row at once, then A5's record only
 
 
 def test_loop_tab_shows_the_real_run(crew_run, monkeypatch):
@@ -92,21 +93,21 @@ def test_loop_tab_shows_the_real_run(crew_run, monkeypatch):
 
 @pytest.fixture
 def clean_crew(monkeypatch):
-    monkeypatch.setattr(crew, "_current", {"thread": None, "run": None, "error": None})
+    monkeypatch.setattr(crew, "_current", crew.BackgroundRun())
     yield
-    t = crew._current["thread"]
+    t = crew._current.thread
     if t is not None and t.ident is not None:  # started threads only (a fake may never start one)
         t.join(timeout=10)
 
 
 def test_one_background_run_at_a_time(clean_crew, monkeypatch, tmp_path):
     go = threading.Event()
-    monkeypatch.setattr(crew, "_background", lambda timer, results_dir, n: go.wait(5))
+    monkeypatch.setattr(crew, "_background", lambda run, timer, results_dir, n: go.wait(5))
     first = crew.start_background(tmp_path)
     assert first and crew.status() == {"running": True, "run": first, "error": None}
     assert crew.start_background(tmp_path) is None  # refused while the first is running
     go.set()
-    crew._current["thread"].join(5)
+    crew._current.thread.join(5)
     second = crew.start_background(tmp_path)
     assert second and second != first  # a new run id every run
 
@@ -117,8 +118,8 @@ def test_a_failed_background_run_reports_its_error(clean_crew, monkeypatch, tmp_
 
     monkeypatch.setattr(crew, "load_data", boom)
     crew.start_background(tmp_path)
-    crew._current["thread"].join(5)
-    assert crew.status() == {"running": False, "run": crew._current["run"], "error": "RuntimeError: no data here"}
+    crew._current.thread.join(5)
+    assert crew.status() == {"running": False, "run": crew._current.run, "error": "RuntimeError: no data here"}
 
 
 def test_run_button_starts_a_run_and_the_picker_follows_it(clean_crew, monkeypatch, crew_run):
@@ -128,11 +129,11 @@ def test_run_button_starts_a_run_and_the_picker_follows_it(clean_crew, monkeypat
 
     def fake_start(results_dir):
         started.append(results_dir)
-        crew._current.update(run="20261004T235959.000000Z-new", thread=threading.Thread(target=lambda: None))
+        crew._current.run, crew._current.thread = "20261004T235959.000000Z-new", threading.Thread(target=lambda: None)
         return "20261004T235959.000000Z-new"
 
     monkeypatch.setattr(crew, "start_background", fake_start)
-    monkeypatch.setattr(crew, "status", lambda: {"running": bool(started), "run": crew._current["run"], "error": None})
+    monkeypatch.setattr(crew, "status", lambda: {"running": bool(started), "run": crew._current.run, "error": None})
 
     def render():
         from softsignal import ui_loop
@@ -155,7 +156,11 @@ def test_a_failed_run_is_shown_in_the_tab(clean_crew, monkeypatch, crew_run):
         from softsignal import ui_loop
         ui_loop.render_loop_tab()
 
-    at = AppTest.from_function(render).run()
+    other = AppTest.from_function(render).run()  # a session that did not start the run sees no banner
+    assert not other.exception and not any("RuntimeError: boom" in e.value for e in other.error)
+    at = AppTest.from_function(render)
+    at.session_state["loop_started_run"] = "x"  # the session that pressed Run loop
+    at.run()
     assert not at.exception and any("RuntimeError: boom" in e.value for e in at.error)
 
 
@@ -167,3 +172,66 @@ def test_a1_compares_each_batch_with_the_earlier_batches_only(split_and_tm, tmp_
     assert [(p["round"], p["n_reference"], p["n_batch"]) for p in payloads] == [
         (0, 0, 0), (1, 0, 300), (2, 300, 300), (3, 600, 300)]  # never the batch itself, never later batches
     assert [h["round"] for h in payloads[-1]["history"]] == [1, 2]  # earlier rounds' PSI only
+
+
+def test_every_round_has_an_a5_block_checked_against_this_runs_rows(crew_run):
+    tmp, rounds, records = crew_run
+    for r in records:
+        a5 = r["a5"]
+        assert valid_decision(r) and a5["status"] == FALLBACK and a5["fallback_reason"] == "script_only"  # no model
+        (claim,) = a5["output"]  # no A2 wired yet: the round's headline only
+        assert claim["claim"].startswith(f"Round {r['round']}:") and claim["verdict"] == "supported"
+        assert claim["source"] == f"rounds.csv:R{r['round']}"
+    on_disk = [__import__("json").loads(x) for x in (tmp / "decisions.jsonl").read_text().splitlines()]
+    # each round lands at once with A5 working (null), then again with A5 in it; the last line of a round wins
+    assert [(d["round"], d["a5"] is None) for d in on_disk] == [(r, w) for r in range(N_ROUNDS + 1) for w in (True, False)]
+    assert all(d["a5"]["status"] == FALLBACK for d in load_loop(tmp).decisions)
+
+
+def test_isolation(split_and_tm, tmp_path, monkeypatch):
+    """Crew Plan section 12: no frozen-test id, no rounds.csv / eval.csv test metric and nothing from A5 in A1's input."""
+    from softsignal.agents.contracts import TEST_METRIC_KEYS, frozen_test_ids
+
+    seen = []
+    real = crew.run_a1
+    monkeypatch.setattr(crew, "run_a1", lambda p, *a, **k: seen.append(p) or real(p, *a, **k))
+    _, records = crew.run_crew(env(split_and_tm, tmp_path, "r-iso"), None, N_ROUNDS)
+    text = "\n".join(__import__("json").dumps(p) for p in seen)
+    assert len(seen) == N_ROUNDS + 1
+    assert not any(i in text for i in frozen_test_ids())
+    keys = set()
+    stack = list(seen)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            keys |= set(node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    assert not keys & (TEST_METRIC_KEYS | {"a5", "claim", "verdict", "rounds", "eval"})
+    assert not any(c["claim"] in text for r in records for c in r["a5"]["output"])  # A5's claims never reach A1
+
+
+def test_a5_is_replayed_offline_for_the_same_input(split_and_tm, tmp_path):
+    _, first = crew.run_crew(env(split_and_tm, tmp_path, "r-a"), None, 2)
+    _, second = crew.run_crew(env(split_and_tm, tmp_path, "r-b"), None, 2)
+    assert [r["a5"]["input_hash"] for r in first] == [r["a5"]["input_hash"] for r in second]  # stable across runs
+    recorded = [{**r, "a5": {**r["a5"], "status": "LIVE"}} for r in first]  # pretend A5 answered live
+    _, third = crew.run_crew(env(split_and_tm, tmp_path, "r-c"), None, 2,
+                             replayer=__import__("softsignal.replay", fromlist=["Replayer"]).Replayer.from_records(recorded))
+    assert {r["a5"]["status"] for r in third} == {"REPLAY"} and [r["a5"]["output"] for r in third] == [
+        r["a5"]["output"] for r in first]
+
+
+def test_a_recorded_run_hashes_a5_like_a_normal_run(split_and_tm, tmp_path):
+    # --record writes to rounds_recorded.csv.new; a normal run writes rounds.csv: A5's input must not depend on it
+    rec_dir, live_dir = tmp_path / "rec", tmp_path / "live"
+    rec_dir.mkdir(), live_dir.mkdir()
+    _, recorded = crew.run_crew(env(split_and_tm, rec_dir, "r-rec"), None, 2, write=True,
+                                rounds_path=rec_dir / "rounds_recorded.csv.new",
+                                decisions_path=rec_dir / "decisions_recorded.jsonl.new")
+    live = [{**r, "a5": {**r["a5"], "status": "LIVE"}} for r in recorded]
+    _, normal = crew.run_crew(env(split_and_tm, live_dir, "r-norm"), None, 2, write=True,
+                              rounds_path=live_dir / "rounds.csv", decisions_path=live_dir / "decisions.jsonl",
+                              replayer=__import__("softsignal.replay", fromlist=["Replayer"]).Replayer.from_records(live))
+    assert {r["a5"]["status"] for r in normal} == {"REPLAY"}
