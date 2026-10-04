@@ -330,7 +330,7 @@ def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
     assert "evidence" not in records[0] and all(valid_decision(r) for r in records)
     for r in records[1:]:
         ev = r["evidence"]
-        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "streak", "promote_refused"}
+        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "pooled_adults", "pooled_ft", "streak", "promote_refused"}
         assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
     hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
     assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)
@@ -381,7 +381,27 @@ def test_write_run_starts_the_new_rows_on_their_own_line(tmp_path):
     assert [json.loads(x)["round"] for x in d_path.read_text().splitlines()] == [0, 0]
 
 
-def test_real_rounds_below_the_adult_floor_leave_the_streak_at_zero(full):
-    _, _, _, records, _ = full
-    thin = [r["evidence"] for r in records[1:] if r["evidence"]["round_audit_adults"] < lp.PROMOTE_MIN_ADULTS]
-    assert thin and all(e["streak"] == 0 for e in thin)
+def test_real_rounds_only_promote_on_enough_pooled_adults(full):
+    _, _, rounds, records, _ = full
+    for r in records[1:]:
+        ev = r["evidence"]
+        if ev["pooled_adults"] is not None and ev["pooled_adults"] < lp.PROMOTE_MIN_ADULTS:
+            assert ev["streak"] < lp.PROMOTE_STREAK  # a full window on too few adults cannot pass
+    assert rounds["action"].ne(lp.PROMOTE).all() or rounds["mode"].eq(lp.ACTIVE).any()
+
+
+@pytest.mark.parametrize("window,passes", [
+    ([(30, 9), (30, 1)], True),  # one round alone is 0.30 (over 0.18), pooled 10/60 = 0.167
+    ([(30, 12), (30, 12)], False),  # pooled 0.40
+    ([(30, 5), (30, 5)], True),  # 10/60 = 0.167
+    ([(30, 6), (30, 5)], False),  # 11/60 = 0.183, just over cap + slack (0.18)
+    ([(20, 0), (19, 0)], False),  # 39 pooled adults, under the floor of 40
+    ([(20, 0), (20, 0)], True),  # exactly the floor
+    ([], False),
+])
+def test_pooled_test(window, passes):
+    assert lp.pooled_test(window, 0.15)[2] is passes
+
+
+def test_pooled_test_counts_adults_and_false_teens():
+    assert lp.pooled_test([(27, 3), (30, 6)], 0.15)[:2] == (57, 9)

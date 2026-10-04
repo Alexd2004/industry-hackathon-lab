@@ -5,11 +5,15 @@ labels: its row is ladder row 2. Rounds 1..n_rounds each take one batch from the
 
 Two rules at a time. `live` decides who goes to the verify band. `candidate` is the stack refit after
 the last round, shadowing live. While the mode is SHADOW the starter stays live: each round the candidate
-is scored on that round's audit slice before the refit, and after PROMOTE_STREAK rounds in a row within
-cap + PROMOTE_SLACK the newest candidate becomes live (mode ACTIVE). Evidence is on the previous
-candidate, the promoted one is the one refit on this round's labels too. A round only counts toward
-the streak with at least PROMOTE_MIN_ADULTS audit adults, and a promote is refused (action re-tune,
-mode stays SHADOW) when the new candidate's thresholds carry an INSUFFICIENT_* flag.
+is scored on that round's audit slice before the refit. The false teens and adults of the last
+PROMOTE_STREAK rounds are pooled (state.window), and when the pooled rate is within cap + PROMOTE_SLACK
+on at least PROMOTE_MIN_ADULTS pooled adults the newest candidate becomes live (mode ACTIVE). Pooling
+(one test on about twice the adults) replaces judging each round alone, which was too noisy. The pooled
+rounds can each have scored a different candidate (each round refits), so this measures the refit
+process, not one fixed model. Evidence is on the previous candidate, the promoted one is the one refit
+on this round's labels too. A round whose evidence candidate carries an INSUFFICIENT_* flag, or has no
+adult, empties the window, and a promote is refused (action re-tune, mode stays SHADOW) when the new
+candidate's thresholds carry an INSUFFICIENT_* flag.
 
 PSI. Each round is compared with the scores the live rule gave earlier batches when they arrived
 (state.live_scores), never re-scored, so a refit model is not measured on rows it was fit on. The
@@ -59,9 +63,9 @@ SHADOW, ACTIVE = "SHADOW", "ACTIVE"
 HOLD, RETUNE, PROMOTE, STARTER = "hold", "re-tune", "promote", "starter"
 SOURCE_RULE = "rule"
 CAP_MIN, CAP_MAX = 0.08, 0.30  # clamp for any cap the loop or A2 applies (policy.py does not clamp)
-PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs audit false-teen <= cap + this ...
-PROMOTE_STREAK = 2  # ... in this many rounds in a row
-PROMOTE_MIN_ADULTS = 30  # a round's audit slice needs this many adults to count toward the streak
+PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs the pooled audit false-teen <= cap + this ...
+PROMOTE_STREAK = 2  # ... pooled over this many rounds in a row
+PROMOTE_MIN_ADULTS = 40  # ... and over at least this many pooled audit adults (2 x 20, the old per-round floor)
 UNSAFE_FLAGS = (INSUFFICIENT_ADULTS, INSUFFICIENT_TEENS)  # a candidate with these is never promoted
 THRESHOLD_SOURCES = ("audit", "all_verified")
 AGENT = "loop"
@@ -99,7 +103,8 @@ class State:
     live: Rule
     candidate: Rule | None = None
     mode: str = SHADOW
-    streak: int = 0  # consecutive SHADOW rounds with the candidate within cap + slack
+    streak: int = 0  # rounds in the window while it fills, then PROMOTE_STREAK if the pooled test passes, else 0
+    window: list = field(default_factory=list)  # (audit adults, candidate false teens) of the last rounds, reassigned
     round: int = 0
     seen: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[ID_COL, *FEATURE_COLS]))
     # each earlier round's scores as the live rule gave them when the batch arrived (never re-scored)
@@ -155,8 +160,7 @@ def rule_decision(state: State, policy: dict, n_audit_adults: int) -> dict:
     """The rule-based decision for this round: {"action", "cap"}. A2's baseline and fallback.
 
     hold until min_audit_adults audit adults are revealed; then re-tune every round; promote once the
-    candidate has been within cap + slack for PROMOTE_STREAK rounds in a row (state.streak, already
-    updated for this round).
+    the pooled test over PROMOTE_STREAK rounds has passed (state.streak, already updated for this round).
     """
     cap = clamp_cap(policy["cap_false_teen"])
     if n_audit_adults < policy["min_audit_adults"]:
@@ -221,6 +225,16 @@ def _decision_block(rule_dec: dict, live: Rule) -> dict:
     return {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
 
 
+def pooled_test(window: list, cap: float) -> tuple[int, int, bool]:
+    """(pooled adults, pooled false teens, passes) for a window of (adults, false teens) rounds.
+
+    Passes when there are at least PROMOTE_MIN_ADULTS pooled adults and the pooled false-teen rate is
+    within cap + PROMOTE_SLACK. An empty window never passes.
+    """
+    adults, fts = sum(a for a, _ in window), sum(f for _, f in window)
+    return adults, fts, bool(adults >= max(PROMOTE_MIN_ADULTS, 1) and fts / adults <= cap + PROMOTE_SLACK)
+
+
 def _unsafe(rule: Rule) -> bool:
     """True when the rule's thresholds carry an INSUFFICIENT_* flag (the prior's cutoffs were kept)."""
     return any(f in UNSAFE_FLAGS for f in rule.th.flags)
@@ -236,8 +250,9 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
 
     evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
     cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
-    candidate carried an INSUFFICIENT_* flag, so the round cannot count toward the streak), streak
-    (after this round) and promote_refused (the new candidate carried an INSUFFICIENT_* flag).
+    candidate carried an INSUFFICIENT_* flag, so the window is emptied), pooled_adults and pooled_ft
+    (the window the test used, None when it is empty), streak (after this round) and promote_refused
+    (the new candidate carried an INSUFFICIENT_* flag).
     """
     rec = {"run": run, "round": rnd}
     rec.update({k: {"status": None, "output": None, "fallback_reason": None} for k in AGENT_KEYS})
@@ -319,23 +334,30 @@ def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
 
     # 3. this round's audit slice, scored BEFORE the refit, so these false-teen rates are never in-sample
     audit_ft = false_teen(y_audit, live_s[a_idx], state.live.th.t_verify)
-    cand_ft = None
+    cand_ft = cand_fts = None
     if state.candidate is not None:
-        cand_ft = false_teen(y_audit, state.candidate.score(rows)[a_idx], state.candidate.th.t_verify)
+        cand_s, t_cand = state.candidate.score(rows)[a_idx], state.candidate.th.t_verify
+        cand_ft = false_teen(y_audit, cand_s, t_cand)
+        cand_fts = int(((cand_s >= t_cand) & (y_audit == 0)).sum())
     psi_val = psi(ref_scores, live_s) if len(ref_scores) else None
 
     # 4. decision: streak first, then the rule
     round_adults = int((y_audit == 0).sum())
     evidence = {"round_audit_adults": round_adults, "cand_ft": cand_ft, "streak": state.streak,
                 "cand_t_verify": None if state.candidate is None else float(state.candidate.th.t_verify),
-                "cand_unsafe": state.candidate is not None and _unsafe(state.candidate), "promote_refused": False}
+                "cand_unsafe": state.candidate is not None and _unsafe(state.candidate),
+                "pooled_adults": None, "pooled_ft": None, "promote_refused": False}
     if state.mode == SHADOW:
-        enough = round_adults >= PROMOTE_MIN_ADULTS
         # a candidate with INSUFFICIENT_* flags holds the prior's cutoffs, which may be on another scale
-        ok = (enough and cand_ft is not None and not evidence["cand_unsafe"]
-              and cand_ft <= clamp_cap(env.policy["cap_false_teen"]) + PROMOTE_SLACK)
-        state.streak = state.streak + 1 if ok else 0
-        evidence["streak"] = state.streak
+        usable = cand_ft is not None and not evidence["cand_unsafe"]
+        state.window = (state.window + [(round_adults, cand_fts)])[-PROMOTE_STREAK:] if usable else []
+        cap = clamp_cap(env.policy["cap_false_teen"])
+        adults, fts, passes = pooled_test(state.window, cap)
+        if len(state.window) < PROMOTE_STREAK:
+            state.streak = len(state.window)
+        else:
+            state.streak = PROMOTE_STREAK if passes else 0
+        evidence.update(streak=state.streak, pooled_adults=adults or None, pooled_ft=fts / adults if adults else None)
     rule_dec = rule_decision(state, env.policy, oracle.audit_counts()["adults"])
 
     # 5. apply it
