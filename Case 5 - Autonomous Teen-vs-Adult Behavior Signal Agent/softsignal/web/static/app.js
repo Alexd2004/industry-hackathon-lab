@@ -492,7 +492,11 @@ async function loadList() {
   const r = run();
   if (!r || !r.complete || S.lists[r.id] !== undefined || (S.job?.running && S.job.run === r.run)) return;
   S.lists[r.id] = null; // in flight
-  try { S.lists[r.id] = await api(`/api/list?run=${encodeURIComponent(r.id)}`); } catch { delete S.lists[r.id]; }
+  try {
+    S.lists[r.id] = await api(`/api/list?run=${encodeURIComponent(r.id)}`);
+  } catch (e) { // asked once per run, never retried on every render
+    S.lists[r.id] = { rows: null, error: e.status === 404 ? "the server is older than this page: restart python -m softsignal.web" : e.message };
+  }
   render();
 }
 
@@ -529,6 +533,7 @@ function renderList() {
   if (!rows.length) {
     const msg = !r.complete ? "The list appears when the run finishes, scored by the run's final model."
       : got === null || got === undefined ? "Loading the run's list…"
+      : got.error ? `Could not load the run's list: ${got.error}.`
       : "No list for this run: its final model was not saved. Start a rule-only run from Training → Run loop (a few seconds) to get one.";
     body.innerHTML = `<tr><td colspan="6" class="muted">${esc(msg)}</td></tr>`;
     return;
