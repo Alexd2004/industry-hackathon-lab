@@ -33,8 +33,16 @@ Agents plug in through two optional callbacks (crew.py uses them). before_decisi
 psi) runs after the reveal and the PSI, before the decision, and returns agent blocks for the record
 (A1 now, A2 later reads them here); prior is the rows of every earlier batch, handed over explicitly.
 A hook that raises never breaks the round: its error goes in the record (agent_error), the rule decides.
-on_round(result) runs after each round, e.g. to append it to the files. Every round is still
-applied_source "rule" ("starter" for R0); rule_decision() is what A2 will be compared against.
+on_round(result) runs after each round, e.g. to append it to the files.
+
+A2 plugs in through a third callback, decide(context, blocks) -> {"a2": block}, called after the streak update and
+before the refit (DecisionContext: the live thresholds, audit counts, bounds, guards and rule_decision(), all from
+before the apply step). Its block and the code-computed diff against rule_decision() are always logged. With
+apply_a2 (crew mode) A2's own action and cap are applied, with the guards enforced again here (no refit before
+the audit floor, no promote unless the rule's pooled test passed) and the cap clamped; applied_source is then "A2".
+A FALLBACK, a missing block or a failing decider leaves the rule's decision applied. The promote gate always uses
+the policy cap: A2's cap steers the refit only. Without apply_a2 every round is applied_source "rule" ("starter"
+for R0).
 
 Run: python -m softsignal.loop [--source audit|all_verified] [--rounds N]
 """
@@ -51,6 +59,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from softsignal import side_by_side
 from softsignal.agent_timer import RUN_ROUND_STEP, AgentTimer, get_timer
 from softsignal.data import ROOT, cv_folds, load_data
 from softsignal.features import FEATURE_COLS, ID_COL, SEED, TARGET
@@ -246,8 +255,11 @@ def _unsafe(rule: Rule) -> bool:
     return any(f in UNSAFE_FLAGS for f in rule.th.flags)
 
 
-def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict | None = None) -> dict:
-    """decisions.jsonl line. Agents are not built yet, so every agent block is empty.
+def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict | None = None,
+                rule_decision: dict | None = None) -> dict:
+    """decisions.jsonl line. Every agent block starts empty; the round fills the ones that ran.
+
+    decision is what was applied; rule_decision is what the rule would have decided (None: the same).
 
     evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
     cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
@@ -257,7 +269,8 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
     """
     rec = {"run": run, "round": rnd}
     rec.update({k: {"status": None, "output": None, "fallback_reason": None} for k in AGENT_KEYS})
-    rec.update({"rule_decision": dict(decision), "diff": {}, "applied": {"decision": dict(decision), "source": source}})
+    rec.update({"rule_decision": dict(decision if rule_decision is None else rule_decision), "diff": {},
+                "applied": {"decision": dict(decision), "source": source}})
     if evidence is not None:
         rec["evidence"] = dict(evidence)
     return rec
@@ -280,8 +293,79 @@ def make_row(env: Env, state: State, rnd: int, action: str, source: str, **kw) -
     return {c: row[c] for c in ROUNDS_COLS}
 
 
+@dataclass(frozen=True)
+class DecisionContext:
+    """What a decider (A2) is shown for one round, built in code after the streak update and before the refit.
+    The fields are the keyword arguments of contracts.a2_input, as plain Python (no numpy). mode, thresholds and
+    guards are from BEFORE the round's apply step; audit.streak is already this round's."""
+
+    round: int
+    thresholds: dict  # the live rule: t_verify, t_soft, cap, flags
+    audit: dict
+    bounds: dict
+    guards: dict  # hold_required, promote_allowed
+    rule: dict  # rule_decision(): {action, cap}
+
+
 BeforeDecision = Callable[[State, "Batch | None", pd.DataFrame, "float | None"], dict]
+Decide = Callable[[DecisionContext, dict], dict]  # (context, the before_decision blocks) -> {"a2": block}
 OnRound = Callable[[RoundResult], None]
+
+
+def _py(v):
+    """A numpy scalar as a plain Python value (a2_input rejects anything json cannot dump)."""
+    return v.item() if isinstance(v, np.generic) else v
+
+
+def _plain(d: dict) -> dict:
+    return {k: _py(v) for k, v in d.items()}
+
+
+def _context(env: Env, state: State, rnd: int, rule_dec: dict, evidence: dict, cand_ft: "float | None") -> DecisionContext:
+    """A2's view of the round. promote_allowed is the rule's own promote (SHADOW, pooled test passed, floor met)."""
+    counts = env.oracle.audit_counts()
+    floor = int(env.policy["min_audit_adults"])
+    th = state.live.th
+    return DecisionContext(
+        round=rnd,
+        thresholds={"t_verify": float(th.t_verify), "t_soft": float(th.t_soft), "cap": float(th.cap),
+                    "flags": list(th.flags)},
+        audit=_plain({"mode": state.mode, "streak": state.streak, "audit_adults": counts["adults"],
+                      "audit_teens": counts["teens"], "round_audit_adults": evidence["round_audit_adults"],
+                      "pooled_adults": evidence["pooled_adults"], "pooled_false_teen_rate": evidence["pooled_ft"],
+                      "candidate_false_teen": cand_ft}),
+        bounds={"cap_min": CAP_MIN, "cap_max": CAP_MAX, "min_audit_adults": floor,
+                "cap_default": clamp_cap(env.policy["cap_false_teen"])},
+        guards={"hold_required": counts["adults"] < floor, "promote_allowed": rule_dec["action"] == PROMOTE},
+        rule=dict(rule_dec),
+    )
+
+
+def _a2_block(decide: Decide | None, ctx: DecisionContext, blocks: dict) -> dict:
+    """The decider's {"a2": block}. Never raises (the reveal cannot be undone): a failing decider leaves A2
+    unrun, the error goes in the record (agent_error) and the rule decides."""
+    if decide is None:
+        return {}
+    try:
+        out = decide(ctx, blocks)
+    except Exception as e:  # noqa: BLE001 - the contract is "agents never break the round"
+        return {"agent_error": f"A2 {type(e).__name__}: {e}"[:500]}
+    return {k: v for k, v in out.items() if k == "a2"}
+
+
+def _a2_applied(a2_block: "dict | None", rule_dec: dict, floor_met: bool, promote_ok: bool) -> "dict | None":
+    """A2's own {action, cap} as the loop will apply it, or None when A2 has no decision of its own (not run,
+    FALLBACK, no output). The guards are enforced here again, in code: no refit before the audit floor, no promote
+    unless the pooled test passed (then re-tune), and the cap is clamped. The promote gate itself used the policy cap."""
+    out = side_by_side.a2_decision(a2_block)
+    if out is None or out.get("action") not in (HOLD, RETUNE, PROMOTE) or not isinstance(out.get("cap"), (int, float)):
+        return None
+    action = out["action"]
+    if not floor_met:
+        action = HOLD
+    elif action == PROMOTE and not promote_ok:
+        action = RETUNE
+    return {"action": action, "cap": clamp_cap(float(out["cap"]))}
 
 
 def _agent_blocks(before_decision: BeforeDecision | None, state: State, batch: "Batch | None",
@@ -309,14 +393,16 @@ def round0(env: Env, state: State, before_decision: BeforeDecision | None = None
 
 
 # ---- one round ----
-def run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None) -> RoundResult:
+def run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None,
+              decide: Decide | None = None, apply_a2: bool = False) -> RoundResult:
     """Run one round and update state in place. See the module docstring for the order."""
     env.timer.round = batch.round
     with env.timer.call(AGENT, RUN_ROUND_STEP, "tool"):
-        return _run_round(state, batch, env, before_decision)
+        return _run_round(state, batch, env, before_decision, decide, apply_a2)
 
 
-def _run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None) -> RoundResult:
+def _run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None,
+               decide: Decide | None = None, apply_a2: bool = False) -> RoundResult:
     """Run the round; if anything raises, put the state back to how the last finished round left it.
 
     The oracle cannot undo a reveal and refuses a second one for the same round, so after a failure past
@@ -324,14 +410,15 @@ def _run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDeci
     """
     before = replace(state)  # fields are reassigned during a round, never mutated in place
     try:
-        return _apply_round(state, batch, env, before_decision)
+        return _apply_round(state, batch, env, before_decision, decide, apply_a2)
     except Exception:
         for f in fields(state):
             setattr(state, f.name, getattr(before, f.name))
         raise
 
 
-def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None) -> RoundResult:
+def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None,
+                 decide: Decide | None = None, apply_a2: bool = False) -> RoundResult:
     rows, ids, oracle = batch.rows, list(batch.ids), env.oracle
     prior = state.seen
 
@@ -384,34 +471,51 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
         evidence.update(streak=state.streak, pooled_adults=adults or None, pooled_ft=fts / adults if adults else None)
     rule_dec = rule_decision(state, env.policy, oracle.audit_counts()["adults"])
 
+    # 4b. A2 (after the streak update, before the refit; mode and live rule are still this round's, pre-apply).
+    # Its decision is always logged; it is applied only when apply_a2 (crew mode), and only if it has a decision
+    # of its own (not FALLBACK). The promote gate above used the policy cap, so A2's cap steers the refit only.
+    ctx = _context(env, state, batch.round, rule_dec, evidence, cand_ft)
+    a2_blocks = _a2_block(decide, ctx, blocks)
+    a2_block = a2_blocks.get("a2")
+    mine = _a2_applied(a2_block, rule_dec, not ctx.guards["hold_required"], ctx.guards["promote_allowed"])
+    source = "A2" if apply_a2 and mine is not None else SOURCE_RULE
+    applied = dict(mine) if source == "A2" else dict(rule_dec)
+    rule_orig = dict(rule_dec)
+    diff = side_by_side.diff(a2_block, rule_orig)
+
     # 5. apply it
     refit_s = None
-    if rule_dec["action"] != HOLD:
+    if applied["action"] != HOLD:
         t0 = time.perf_counter()
         with env.timer.call(AGENT, "refit", "tool"):
-            state.candidate = refit(env, state, rule_dec["cap"])
+            state.candidate = refit(env, state, applied["cap"])
         refit_s = time.perf_counter() - t0
-        if rule_dec["action"] == PROMOTE:
+        if applied["action"] == PROMOTE:
             if _unsafe(state.candidate):
-                rule_dec = {**rule_dec, "action": RETUNE}  # refused: try again next round
+                applied = {**applied, "action": RETUNE}  # refused: try again next round
                 evidence["promote_refused"] = True
             else:
                 state.mode = ACTIVE
                 state.live_scores = np.empty(0)  # the starter's scores are not on the stack's scale
         if state.mode == ACTIVE:
             state.live = state.candidate
-    decision = _decision_block(rule_dec, state.live)
-    row = make_row(env, state, batch.round, rule_dec["action"], SOURCE_RULE, n_flagged=n_flagged,
-                   n_verify=len(verify_ids), audit_ft=audit_ft, psi=psi_val, refit_s=refit_s)
-    record = make_record(env.timer.run, batch.round, decision, SOURCE_RULE, evidence)
+    if source == SOURCE_RULE:
+        rule_orig = applied  # a refused promote shows as the rule's own decision, as before A2 existed
+    decision = _decision_block(applied, state.live)
+    row = make_row(env, state, batch.round, applied["action"], source, n_flagged=n_flagged,
+                   n_verify=len(verify_ids), audit_ft=audit_ft, psi=psi_val, refit_s=refit_s, diff_count=len(diff))
+    record = make_record(env.timer.run, batch.round, decision, source, evidence,
+                         rule_decision=_decision_block(rule_orig, state.live))
     record.update(blocks)
+    record.update(a2_blocks)
+    record["diff"] = diff
     return RoundResult(row, record)
 
 
 # ---- whole run ----
 def run_loop(env: Env, n_rounds: int | None = None, state: State | None = None,
              before_decision: BeforeDecision | None = None,
-             on_round: OnRound | None = None) -> tuple[pd.DataFrame, list[dict]]:
+             on_round: OnRound | None = None, decide: Decide | None = None, apply_a2: bool = False) -> tuple[pd.DataFrame, list[dict]]:
     """R0 then each batch the oracle has (at most n_rounds). Returns the rounds table and the records.
 
     Pass a state to read the final live rule and candidate afterwards (it is updated in place).
@@ -424,7 +528,7 @@ def run_loop(env: Env, n_rounds: int | None = None, state: State | None = None,
     for batch in env.oracle:
         if n_rounds is not None and batch.round > n_rounds:
             break
-        results.append(run_round(state, batch, env, before_decision))
+        results.append(run_round(state, batch, env, before_decision, decide, apply_a2))
         if on_round is not None:
             on_round(results[-1])
     return pd.DataFrame([r.row for r in results], columns=ROUNDS_COLS), [r.record for r in results]

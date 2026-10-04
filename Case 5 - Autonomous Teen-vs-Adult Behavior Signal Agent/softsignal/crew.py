@@ -1,14 +1,19 @@
 """Crew run (Tier 3): loop.py with the agents built so far, each round appended as it lands.
 
-Today that is loop.py's rule plus A1 (drift watcher), through loop.run_loop's two callbacks:
+Today that is loop.py's rule plus A1 (drift watcher) and A2 (controller), through loop.run_loop's callbacks:
 
     before_decision(state, batch, prior, psi)  -> A1 on (prior = the earlier batches, the batch rows, the score
                                                   PSI while the live rule is the starter, audit counts, earlier
                                                   rounds' PSI); its block goes into the round's record
+    decide(context, blocks)                    -> A2 on (the live thresholds, audit counts, bounds, guards, the rule's
+                                                  decision and A1's output; A3 is insufficient_data until step 16),
+                                                  after the streak update and before the refit; its block and the diff
+                                                  against the rule go in the record, and its action and cap are applied
+                                                  unless it fell back or apply_a2 is False
     on_round(result)                           -> loop.write_run(this row, this record), when writing
 
-A1 runs after the reveal and the PSI, before the decision, where A2 will read it. With no A2 yet its
-verdict informs no decision, so the rule's decisions are exactly loop.run_loop's. Score PSI goes to A1
+A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline (no key) A2 falls
+back to the rule's own decision every round, so an offline run's decisions are exactly loop.run_loop's. Score PSI goes to A1
 only while the live rule is the starter: once the stack is live every refit changes the model, and
 score PSI would measure that change, not drift. A4 is not run here: while the loop is in SHADOW the
 starter blend picks the verify band and has no explanations; wire it once the live rule is the stack
@@ -33,9 +38,11 @@ import pandas as pd
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
 from softsignal.agents.a1_drift import run_a1
 from softsignal.agents.base import make_client, merge_block
-from softsignal.agents.contracts import a1_history, a1_input
+from softsignal.agents.a2_controller import run_a2
+from softsignal.agents.contracts import INSUFFICIENT_INPUT, a1_history, a1_input, a2_input
 from softsignal.data import load_data
-from softsignal.loop import DECISIONS_JSONL, ROUNDS_CSV, SHADOW, Env, State, make_env, run_loop, write_run
+from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, SHADOW, DecisionContext, Env, State, make_env, run_loop,
+                             write_run)
 from softsignal.metrics import ROUNDS_COLS
 
 ROUNDS_RECORDED = ROUNDS_CSV.with_name("rounds_recorded.csv")
@@ -44,10 +51,11 @@ DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
 
 def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = False,
              rounds_path: Path = ROUNDS_CSV, decisions_path: Path = DECISIONS_JSONL,
-             state: State | None = None) -> tuple[pd.DataFrame, list[dict]]:
+             state: State | None = None, apply_a2: bool = True) -> tuple[pd.DataFrame, list[dict]]:
     """R0 then each oracle batch (at most n_rounds) with A1 on every round. Returns (rounds, records) like
     loop.run_loop. write=True appends each round to rounds_path / decisions_path when it ends.
-    client: base.make_client() (None = offline, the agents use their fallbacks)."""
+    client: base.make_client() (None = offline, the agents use their fallbacks). A2 runs every round from R1 and
+    its decision is logged next to the rule's; apply_a2 (crew mode) applies A2's own decision, False logs it only."""
     psi_drift = env.policy.get("psi_drift")
     history: list[dict] = []
 
@@ -61,11 +69,20 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             history.append(a1_history(payload))
         return {"a1": merge_block(a1, round_agent_summary(env.timer.records, rnd, env.timer.run).get(a1.agent))}
 
+    def decide(ctx: DecisionContext, blocks: dict) -> dict:
+        a1 = (blocks.get("a1") or {}).get("output")  # whole, as A1 returned it; A3 is not built (step 16)
+        payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
+                           a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT, a3=INSUFFICIENT_INPUT,
+                           policy=env.policy)
+        a2 = run_a2(payload, client, env.timer, ctx.round)
+        return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
+
     def on_round(result) -> None:
         if write:
             write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
 
-    return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round)
+    return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round, decide=decide,
+                    apply_a2=apply_a2)
 
 
 # ---- background run for the Loop tab ----
