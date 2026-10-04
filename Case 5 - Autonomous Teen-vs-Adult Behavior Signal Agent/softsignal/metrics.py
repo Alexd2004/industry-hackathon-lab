@@ -9,13 +9,15 @@ EVAL_COLS = ["stage", "eval_set", "prec", "rec", "ft", "mt", "f1", "auc"]
 # Frozen rounds.csv columns (loop scoreboard, one row per (run, round); prec..auc on the frozen test set).
 # run: the AgentTimer run id (UTC timestamp), so runs sort newest first and join agent_calls.jsonl.
 # mode: SHADOW / ACTIVE after this round's decision; applied_source: A2 / rule / starter.
+# diff_count: fields where A2's own proposal differs from the rule's (applied or not), counted in code; 0 on FALLBACK,
+# when A2 did not run (loop.py --mode rule), and in R0.
 # n_flagged: batch accounts at or above t_verify; n_verify: those sent to verification after the
 # 25% budget cut (n_flagged > n_verify means "budget wins"). n_audit_adults is cumulative.
 # audit_ft: false-teen on this round's audit slice, scored BEFORE the refit (never in-sample).
 # t_soft, audit_ft, psi, refit_s may be blank.
-ROUNDS_COLS = ["run", "round", "mode", "action", "applied_source", "cap", "t_soft", "t_verify", "n_flagged",
-               "n_verify", "n_labels", "n_audit_adults", "audit_ft", "psi", "prec", "rec", "ft", "mt", "auc",
-               "refit_s"]
+ROUNDS_COLS = ["run", "round", "mode", "action", "applied_source", "diff_count", "cap", "t_soft", "t_verify",
+               "n_flagged", "n_verify", "n_labels", "n_audit_adults", "audit_ft", "psi", "prec", "rec", "ft", "mt",
+               "auc", "refit_s"]
 DEFAULT_CAP = 0.15  # max false-teen rate when picking a cutoff
 # Frozen ranked.csv columns (explain.py, the "likely teen" list; no labels). c1..c3 are readable
 # chips like "quiet in school hours +0.82"; f1..f3 their level-2 feature keys and v1..v3 the signed

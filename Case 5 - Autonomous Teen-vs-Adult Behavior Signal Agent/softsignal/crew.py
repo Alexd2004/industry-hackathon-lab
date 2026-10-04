@@ -1,11 +1,16 @@
 """Crew run (Tier 3): loop.py with the agents built so far, each round appended as it lands.
 
-Today that is loop.py's rule plus A1 (drift watcher) and A5 (honesty auditor), through loop.run_loop's two
-callbacks:
+Today that is loop.py's rule plus A1 (drift watcher), A2 (controller) and A5 (honesty auditor), through
+loop.run_loop's three callbacks:
 
     before_decision(state, batch, prior, psi)  -> A1 on (prior = the earlier batches, the batch rows, the score
                                                   PSI while the live rule is the starter, audit counts, earlier
                                                   rounds' PSI); its block goes into the round's record
+    decide(context, blocks)                    -> A2 on (the live thresholds, audit counts, bounds, guards, the rule's
+                                                  decision and A1's output; A3 is insufficient_data until step 16),
+                                                  after the streak update and before the refit; its block and the diff
+                                                  against the rule go in the record, and its action and cap are applied
+                                                  unless it fell back or apply_a2 is False
     on_round(result)                           -> when writing, the round is appended at once with A5 "working"
                                                   (a5 null), so the screen never waits on A5; then A5 checks the
                                                   finished round (its headline numbers and A2's reason, against
@@ -15,11 +20,11 @@ callbacks:
 
 Offline (no client), each agent first asks replay.Replayer for a recorded LIVE output made from the same input
 (marked REPLAY); otherwise it uses its fallback. --record never replays: a recording holds live or fallback
-output only.
+output only. A2 is not replayed: offline it always falls back to the rule's own decision.
 
-A1 runs after the reveal and the PSI, before the decision, where A2 will read it. With no A2 yet its
-verdict informs no decision, so the rule's decisions are exactly loop.run_loop's. Score PSI goes to A1
-only while the live rule is the starter: once the stack is live every refit changes the model, and
+A1 runs after the reveal and the PSI, before the decision, where A2 reads it. Offline (no key) A2 falls
+back to the rule's own decision every round, so an offline run's decisions are exactly loop.run_loop's. Score PSI goes
+to A1 only while the live rule is the starter: once the stack is live every refit changes the model, and
 score PSI would measure that change, not drift. A4 is not run here: while the loop is in SHADOW the
 starter blend picks the verify band and has no explanations; wire it once the live rule is the stack
 (agents/a4_triage.py). Every run has its own run id (its own AgentTimer).
@@ -30,7 +35,10 @@ results/rounds_recorded.csv and decisions_recorded.jsonl instead (swapped in onl
 finished, so a failed run leaves the old one; --rounds is refused): the committed run a
 fresh clone shows.
 
-Run: python -m softsignal.crew [--rounds N] [--no-write | --record]   (agents offline unless ANTHROPIC_API_KEY)
+Run: python -m softsignal.crew [--mode crew|rule] [--rounds N] [--no-write | --record]   (agents offline unless
+ANTHROPIC_API_KEY)
+  --mode crew (default): A2's decision is applied. --mode rule: A1 and A2 still run and are logged next to the rule's
+  decision, but the rule is applied every round (the counterfactual run; --record needs crew).
 """
 import argparse
 import json
@@ -43,12 +51,15 @@ import pandas as pd
 
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
 from softsignal.agents import a1_drift, a5_audit
+from softsignal.agents.a2_controller import run_a2
 from softsignal.agents.base import FALLBACK, AgentResult, make_client, merge_block
 from softsignal.agents.contracts import (
-    a1_history, a1_input, a5_input, a5_sources, evidence_source, load_checklist, round_claims,
+    INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a5_input, a5_sources, evidence_source, load_checklist,
+    round_claims,
 )
 from softsignal.data import load_data
-from softsignal.loop import DECISIONS_JSONL, ROUNDS_CSV, SHADOW, Env, State, make_env, run_loop, write_run
+from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, DecisionContext, Env, State,
+                             check_rounds_header, make_env, run_loop, write_run)
 from softsignal.metrics import ROUNDS_COLS
 from softsignal.replay import Replayer, read_records, serve
 
@@ -61,11 +72,12 @@ DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
 def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = False,
              rounds_path: Path = ROUNDS_CSV, decisions_path: Path = DECISIONS_JSONL,
              state: State | None = None, replayer: Replayer | None = None,
-             checklist: list[dict] | None = None) -> tuple[pd.DataFrame, list[dict]]:
-    """R0 then each oracle batch (at most n_rounds) with A1 and A5 on every round. Returns (rounds, records)
-    like loop.run_loop. write=True appends each round to rounds_path / decisions_path when it ends.
-    client: base.make_client() (None = offline). replayer: recorded outputs to serve while offline (None = none).
-    checklist: A5's risk list (default claims/risks.yaml; [] if that file is missing)."""
+             checklist: list[dict] | None = None, apply_a2: bool = True) -> tuple[pd.DataFrame, list[dict]]:
+    """R0 then each oracle batch (at most n_rounds) with A1 and A5 on every round and A2 from R1. Returns
+    (rounds, records) like loop.run_loop. write=True appends each round to rounds_path / decisions_path when it ends.
+    client: base.make_client() (None = offline). replayer: recorded outputs to serve while offline (None = none;
+    A1 and A5 only). checklist: A5's risk list (default claims/risks.yaml; [] if that file is missing).
+    A2's decision is logged next to the rule's; apply_a2 (crew mode) applies A2's own decision, False logs it only."""
     psi_drift = env.policy.get("psi_drift")
     history: list[dict] = []
     rows_so_far: list[dict] = []
@@ -108,6 +120,14 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A5", FALLBACK, [], A5_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
+    def decide(ctx: DecisionContext, blocks: dict) -> dict:
+        a1 = (blocks.get("a1") or {}).get("output")  # whole, as A1 returned it; A3 is not built (step 16)
+        payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
+                           a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT, a3=INSUFFICIENT_INPUT,
+                           policy=env.policy)
+        a2 = run_a2(payload, client, env.timer, ctx.round)
+        return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
+
     def on_round(result) -> None:
         rnd = int(result.row["round"])
         rows_so_far.append(result.row)
@@ -118,7 +138,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         if write:  # the same round again with A5 in it: the last line of a (run, round) wins
             write_run(pd.DataFrame(columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
 
-    return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round)
+    return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round, decide=decide,
+                    apply_a2=apply_a2)
 
 
 def compact_decisions(path: Path) -> None:
@@ -182,6 +203,8 @@ def start_background(results_dir: Path = ROUNDS_CSV.parent, n_rounds: int | None
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--mode", choices=RUN_MODES, default="crew",
+                    help="crew: apply A2; rule: apply the rule")
     ap.add_argument("--rounds", type=int, default=None)
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--no-write", action="store_true", help="print only")
@@ -190,6 +213,10 @@ def main() -> None:
     args = ap.parse_args()
     if args.record and args.rounds is not None:
         ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
+    if args.record and args.mode != "crew":
+        ap.error("--record writes the crew run that a fresh clone shows; drop --mode rule")
+    if not (args.no_write or args.record):
+        check_rounds_header(ROUNDS_CSV, ROUNDS_COLS)  # fail now, not after every refit has run
     train, test = load_data(on_param_mismatch="error")
     env = make_env(train, test)
     client = make_client()
@@ -200,7 +227,8 @@ def main() -> None:
         p.unlink(missing_ok=True)
     try:
         replayer = None if args.record or args.no_replay else Replayer.from_file(DECISIONS_RECORDED)
-        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer)
+        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer,
+                                   apply_a2=args.mode == "crew")
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)

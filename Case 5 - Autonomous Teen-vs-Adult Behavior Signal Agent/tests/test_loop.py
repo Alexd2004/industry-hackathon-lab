@@ -256,17 +256,24 @@ def split():
     return train, test, build_matrix(tuple(train[ID_COL].astype(str)))
 
 
-def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=(), min_adults=1):
-    """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place."""
+def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=(), min_adults=1, decide=None, apply_a2=False,
+               caps=None):
+    """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place.
+    decide / apply_a2: A2's callback (see loop.run_round); caps, if a list, collects the cap of every refit."""
     train, test, tm = split
     monkeypatch.setattr(lp, "PROMOTE_MIN_ADULTS", min_adults)  # these test the promote logic, not the real floor
     seq = list(flags) if isinstance(flags, list) else [flags]  # a list gives each refit its own flags, the last repeats
-    monkeypatch.setattr(lp, "refit", lambda env, st, cap: candidate(seq.pop(0) if len(seq) > 1 else seq[0]))
+    def stub_refit(env, st, cap):
+        if caps is not None:
+            caps.append(cap)
+        return candidate(seq.pop(0) if len(seq) > 1 else seq[0])
+
+    monkeypatch.setattr(lp, "refit", stub_refit)
     env = lp.make_env(train, test, policy={**POL, "min_audit_adults": 1}, tm=tm,
                       timer=AgentTimer(tmp_path / "calls.jsonl", run="t"))
     st = lp.new_state(env.policy)
     st.candidate = candidate(start_flags)
-    results = [lp.run_round(st, b, env) for _, b in zip(range(n), env.oracle)]
+    results = [lp.run_round(st, b, env, None, decide, apply_a2) for _, b in zip(range(n), env.oracle)]
     rounds = pd.DataFrame([r.row for r in results])
     rounds.attrs["records"] = [r.record for r in results]
     return rounds, st, env
@@ -330,7 +337,8 @@ def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
     assert "evidence" not in records[0] and all(valid_decision(r) for r in records)
     for r in records[1:]:
         ev = r["evidence"]
-        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "pooled_adults", "pooled_ft", "streak", "promote_refused"}
+        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "pooled_adults", "pooled_ft", "streak",
+                           "promote_refused", "policy_cap", "refit_cap", "cap_differs", "cand_age"}
         assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
     hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
     assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)
@@ -407,3 +415,72 @@ def test_pooled_test(window, passes):
 
 def test_pooled_test_counts_adults_and_false_teens():
     assert lp.pooled_test([(27, 3), (30, 6)], 0.15)[:2] == (57, 9)
+
+
+# ---- A2 inside the round (step 15) ----
+def a2_says(action, cap):
+    block = {"status": "LIVE", "fallback_reason": None,
+             "output": {"action": action, "cap": cap, "reason": "test", "cites": ["audit"]}}
+    return lambda ctx, blocks: {"a2": block}
+
+
+def test_the_diff_agrees_with_the_rule_decision_after_a_refused_promote(split, tmp_path, monkeypatch):
+    # round 2 would promote but its refit is flagged, so it becomes a re-tune; A2 (not applied) said re-tune too
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 3, flags=[(), ("insufficient_adults",)],
+                              decide=a2_says("re-tune", 0.15))
+    rec = rounds.attrs["records"][1]
+    assert rec["rule_decision"]["action"] == lp.RETUNE and rec["evidence"]["promote_refused"] is True
+    assert rec["diff"] == {} and rounds.loc[1, "diff_count"] == 0
+
+
+def test_a_promote_refits_at_the_cap_the_evidence_candidate_was_refit_at(split, tmp_path, monkeypatch):
+    caps = []
+
+    def decide(ctx, blocks):  # re-tune at 0.10 while the rule's gate is filling, then ask to promote at 0.25
+        if ctx.guards["promote_allowed"]:
+            return a2_says("promote", 0.25)(ctx, blocks)
+        return a2_says("re-tune", 0.10)(ctx, blocks)
+
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 2, decide=decide, apply_a2=True, caps=caps)
+    ev = [r["evidence"] for r in rounds.attrs["records"]]
+    assert rounds["action"].tolist() == [lp.RETUNE, lp.PROMOTE] and caps == [0.10, 0.10]
+    assert ev[1]["refit_cap"] == 0.10 and ev[1]["cap_differs"] is True and ev[1]["policy_cap"] == 0.15
+    assert rounds.attrs["records"][1]["a2"]["output"]["cap"] == 0.25  # A2's own ask is still logged
+    assert st.mode == lp.ACTIVE and st.candidate_cap == 0.10
+
+
+def test_a_promote_with_no_recorded_candidate_cap_uses_the_policy_cap(split, tmp_path, monkeypatch):
+    caps = []  # the helper puts a candidate in place without a refit, so no cap was recorded for it
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 2, caps=caps)
+    assert rounds["action"].tolist() == [lp.RETUNE, lp.PROMOTE] and caps == [0.15, 0.15]
+
+
+def test_no_context_is_built_without_a_decider(split, tmp_path, monkeypatch):
+    monkeypatch.setattr(lp, "_context", lambda *a, **kw: pytest.fail("a rule-only round must not build A2's context"))
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 1)
+    assert rounds["applied_source"].tolist() == ["rule"]
+
+
+def test_a_failing_context_is_logged_and_the_rule_decides(split, tmp_path, monkeypatch):
+    def boom(*a, **kw):
+        raise ValueError("bad field")
+
+    monkeypatch.setattr(lp, "_context", boom)
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 1, decide=a2_says("hold", 0.15), apply_a2=True)
+    rec = rounds.attrs["records"][0]
+    assert rec["agent_error"].startswith("A2 ValueError: bad field") and rec["applied"]["source"] == "rule"
+    assert rec["a2"]["status"] is None and rounds.loc[0, "diff_count"] == 0
+
+
+@pytest.mark.parametrize("mode", ["rule", "crew"])
+def test_a_stale_header_fails_before_any_round_runs(tmp_path, monkeypatch, mode):
+    old = tmp_path / "rounds.csv"
+    old.write_text(",".join(c for c in ROUNDS_COLS if c != "diff_count") + "\n")
+    monkeypatch.setattr(lp, "ROUNDS_CSV", old)
+    monkeypatch.setattr(lp, "load_data", lambda **kw: pytest.fail("the data must not load before the header check"))
+    monkeypatch.setattr("sys.argv", ["loop", "--mode", mode])
+    with pytest.raises(ValueError, match="older schema"):
+        lp.main()
+    monkeypatch.setattr("sys.argv", ["loop", "--mode", mode, "--no-write"])
+    with pytest.raises(pytest.fail.Exception, match="must not load"):  # --no-write skips the check and goes on to run
+        lp.main()

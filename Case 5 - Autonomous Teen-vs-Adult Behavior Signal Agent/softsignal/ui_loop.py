@@ -43,7 +43,7 @@ BADGE_COLOR = {"LIVE": "green", "FALLBACK": "orange", "REPLAY": "gray", "PLACEHO
 REFRESH_S = 1  # the tab re-reads the files this often (UI handover section 5)
 NUMERIC = [c for c in ROUNDS_COLS if c not in ("run", "mode", "action", "applied_source")]
 BLANK_OK = {"t_soft", "audit_ft", "psi", "refit_s"}
-INTS = {"round", "n_flagged", "n_verify", "n_labels", "n_audit_adults"}
+INTS = {"round", "diff_count", "n_flagged", "n_verify", "n_labels", "n_audit_adults"}
 RATES = {"cap", "audit_ft", "prec", "rec", "ft", "mt", "auc"}
 DIFF_ROWS = ("blend_w", "cutoff", "cap", "action")
 LAST_ROUND = 7
@@ -88,7 +88,10 @@ def load_rounds(path: Path, warnings: list) -> pd.DataFrame:
         raise ValueError(f"{path.name} is not a readable CSV: {e}") from e
     missing = [c for c in ROUNDS_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"{path.name} is missing columns {missing}")
+        hint = ""
+        if "diff_count" in missing:
+            hint = " It is from an older schema: regenerate it (move it aside and run the loop again)."
+        raise ValueError(f"{path.name} is missing columns {missing}.{hint}")
     df = df[ROUNDS_COLS].apply(lambda s: s.str.strip())
     for col in ("run", "mode", "action", "applied_source"):
         if (df[col] == "").any():
