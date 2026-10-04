@@ -1,10 +1,11 @@
 """Results tab (step 12): ladder table and tiles, the cap slider, the policy panel (tiles, ranked list,
-account detail card), CI note, footer.
+account detail card), the Tier 3 crew panel (step 18), CI note, footer.
 
 Every number comes from a results file. The ladder reads eval.csv (or the placeholder). The policy panel
 reads ranked.csv, policy_grid.csv and contrib.csv (python -m softsignal.explain): the slider looks its
 thresholds up in policy_grid.csv and re-bands ranked.csv with explain.apply_bands, so a move needs no
-model, no cache and no label. The tab only reads files.
+model, no cache and no label. The Tier 3 panel reads eval_tier3.csv and tier3_latency.csv
+(python -m softsignal.tier3_report). The tab only reads files.
 """
 import math
 from dataclasses import dataclass
@@ -19,11 +20,18 @@ from softsignal.explain import ACTIONS, BANDS, FEATURE_NAMES, FRAME_COLS, SLIDER
 from softsignal.features import ID_COL
 from softsignal.metrics import CONTRIB_COLS, DEFAULT_CAP, EVAL_COLS, POLICY_GRID_COLS, RANKED_COLS
 from softsignal.policy import POLICY_FILE, SOFT_CAPPED, load_policy
+from softsignal.tier3_report import LATENCY_COLS, budget_line
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 EVAL_CSV = RESULTS / "eval.csv"
 PLACEHOLDER_CSV = RESULTS / "eval_placeholder.csv"
 NUMERIC_COLS = [c for c in EVAL_COLS if c not in ("stage", "eval_set")]
+TIER3_QUALITY_FILE, TIER3_LATENCY_FILE = "eval_tier3.csv", "tier3_latency.csv"
+LATENCY_TEXT_COLS = ("row", "runs", "note")
+NO_TIER3 = ("No Tier 3 rows yet. Run `python -m softsignal.tier3_report --make-rule` and then "
+            "`python -m softsignal.tier3_report` to write results/eval_tier3.csv.")
+NO_LATENCY = ("No latency table yet. `python -m softsignal.tier3_report --latency` writes results/tier3_latency.csv "
+              "from the per-call log of a live run.")
 POLICY_PATH = POLICY_FILE  # read once per rerun (tests point it elsewhere)
 RANKED_FILE, GRID_FILE, CONTRIB_FILE = "ranked.csv", "policy_grid.csv", "contrib.csv"
 N_SHOWN = 15
@@ -89,6 +97,87 @@ def headline_rows(ladder: pd.DataFrame, is_placeholder: bool) -> pd.DataFrame:
 
 def _pct(x) -> str:
     return "n/a" if pd.isna(x) else f"{x:.1%}"
+
+
+# --- Tier 3: crew against the rule loop (step 18) -----------------------------------------
+
+def load_tier3(results_dir: Path | None = None) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """(quality rows, latency table); each None while its file is not written. A bad file raises ValueError."""
+    results_dir = RESULTS if results_dir is None else results_dir
+    q_path, l_path = results_dir / TIER3_QUALITY_FILE, results_dir / TIER3_LATENCY_FILE
+    quality = _read(q_path, EVAL_COLS, NUMERIC_COLS) if q_path.exists() else None
+    latency = None
+    if l_path.exists():
+        latency = _read_blanks_ok(l_path, LATENCY_COLS, [c for c in LATENCY_COLS if c not in LATENCY_TEXT_COLS])
+        hit = latency[latency["row"] == "round_time"]
+        if len(hit) != 1 or hit[["n", "p50_ms", "p95_ms"]].isna().any(axis=None):
+            raise ValueError(f"{l_path.name} needs exactly one round_time row with n, p50_ms and p95_ms")
+    return quality, latency
+
+
+def _read_blanks_ok(path: Path, cols: list[str], numeric: list[str]) -> pd.DataFrame:
+    """Like _read, but a blank number stays blank (an agent with no LIVE call has no p95); text must still parse."""
+    try:
+        df = pd.read_csv(path, dtype={c: str for c in LATENCY_TEXT_COLS}, keep_default_na=False, na_values=[""])
+    except pd.errors.EmptyDataError as e:
+        raise ValueError(f"{path.name} is empty") from e
+    except pd.errors.ParserError as e:
+        raise ValueError(f"{path.name} is not a readable CSV: {e}") from e
+    except OSError as e:
+        raise ValueError(f"{path.name} cannot be read: {e.strerror or e}") from e
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{path.name} is missing columns {missing}")
+    df = df[cols].copy()
+    for col in numeric:
+        num = pd.to_numeric(df[col], errors="coerce")
+        if (df[col].notna() & num.isna()).any() or (num.notna() & ~np.isfinite(num.fillna(0))).any():
+            raise ValueError(f"{path.name}: column {col} must be numbers or blank")
+        df[col] = num
+    for col in ("runs", "note"):
+        df[col] = df[col].fillna("")
+    return df
+
+
+def _stage_row(quality: pd.DataFrame, prefix: str) -> pd.Series | None:
+    hit = quality[quality["stage"].str.startswith(prefix)]
+    return None if hit.empty else hit.iloc[0]
+
+
+def tier3_verdict(quality: pd.DataFrame) -> str | None:
+    """One plain sentence comparing the live crew run with the rule loop at the last round, computed from the rows.
+    None when either row is missing. It says lower, higher or equal on recall and never claims a win."""
+    rule, live = _stage_row(quality, "loop_rule_"), _stage_row(quality, "loop_crew_live_")
+    if rule is None or live is None:
+        return None
+    diff = live["rec"] - rule["rec"]
+    rel = "lower than" if diff < -1e-9 else "higher than" if diff > 1e-9 else "equal to"
+    return (f"At the last round the live crew run's recall is {_pct(live['rec'])} (false-teen {_pct(live['ft'])}), "
+            f"{rel} the rule loop's {_pct(rule['rec'])} (false-teen {_pct(rule['ft'])}). "
+            "One run of each, so this shows what happened once, not how often.")
+
+
+def render_tier3_panel() -> None:
+    st.subheader("Tier 3: agent crew against the rule loop")
+    try:
+        quality, latency = load_tier3()
+    except ValueError as e:
+        st.error(f"Cannot show the Tier 3 rows: {e}")
+        return
+    if quality is None:
+        st.info(NO_TIER3)
+    else:
+        st.dataframe(quality, hide_index=True, width="stretch")
+        verdict = tier3_verdict(quality)
+        if verdict is not None:
+            st.caption(verdict + " Rows are the final round on the frozen 900 test accounts (eval_tier3.csv).")
+    if latency is None:
+        st.info(NO_LATENCY)
+        return
+    st.dataframe(latency.drop(columns=["runs"]), hide_index=True, width="stretch")
+    st.caption(budget_line(latency) + ". LIVE model calls only; with fewer than 20 values p95 is the maximum. "
+               f"Measured on {' and '.join(sorted(set(' '.join(latency['runs']).split()))) or 'no run'} "
+               "(tier3_latency.csv).")
 
 
 # --- policy panel: files ------------------------------------------------------------------
@@ -399,6 +488,8 @@ def render_results_tab() -> None:
     st.altair_chart(cap_band + chart + cap_line, width="stretch")
 
     st.caption(CI_NOTE)
+    st.divider()
+    render_tier3_panel()
     st.divider()
     render_policy_panel(cap, files, files_error, (pol or {}).get("review_budget"))
     st.divider()
