@@ -209,7 +209,7 @@ def test_crew_cli_mode_sets_whether_a2_is_applied(split_and_tm, tmp_path, monkey
     monkeypatch.setattr(crew, "make_client", lambda: None)
     seen = {}
 
-    def spy(env, client, n_rounds, write, *paths, apply_a2):
+    def spy(env, client, n_rounds, write, *paths, apply_a2, **kw):
         seen["apply"] = apply_a2
         raise Stop
 

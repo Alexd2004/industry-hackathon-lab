@@ -178,10 +178,17 @@ def test_every_round_has_an_a5_block_checked_against_this_runs_rows(crew_run):
     tmp, rounds, records = crew_run
     for r in records:
         a5 = r["a5"]
-        assert valid_decision(r) and a5["status"] == FALLBACK and a5["fallback_reason"] == "script_only"  # no model
-        (claim,) = a5["output"]  # no A2 wired yet: the round's headline only
+        # R0 has no A2 decision: the round's headline only, so the script and no model call. From R1 A2's reason is a
+        # second claim (here A2's own templated fallback reason), so A5 is no longer script-only and, offline, falls back
+        claim, *a2_claims = a5["output"]
+        assert valid_decision(r) and a5["status"] == FALLBACK
+        assert a5["fallback_reason"] == ("script_only" if r["round"] == 0 else "offline")
         assert claim["claim"].startswith(f"Round {r['round']}:") and claim["verdict"] == "supported"
         assert claim["source"] == f"rounds.csv:R{r['round']}"
+        assert len(a2_claims) == (r["round"] > 0)
+        for a2_claim in a2_claims:  # checked against the round's decision record, which holds A2's own numbers
+            assert a2_claim["claim"].startswith("A2: ") and a2_claim["verdict"] == "supported"
+            assert a2_claim["source"] == f"decisions.jsonl:R{r['round']}"
     on_disk = [__import__("json").loads(x) for x in (tmp / "decisions.jsonl").read_text().splitlines()]
     # each round lands at once with A5 working (null), then again with A5 in it; the last line of a round wins
     assert [(d["round"], d["a5"] is None) for d in on_disk] == [(r, w) for r in range(N_ROUNDS + 1) for w in (True, False)]
