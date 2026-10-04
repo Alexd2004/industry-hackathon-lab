@@ -3,6 +3,8 @@
 Small tests use synthetic accounts and posts in tmp_path; the real-data tests cache to tmp_path
 too, never to the repo's cache/. Pinned numbers depend on results/split.json and the sklearn version.
 """
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -359,3 +361,156 @@ def test_main_explains_why_test_false_teen_can_exceed_the_cap(capsys, monkeypatc
     monkeypatch.setattr(stk, "auc", lambda *a: 0.9)
     stk.main()
     assert "test false-teen can land above it" in capsys.readouterr().out
+
+
+# --- cache key: a stale OOF cache must be detectable --------------------------------------
+
+def tm_key_of(posts, frame):
+    return tmod.cache_key(posts, frame[ID_COL], True)
+
+
+def test_cache_key_is_deterministic_and_a_sha256_hex(frame, posts):
+    key = tm_key_of(posts, frame)
+    a = stk.oof_cache_key(frame, tm_key=key)
+    assert a == stk.oof_cache_key(frame.copy(), tm_key=key)
+    assert len(a) == 64
+
+
+def test_cache_key_changes_with_label_feature_or_id(frame, posts):
+    key = tm_key_of(posts, frame)
+    base = stk.oof_cache_key(frame, tm_key=key)
+    flipped = frame.copy()
+    flipped.loc[0, TARGET] = 1 - flipped.loc[0, TARGET]
+    moved = frame.copy()
+    moved.loc[0, FEATURE_COLS[0]] += 1.0
+    renamed = frame.copy()
+    renamed.loc[0, ID_COL] = "B999"
+    for other in (flipped, moved, renamed):
+        assert stk.oof_cache_key(other, tm_key=key) != base
+
+
+def test_cache_key_ignores_columns_outside_the_allow_list(frame, posts):
+    key = tm_key_of(posts, frame)
+    other = frame.copy()
+    other["age"] = 99
+    assert stk.oof_cache_key(other, tm_key=key) == stk.oof_cache_key(frame, tm_key=key)
+
+
+def test_cache_key_changes_when_a_feature_column_is_renamed_consistently(frame, posts, monkeypatch):
+    key = tm_key_of(posts, frame)
+    base = stk.oof_cache_key(frame, tm_key=key)
+    renamed = frame.rename(columns={FEATURE_COLS[0]: "zz_renamed"})
+    monkeypatch.setattr(stk, "FEATURE_COLS", ["zz_renamed", *FEATURE_COLS[1:]])
+    assert stk.oof_cache_key(renamed, tm_key=key) != base  # same values, new name
+
+
+def test_cache_key_follows_the_text_matrix_key_not_the_default_posts(frame, posts, tmp_path):
+    base = stk.oof_cache_key(frame, tm_key=tm_key_of(posts, frame))
+    edited = tmp_path / "posts2.csv"
+    edited.write_text(posts.read_text() + "B000,9,extra post\n")
+    assert stk.oof_cache_key(frame, tm_key=tm_key_of(edited, frame)) != base
+    assert stk.oof_cache_key(frame, tm_key=tm_key_of(posts, frame.iloc[:-1])) != base  # other fit ids
+    assert stk.oof_cache_key(frame, tm_key=tmod.cache_key(posts, frame[ID_COL], False)) != base  # mask_digits
+
+
+def test_cache_key_default_matches_the_default_matrix_key(frame):
+    default = tmod.cache_key(tmod.POSTS, frame[ID_COL], True)
+    assert stk.oof_cache_key(frame) == stk.oof_cache_key(frame, tm_key=default)
+
+
+def test_cache_key_changes_with_mode_text_params_and_versions(frame, posts, monkeypatch):
+    key = tm_key_of(posts, frame)
+    base = stk.oof_cache_key(frame, tm_key=key)
+    assert stk.oof_cache_key(frame, use_text=False) != base
+    monkeypatch.setattr(tmod, "C", tmod.C + 1.0)
+    assert stk.oof_cache_key(frame, tm_key=key) != base
+    monkeypatch.undo()
+    monkeypatch.setattr(np, "__version__", "0.0.0")
+    assert stk.oof_cache_key(frame, tm_key=key) != base
+    monkeypatch.undo()
+    monkeypatch.setattr(stk.scipy, "__version__", "0.0.0")
+    assert stk.oof_cache_key(frame, tm_key=key) != base
+    monkeypatch.undo()
+    monkeypatch.setattr(stk.platform, "python_version", lambda: "0.0.0")
+    assert stk.oof_cache_key(frame, tm_key=key) != base
+
+
+def test_tabular_cache_key_does_not_depend_on_posts_or_text_params(frame, monkeypatch):
+    base = stk.oof_cache_key(frame, use_text=False)
+    monkeypatch.setattr(tmod, "C", tmod.C + 1.0)
+    assert stk.oof_cache_key(frame, use_text=False) == base
+    assert stk.oof_cache_key(frame, use_text=False, tm_key="anything") == base
+
+
+def altered(*args, **kwargs):  # a different body and signature from every function it replaces
+    return "altered"
+
+
+KEY_FUNCTIONS = [
+    (stk, "nested_oof"), (stk, "_fit_level2"), (stk, "stack_features"), (stk, "logit"),
+    (stk, "make_tabular_lr"), (stk, "cv_folds"), (stk, "check_vocabulary"), (stk, "oof_text_score"),
+    (stk, "fit_text_model"), (tmod, "score"), (tmod, "make_text_lr"), (tmod, "make_vectorizer"),
+    (tmod, "load_docs"), (tmod, "build_matrix"), (tmod.TextMatrix, "rows"),
+]
+
+
+@pytest.mark.parametrize("owner,name", KEY_FUNCTIONS, ids=[n for _, n in KEY_FUNCTIONS])
+def test_cache_key_changes_when_any_scoring_function_changes(frame, posts, monkeypatch, owner, name):
+    key = tm_key_of(posts, frame)
+    base = stk.oof_cache_key(frame, tm_key=key)
+    monkeypatch.setattr(owner, name, altered)
+    assert stk.oof_cache_key(frame, tm_key=key) != base
+
+
+def test_tabular_cache_key_changes_when_oof_scores_changes(frame, monkeypatch):
+    base = stk.oof_cache_key(frame, use_text=False)
+    monkeypatch.setattr(stk, "oof_scores", altered)
+    assert stk.oof_cache_key(frame, use_text=False) != base
+
+
+def test_every_key_function_has_a_test(frame):
+    # a function added to the key without a case in KEY_FUNCTIONS would go untested otherwise
+    assert len(stk._key_functions(True)) == len(KEY_FUNCTIONS)
+
+
+def test_stack_writes_the_meta_file_with_the_matrix_key(posts, small_params, frame, tmp_path):
+    train, test = frame.iloc[:40].reset_index(drop=True), frame.iloc[40:].reset_index(drop=True)
+    tm = tmod.build_matrix(train[ID_COL], posts_path=posts, cache_dir=None)
+    out = tmp_path / "stack_oof.csv"
+    stk.stack(train, test, tm=tm, oof_path=out)
+    meta = json.loads(stk.meta_path(out).read_text())
+    assert stk.meta_path(out).name == "stack_oof.meta.json"
+    assert meta["use_text"] is True and meta["n"] == len(train)
+    assert meta["csv_sha256"] == stk.csv_sha256(out)
+    assert meta["cache_key"] == stk.oof_cache_key(train, tm_key=tm.key)
+    # the matrix came from the synthetic posts, not the default file, and the key says so
+    assert meta["cache_key"] != stk.oof_cache_key(train)
+
+
+def test_stack_writes_nothing_by_default(posts, small_params, frame, monkeypatch):
+    train, test = frame.iloc[:40].reset_index(drop=True), frame.iloc[40:].reset_index(drop=True)
+    tm = tmod.build_matrix(train[ID_COL], posts_path=posts, cache_dir=None)
+    monkeypatch.setattr(stk, "write_oof", lambda *a, **k: pytest.fail("the default call wrote an OOF file"))
+    stk.stack(train, test, tm=tm)
+
+
+def test_write_oof_removes_the_old_meta_file_if_the_csv_write_fails(frame, tmp_path, monkeypatch):
+    out = tmp_path / "o.csv"
+    stk.write_oof(frame, np.zeros(len(frame)), out, use_text=False)
+    assert stk.meta_path(out).exists()
+
+    def boom(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", boom)
+    with pytest.raises(OSError):
+        stk.write_oof(frame, np.zeros(len(frame)), out, use_text=False)
+    assert not stk.meta_path(out).exists()  # no old meta file left to bless a half-written csv
+
+
+def test_csv_sha256_changes_with_one_byte(tmp_path):
+    p = tmp_path / "a.csv"
+    p.write_bytes(b"blogger_id,stack_oof\nB1,0.5\n")
+    a = stk.csv_sha256(p)
+    p.write_bytes(b"blogger_id,stack_oof\nB1,0.6\n")
+    assert stk.csv_sha256(p) != a and len(a) == 64

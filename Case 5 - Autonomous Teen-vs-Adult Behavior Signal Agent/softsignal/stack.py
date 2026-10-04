@@ -16,15 +16,22 @@ the tabular LR of step 6, with no text model and no TF-IDF cache needed.
 
 Run: python -m softsignal.stack
 """
+import hashlib
+import inspect
+import json
+import platform
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import scipy
+import sklearn
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
+import softsignal.text_model as tmod
 from softsignal.baselines import cap_label, make_tabular_lr, oof_scores
 from softsignal.data import ROOT, cv_folds, load_data
 from softsignal.features import FEATURE_COLS, ID_COL, TARGET
@@ -153,10 +160,74 @@ class Stack:
         return out
 
 
-def write_oof(train: pd.DataFrame, oof: np.ndarray, path: Path = STACK_OOF) -> None:
-    """cache/stack_oof.csv: blogger_id and stack_oof, in train order (labels stay in the data file)."""
+def _key_functions(use_text: bool) -> list:
+    """Every function whose code decides the OOF scores. Their source and signature (so default
+    arguments such as cv_folds' seed count too) go into the cache key."""
+    funcs = [nested_oof, _fit_level2, stack_features, logit, make_tabular_lr, cv_folds, check_vocabulary]
+    if use_text:
+        funcs += [oof_text_score, fit_text_model, tmod.score, tmod.make_text_lr, tmod.make_vectorizer,
+                  tmod.load_docs, tmod.build_matrix, TextMatrix.rows]
+    else:
+        funcs.append(oof_scores)
+    return funcs
+
+
+def oof_cache_key(train: pd.DataFrame, use_text: bool = True, tm_key: str | None = None) -> str:
+    """Hash of everything the nested OOF scores depend on, so a stale cache is detectable.
+
+    Covers the train rows (ids, label, the 16 columns and their names), the text matrix (tm_key, which
+    already covers the posts file, the vocabulary ids, the text settings and sklearn; None means the
+    default build_matrix(train ids) that policy.py would rebuild), the Python, numpy, scipy and sklearn versions,
+    and the source and signature of _key_functions. Any edit to those source texts, even a comment,
+    changes it: the cost of a false alarm is rerunning stack.py.
+    """
+    cols = [ID_COL, TARGET, *FEATURE_COLS]
+    data = train[cols].astype({ID_COL: str})
+    if use_text and tm_key is None:
+        tm_key = tmod.cache_key(tmod.POSTS, train[ID_COL], True)
+    payload = {
+        "columns": cols,
+        "data": hashlib.sha256(pd.util.hash_pandas_object(data, index=False).to_numpy().tobytes()).hexdigest(),
+        "use_text": use_text,
+        "text_matrix": tm_key if use_text else None,
+        "text_params": [tmod.VECTORIZER_PARAMS, tmod.C, tmod.DOCS_VERSION] if use_text else None,
+        "versions": {"python": platform.python_version(), "sklearn": sklearn.__version__, "numpy": np.__version__,
+                     "scipy": scipy.__version__},
+        "clip": CLIP,
+        "source": [inspect.getsource(f) + str(inspect.signature(f)) for f in _key_functions(use_text)],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def csv_sha256(path: Path) -> str:
+    """Hash of the OOF csv's bytes, kept in the meta file so an edited or swapped csv is detected."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def meta_path(path: Path) -> Path:
+    """Sidecar next to the OOF csv: cache/stack_oof.csv -> cache/stack_oof.meta.json."""
+    return path.with_suffix(".meta.json")
+
+
+def write_oof(
+    train: pd.DataFrame,
+    oof: np.ndarray,
+    path: Path = STACK_OOF,
+    use_text: bool = True,
+    tm_key: str | None = None,
+) -> None:
+    """cache/stack_oof.csv: blogger_id and stack_oof, in train order (labels stay in the data file).
+
+    Also writes the meta file (meta_path) with the cache key of the text matrix that scored it (tm_key).
+    The old sidecar is removed first and the new one written last, so a crash in between leaves a csv
+    with no sidecar, which policy.py rejects.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    meta = meta_path(path)
+    meta.unlink(missing_ok=True)
     pd.DataFrame({ID_COL: train[ID_COL].to_numpy(), "stack_oof": oof}).to_csv(path, index=False)
+    meta.write_text(json.dumps({"cache_key": oof_cache_key(train, use_text, tm_key), "use_text": use_text,
+                                "n": len(train), "csv_sha256": csv_sha256(path)}), encoding="utf-8")
 
 
 @dataclass
@@ -175,12 +246,14 @@ def stack(
     cap: float = DEFAULT_CAP,
     tm: TextMatrix | None = None,
     use_text: bool = True,
-    oof_path: Path | None = STACK_OOF,
+    oof_path: Path | None = None,
     train_ids=None,
 ) -> StackResult:
     """Ladder row 7: nested OOF on train, cutoff at the cap from that OOF, test scored once.
 
     train_ids: the whole train set when `train` is only part of it (see check_vocabulary).
+    oof_path: where to write the OOF cache and its meta file; None (the default) writes nothing, so a
+    partial-train call such as a loop refit can never overwrite the audit cache. main() passes STACK_OOF.
     """
     y_tr, y_te = train[TARGET].to_numpy(), test[TARGET].to_numpy()
     if use_text:
@@ -196,7 +269,7 @@ def stack(
     t = cap_threshold(oof, y_tr, cap)
     p_te = model.score(test)
     if oof_path is not None:
-        write_oof(train, oof, oof_path)
+        write_oof(train, oof, oof_path, use_text=use_text, tm_key=tm.key if use_text else None)
     stage = f"{'stack' if use_text else 'stack_tabular_only'}_cap{cap_label(cap)}"
     rows = [
         eval_row(stage, "cv_oof", y_tr, (oof >= t).astype(int), oof),
@@ -207,7 +280,7 @@ def stack(
 
 def main() -> None:
     train, test = load_data(on_param_mismatch="error")
-    res = stack(train, test)
+    res = stack(train, test, oof_path=STACK_OOF)
     pd.set_option("display.width", 120)
     print(pd.DataFrame(res.rows, columns=EVAL_COLS).round(3).to_string(index=False))
     print(f"\nOOF AUC (nested 5x5, train): {auc(train[TARGET], res.oof):.4f}")
