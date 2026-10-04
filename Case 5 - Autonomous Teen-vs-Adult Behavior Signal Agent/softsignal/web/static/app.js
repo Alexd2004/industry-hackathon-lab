@@ -102,12 +102,25 @@ function renderTop() {
     : S.job?.running ? "Starting run…" : "No run yet";
 }
 
+// ---------- empty states (no run selected yet) ----------
+function waitText() {
+  return S.job?.running ? "The run is starting: loading data and the text model…"
+    : "Waiting for a run. Start one from Training → Run loop, or pick a replay in the run picker.";
+}
+
 // ---------- dashboard ----------
 function renderDashboard() {
   const rs = rounds(), row = shownRound(), c = counts();
   if (!row) {
-    $("d-rec").textContent = "–";
-    $("d-chart").innerHTML = `<div class="error-box">No loop run in results/. Use Training → Run loop.</div>`;
+    $("d-rec").innerHTML = `–<small>%</small>`;
+    $("d-rec-of").textContent = `Of the ${c.teens} teens in the held-out test. Appears with round 0.`;
+    $("d-rec-delta").textContent = "";
+    $("d-ft").innerHTML = `–<small>%</small>`;
+    $("d-ft-of").textContent = `Of the ${c.adults} adults in the held-out test. Appears with round 0.`;
+    $("d-ft-cap").textContent = "";
+    $("d-chart-tag").textContent = "rounds.csv";
+    $("d-chart").replaceChildren(roundChart([], -1, capOf(null), S.job?.running ? "Starting the run…" : "Waiting for a run"));
+    $("d-chart-caption").textContent = `Held-out test (${c.n} accounts) after each round. A point is added as each round of the loop finishes. ${waitText()}`;
     return;
   }
   const r0 = rs[0], cap = capOf(row);
@@ -135,12 +148,12 @@ function renderCapPanel() {
   $("cap-slider").value = S.cap;
   document.querySelectorAll(".cap-pct").forEach((n) => (n.textContent = pct(capOf(shownRound()))));
   const g = gridRow(S.cap);
-  $("cap-readout").textContent = g
+  $("cap-readout").textContent = !run() ? "What the model catches at this cap shows once a run is selected." : g
     ? `At a ${S.cap}% cap the SoftSignal stack (fit on all 2,100 training accounts) catches ${pct(g.rec_flagged, 1)} of held-out teens and flags ${pct(g.ft_flagged, 1)} of adults. ${g.n_verify} accounts go to verification now.`
     : "No cap grid yet: run Rebuild models on the Results tab.";
 }
 
-function roundChart(rs, current, cap) {
+function roundChart(rs, current, cap, msg) {
   const W = 820, H = 560, L = 44, R = 120, T = 14, B = 42;
   const s = svg(W, H);
   const x = (i) => L + (i * (W - L - R)) / (N_ROUNDS - 1);
@@ -155,6 +168,7 @@ function roundChart(rs, current, cap) {
     const label = i === 0 ? "Round 0" : i === N_ROUNDS - 1 ? "Round 7" : String(i);
     text(s, x(i), H - B + 22, label, { "text-anchor": "middle", "font-size": 14.5, fill: i === current ? "#12151c" : "#6b7280", "font-weight": i === current ? 600 : 400 });
   }
+  if (msg) text(s, (L + W - R) / 2, y(0.6), msg, { "text-anchor": "middle", "font-size": 18, "font-weight": 600, fill: "#6b7280" });
   const upto = rs.filter((r) => r.round <= current);
   const series = [["rec", "#2742d6", "Teens caught"], ["ft", "#b85c1e", "Adults flagged"]];
   for (const [k, color, name] of series) {
@@ -171,7 +185,7 @@ function roundChart(rs, current, cap) {
 // ---------- training ----------
 function renderTraining() {
   const rs = rounds(), row = shownRound();
-  $("t-title").textContent = row ? `Round ${row.round}` : "No run";
+  $("t-title").textContent = row ? `Round ${row.round}` : "Round –";
   const last = rs.length ? rs[rs.length - 1].round : -1;
   $("t-pills").innerHTML = Array.from({ length: N_ROUNDS }, (_, i) =>
     `<button class="round-pill${row && row.round === i ? " active" : ""}" data-round="${i}" ${i > last ? "disabled" : ""}>${i}</button>`).join("");
@@ -180,7 +194,19 @@ function renderTraining() {
   $("pipeline-btn").disabled = busy;
   $("replay-btn").textContent = S.replay ? "Stop replay" : "Replay run";
   $("replay-btn").disabled = rs.length < 2;
-  if (!row) return;
+  if (!row) {
+    $("t-banner").innerHTML = `
+      <div class="banner-box banner-a2"><div class="banner-label">A2 Loop Controller proposed</div><div class="banner-value">Waiting for round 1</div></div>
+      <div class="banner-box banner-rule"><div class="banner-label">Plain rule would do</div><div class="banner-value">–</div></div>
+      <div class="banner-gate"><span class="gate-chip">Code gate</span><span class="gate-text">${esc(waitText())}</span></div>`;
+    $("t-weights").innerHTML = `<p class="placeholder">The live model's signal weights appear with round 0.</p>` +
+      Array.from({ length: 6 }, () => `<div class="weight"><div class="weight-top"><span class="placeholder">–</span><span class="pct placeholder">–</span><span class="chg"></span></div><div class="bar"></div></div>`).join("");
+    $("t-weights-note").textContent = "";
+    renderLoop(null);
+    renderAgent(null);
+    $("t-table").querySelector("tbody").innerHTML = `<tr><td colspan="4" class="placeholder">Rounds appear here as they finish.</td></tr>`;
+    return;
+  }
   renderBanner(row);
   renderWeights(rs, row);
   renderLoop(row);
@@ -262,6 +288,7 @@ const NODES = [
 const DOT = { LIVE: "#1f8a4c", REPLAY: "#5b6b9a", FALLBACK: "#c98a12", passed: "#1f8a4c", blocked: "#b85c1e", fallback: "#c98a12", starter: "#9aa1ad", rule: "#9aa1ad" };
 
 function nodeState(key, row) {
+  if (!row) return { status: null, sub: "waiting" };
   if (key === "gate") { const g = gateOf(row); return { status: g.key, sub: g.short }; }
   if (key === "model") {
     const sub = { hold: "held", "re-tune": "refit", promote: "promoted", starter: "starter" }[row.action] || row.action;
@@ -285,8 +312,8 @@ function renderLoop(row) {
     const [x1, y1] = at(mid - 1), [x2, y2] = at(mid + 1);
     el("line", { x1, y1, x2, y2, stroke: "#2742d6", "stroke-width": 2, "marker-end": "url(#arr)" }, s);
   });
-  text(s, cx, cy - 4, `Round ${row.round}`, { "text-anchor": "middle", "font-size": 32, "font-weight": 600, fill: "#12151c" });
-  text(s, cx, cy + 20, `${pct(row.rec)} caught, ${pct(row.ft, 1)} flagged`, { "text-anchor": "middle", "font-size": 12.5, fill: "#3b4250" });
+  text(s, cx, cy - 4, row ? `Round ${row.round}` : "Round –", { "text-anchor": "middle", "font-size": 32, "font-weight": 600, fill: row ? "#12151c" : "#9aa1ad" });
+  text(s, cx, cy + 20, row ? `${pct(row.rec)} caught, ${pct(row.ft, 1)} flagged` : "Waiting for a run", { "text-anchor": "middle", "font-size": 12.5, fill: "#3b4250" });
   for (const n of NODES) {
     const st = nodeState(n.key, row);
     const [x, y] = at(n.deg);
@@ -346,6 +373,11 @@ function agentSummary(key, row) {
 
 function renderAgent(row) {
   const n = NODES.find((x) => x.key === S.node) || NODES[NODES.length - 1];
+  if (!row) {
+    $("t-agent").innerHTML = `<div class="agent-badge">${esc(n.tag.slice(0, 5))}</div>
+      <div><div class="agent-title">${esc(n.name)}</div><div class="agent-text">Waiting for a run. This step's output shows here when its round lands. Click any step in the loop to follow it.</div></div>`;
+    return;
+  }
   const b = row.agents?.[n.key];
   const kind = n.key.startsWith("a") ? (b?.status === "LIVE" || b?.status === "REPLAY" ? "LLM" : b?.status || "") : "code";
   $("t-agent").innerHTML = `<div class="agent-badge">${esc(n.tag.slice(0, 5))}</div>
@@ -364,11 +396,9 @@ function renderTestTable(rs, row) {
 // ---------- results ----------
 function renderResults() {
   const rs = rounds(), row = shownRound();
-  if (row) {
-    renderPeople(row);
-    renderBeforeAfter(rs[0], row);
-  }
-  renderHeat();
+  renderPeople(row);
+  renderBeforeAfter(rs[0], row);
+  renderHeat(!row);
   renderList();
   renderLadder();
   renderLatency();
@@ -381,11 +411,13 @@ function personPath(x, y, s) { // head and shoulders in an s-by-s box
 function renderPeople(row) {
   const c = counts(), cap = capOf(row);
   const teens = Math.round((100 * c.teens) / c.n), adults = 100 - teens;
-  const caught = Math.round(row.rec * teens), flagged = Math.round(row.ft * adults);
-  const groups = [[caught, "#2742d6", "teens caught"], [teens - caught, "#9fb0f0", "teens missed"],
-    [flagged, "#b85c1e", "adults wrongly flagged"], [adults - flagged, "#c9ced8", "adults left alone"]];
-  $("r-people-sub").textContent = `${teens} teens and ${adults} adults, at the ${pct(cap)} cap after round ${row.round}.`;
-  $("r-people-tag").textContent = run().source === "rule" ? "rounds_rule.csv" : run().source === "live" ? "rounds.csv" : "rounds_recorded.csv";
+  const caught = row ? Math.round(row.rec * teens) : 0, flagged = row ? Math.round(row.ft * adults) : 0;
+  const groups = row
+    ? [[caught, "#2742d6", "teens caught"], [teens - caught, "#9fb0f0", "teens missed"],
+      [flagged, "#b85c1e", "adults wrongly flagged"], [adults - flagged, "#c9ced8", "adults left alone"]]
+    : [[100, "#e6e9ef", ""]];
+  $("r-people-sub").textContent = row ? `${teens} teens and ${adults} adults, at the ${pct(cap)} cap after round ${row.round}.` : waitText();
+  $("r-people-tag").textContent = !row ? "rounds.csv" : run().source === "rule" ? "rounds_rule.csv" : run().source === "live" ? "rounds.csv" : "rounds_recorded.csv";
   const cols = 20, size = 13, gap = 5;
   const s = svg(cols * (size + gap), 5 * (size + gap));
   let i = 0;
@@ -396,14 +428,15 @@ function renderPeople(row) {
     }
   }
   $("r-people").replaceChildren(s);
-  $("r-people-stats").innerHTML = groups.map(([n, color, label]) =>
+  const stats = row ? groups : [["–", "#e6e9ef", "teens caught"], ["–", "#e6e9ef", "teens missed"], ["–", "#e6e9ef", "adults wrongly flagged"], ["–", "#e6e9ef", "adults left alone"]];
+  $("r-people-stats").innerHTML = stats.map(([n, color, label]) =>
     `<div class="pstat"><i style="background:${color}"></i><b>${n}</b><span>${esc(label)}</span></div>`).join("");
 }
 
-function renderHeat() {
+function renderHeat(waiting) {
   const h = S.stat?.heatmap;
   if (!h || !h.teen) { $("r-heat").innerHTML = `<p class="muted">No hourly sample in data/.</p>`; return; }
-  const max = Math.max(...[...h.teen, ...h.adult].flat().filter(isNum), 0.01);
+  const max = waiting ? Infinity : Math.max(...[...h.teen, ...h.adult].flat().filter(isNum), 0.01); // empty grid until a run
   const block = (grid, rgb, label, axis) => {
     const L = 34, cw = 12, ch = 10, W = L + 24 * cw, H = 7 * ch + (axis ? 18 : 2);
     const s = svg(W, H);
@@ -420,11 +453,21 @@ function renderHeat() {
     return `<div class="heat"><div class="heat-label" style="color:rgb(${rgb})">${esc(label)}</div>${s.outerHTML}</div>`;
   };
   $("r-heat").innerHTML = block(h.teen, "39,66,214", "Teens, 13 to 17", false) + block(h.adult, "184,92,30", "Adults, 23 and over", true) +
-    `<p class="caption">Mean sessions per hour, ${h.n_users.teen} teens and ${h.n_users.adult} adults in the hourly sample.</p>`;
+    `<p class="caption">${waiting ? "Fills in with the first run: when teens and adults are active, from the hourly sample."
+      : `Mean sessions per hour, ${h.n_users.teen} teens and ${h.n_users.adult} adults in the hourly sample.`}</p>`;
 }
 
 function renderBeforeAfter(r0, row) {
   const cap = capOf(row);
+  if (!row) {
+    $("r-ba-sub").textContent = "Round 0 against the latest round, both at the loop's cap.";
+    $("r-ba-tag").textContent = "rounds.csv";
+    const empty = (label) => `<div class="ba-bar"><span>${label}</span><div class="bar"></div></div>`;
+    const block = (title) => `<div class="ba-block"><div class="ba-title">${title}</div>
+      <div class="ba-nums"><span class="placeholder">–%</span><span class="arrow">→</span><span class="placeholder">–%</span></div>${empty("Round 0")}${empty("Latest")}</div>`;
+    $("r-ba").innerHTML = block("Teens caught") + block("Adults wrongly flagged") + `<p class="caption">${esc(waitText())}</p>`;
+    return;
+  }
   $("r-ba-sub").textContent = `Round 0 to round ${row.round}, both at the ${pct(cap)} cap.`;
   $("r-ba-tag").textContent = $("r-people-tag").textContent;
   const dRec = Math.round((row.rec - r0.rec) * 100), dFt = Math.round((r0.ft - row.ft) * 1000) / 10;
@@ -463,6 +506,14 @@ function why(r) {
 
 function renderList() {
   const r = run(), got = runList();
+  if (!r) {
+    $("r-filters").innerHTML = "";
+    $("r-list-note").textContent = "";
+    $("r-reviewed").textContent = `Reviewer · ${Object.keys(S.reviews).length} reviewed`;
+    $("r-more").hidden = true;
+    $("r-list").querySelector("tbody").innerHTML = `<tr><td colspan="6" class="placeholder">The likely-teen list appears when a run finishes, scored by the run's final model.</td></tr>`;
+    return;
+  }
   const rows = got?.rows || [];
   const n = { all: rows.length, verify: 0, soft: 0, none: 0 };
   rows.forEach((x) => n[x.band]++);
@@ -496,6 +547,7 @@ function renderList() {
 
 function renderLadder() {
   const body = $("r-ladder").querySelector("tbody");
+  if (!run()) { body.innerHTML = `<tr><td colspan="7" class="placeholder">The ladder appears with a run: its final round sits on top of the reference rows.</td></tr>`; return; }
   if (!S.ladder) return;
   const cap = S.stat?.policy?.cap_false_teen ?? 0.15;
   const rs = rounds(), last = rs[rs.length - 1];
@@ -508,6 +560,7 @@ function renderLadder() {
 }
 
 function renderLatency() {
+  if (!run()) { $("r-latency").querySelector("tbody").innerHTML = `<tr><td colspan="7" class="placeholder">Measured agent times appear after a run.</td></tr>`; return; }
   const rows = S.stat?.latency || [];
   const ms = (v) => (isNum(v) ? (v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`) : "–");
   $("r-latency").querySelector("tbody").innerHTML = rows.length ? rows.map((r) =>
@@ -530,27 +583,8 @@ function renderToast() {
 }
 
 // ---------- render all ----------
-function renderEmpty() {
-  const none = !run();
-  $("empty").hidden = !none;
-  document.querySelectorAll(".view").forEach((v) => { if (none) v.classList.remove("active"); });
-  if (!none) return;
-  const busy = !!S.job?.running;
-  $("empty-title").textContent = busy ? "Starting the run…" : "No run yet";
-  document.querySelectorAll("[data-start]").forEach((b) => (b.disabled = busy));
-  const replays = S.runs.filter((r) => r.source !== "live");
-  const lives = S.runs.filter((r) => r.source === "live");
-  $("empty-replays").innerHTML = replays.length || lives.length
-    ? `<span class="muted">Offline backup: replay a committed run, or open an earlier run.</span>` +
-      replays.map((r) => `<button class="btn btn-ghost" data-replay="${esc(r.id)}">${esc(r.label.replace("Replay: ", "Replay "))}</button>`).join("") +
-      (lives.length ? `<span class="muted">${lives.length} earlier run${lives.length > 1 ? "s" : ""} in the header's run picker.</span>` : "")
-    : "";
-}
-
 function render() {
   renderTop();
-  renderEmpty();
-  if (!run()) { renderToast(); return; }
   if (S.view === "dashboard") renderDashboard();
   if (S.view === "training") renderTraining();
   if (S.view === "results") { renderResults(); loadList(); }
@@ -640,11 +674,7 @@ function wire() {
   window.addEventListener("hashchange", () => setView(location.hash.slice(1)));
   $("run-select").addEventListener("change", (e) => selectRun(e.target.value || null));
   $("cap-slider").addEventListener("input", (e) => { S.cap = Number(e.target.value); render(); });
-  $("empty").addEventListener("click", (e) => {
-    const s_ = e.target.closest("[data-start]"), r = e.target.closest("[data-replay]");
-    if (s_) { setView("training"); startJob("run", s_.dataset.start); }
-    if (r) { setView("training"); selectRun(r.dataset.replay); }
-  });
+
   $("cap-default").addEventListener("click", () => { S.cap = Math.round((S.stat?.policy?.cap_false_teen ?? 0.15) * 100); render(); });
   $("t-pills").addEventListener("click", (e) => { const b = e.target.closest("[data-round]"); if (b && !b.disabled) { stopReplay(); S.round = Number(b.dataset.round); render(); } });
   $("t-table").addEventListener("click", (e) => { const tr = e.target.closest("[data-round]"); if (tr) { stopReplay(); S.round = Number(tr.dataset.round); render(); } });

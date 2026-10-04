@@ -28,19 +28,6 @@
   </header>
 
   <main>
-    <!-- No run selected: the page fills only once a loop runs (or a recorded run is replayed) -->
-    <section class="empty" id="empty" hidden>
-      <div class="card empty-card">
-        <h1 id="empty-title">No run yet</h1>
-        <p class="sub" id="empty-text">Start a loop. Rounds land here one by one: Training shows each agent's step as it happens,
-          and Dashboard and Results fill in as the rounds finish. The likely-teen list is scored by the run's final model.</p>
-        <div class="empty-actions">
-          <button class="btn btn-primary" data-start="crew">Run crew loop</button>
-          <button class="btn btn-ghost" data-start="rule">Run rule-only loop</button>
-        </div>
-        <div class="empty-replays" id="empty-replays"></div>
-      </div>
-    </section>
     <!-- Dashboard -->
     <section class="view" id="view-dashboard">
       <div class="grid-dash">
