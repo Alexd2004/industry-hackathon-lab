@@ -335,6 +335,13 @@ def main() -> None:
             rounds = next(r for r in all_rounds if (r["run"] == canon).all())
             records = [r for rs in all_records for r in rs if r["run"] == canon]
             print(f"canonical run: {canon} (fewest unexpected FALLBACKs, ties to the earliest; metrics not used)")
+        from softsignal.recorded_check import scan_recorded  # lazy: recorded_check imports this module
+
+        problems = scan_recorded(*paths)  # the repo is public: nothing is swapped in if the new run is not clean
+        if problems:
+            for p in paths:
+                p.unlink(missing_ok=True)
+            raise SystemExit("recording not saved, safety scan found:\n  " + "\n  ".join(problems))
         for new, old in zip(paths, recorded):
             os.replace(new, old)
         paths = recorded
