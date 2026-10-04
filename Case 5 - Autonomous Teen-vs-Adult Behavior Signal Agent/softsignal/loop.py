@@ -221,12 +221,23 @@ def _decision_block(rule_dec: dict, live: Rule) -> dict:
     return {"cutoff": float(live.th.t_verify), "cap": rule_dec["cap"], "action": rule_dec["action"]}
 
 
+def _unsafe(rule: Rule) -> bool:
+    """True when the rule's thresholds carry an INSUFFICIENT_* flag (the prior's cutoffs were kept)."""
+    return any(f in UNSAFE_FLAGS for f in rule.th.flags)
+
+
+def _ends_with_newline(text: str) -> str:
+    """text, plus a final newline when it has content without one, so an appended line starts on its own."""
+    return text if not text or text.endswith("\n") else text + "\n"
+
+
 def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict | None = None) -> dict:
     """decisions.jsonl line. Agents are not built yet, so every agent block is empty.
 
     evidence (rounds 1+) is why the promote rule did or did not fire: round_audit_adults, cand_ft and
-    cand_t_verify (the previous candidate, scored on this round's audit slice), streak (after this
-    round) and promote_refused (the new candidate carried an INSUFFICIENT_* flag).
+    cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
+    candidate carried an INSUFFICIENT_* flag, so the round cannot count toward the streak), streak
+    (after this round) and promote_refused (the new candidate carried an INSUFFICIENT_* flag).
     """
     rec = {"run": run, "round": rnd}
     rec.update({k: {"status": None, "output": None, "fallback_reason": None} for k in AGENT_KEYS})
@@ -317,10 +328,12 @@ def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
     round_adults = int((y_audit == 0).sum())
     evidence = {"round_audit_adults": round_adults, "cand_ft": cand_ft, "streak": state.streak,
                 "cand_t_verify": None if state.candidate is None else float(state.candidate.th.t_verify),
-                "promote_refused": False}
+                "cand_unsafe": state.candidate is not None and _unsafe(state.candidate), "promote_refused": False}
     if state.mode == SHADOW:
         enough = round_adults >= PROMOTE_MIN_ADULTS
-        ok = enough and cand_ft is not None and cand_ft <= clamp_cap(env.policy["cap_false_teen"]) + PROMOTE_SLACK
+        # a candidate with INSUFFICIENT_* flags holds the prior's cutoffs, which may be on another scale
+        ok = (enough and cand_ft is not None and not evidence["cand_unsafe"]
+              and cand_ft <= clamp_cap(env.policy["cap_false_teen"]) + PROMOTE_SLACK)
         state.streak = state.streak + 1 if ok else 0
         evidence["streak"] = state.streak
     rule_dec = rule_decision(state, env.policy, oracle.audit_counts()["adults"])
@@ -333,7 +346,7 @@ def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
             state.candidate = refit(env, state, rule_dec["cap"])
         refit_s = time.perf_counter() - t0
         if rule_dec["action"] == PROMOTE:
-            if any(f in UNSAFE_FLAGS for f in state.candidate.th.flags):
+            if _unsafe(state.candidate):
                 rule_dec = {**rule_dec, "action": RETUNE}  # refused: try again next round
                 evidence["promote_refused"] = True
             else:
@@ -372,14 +385,14 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
     without it. Nothing checks for a run id that is already present, so a repeated run id appends twice.
     """
     rounds_path.parent.mkdir(parents=True, exist_ok=True)
-    old_rounds = rounds_path.read_text(encoding="utf-8") if rounds_path.exists() else ""
+    old_rounds = _ends_with_newline(rounds_path.read_text(encoding="utf-8") if rounds_path.exists() else "")
     if old_rounds.strip():
         header = old_rounds.splitlines()[0].split(",")
         if header != list(rounds.columns):
             raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}")
     buf = io.StringIO()
     rounds.to_csv(buf, header=not old_rounds.strip(), index=False, lineterminator="\n")
-    old_dec = decisions_path.read_text(encoding="utf-8") if decisions_path.exists() else ""
+    old_dec = _ends_with_newline(decisions_path.read_text(encoding="utf-8") if decisions_path.exists() else "")
     new_dec = "".join(json.dumps(r) + "\n" for r in records)
     tmps = []
     try:

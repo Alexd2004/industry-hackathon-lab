@@ -256,14 +256,15 @@ def split():
     return train, test, build_matrix(tuple(train[ID_COL].astype(str)))
 
 
-def run_rounds(split, tmp_path, monkeypatch, n, flags=()):
+def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=()):
     """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place."""
     train, test, tm = split
-    monkeypatch.setattr(lp, "refit", lambda env, st, cap: candidate(flags))
+    seq = list(flags) if isinstance(flags, list) else [flags]  # a list gives each refit its own flags, the last repeats
+    monkeypatch.setattr(lp, "refit", lambda env, st, cap: candidate(seq.pop(0) if len(seq) > 1 else seq[0]))
     env = lp.make_env(train, test, policy={**POL, "min_audit_adults": 1}, tm=tm,
                       timer=AgentTimer(tmp_path / "calls.jsonl", run="t"))
     st = lp.new_state(env.policy)
-    st.candidate = candidate()
+    st.candidate = candidate(start_flags)
     results = [lp.run_round(st, b, env) for _, b in zip(range(n), env.oracle)]
     rounds = pd.DataFrame([r.row for r in results])
     rounds.attrs["records"] = [r.record for r in results]
@@ -280,9 +281,13 @@ def test_two_good_rounds_promote_and_the_candidate_goes_live(split, tmp_path, mo
 
 
 def test_promote_is_refused_for_a_candidate_with_insufficient_flags(split, tmp_path, monkeypatch):
-    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 3, flags=("insufficient_adults",))
+    # round 1 builds the streak and refits a clean candidate, round 2 would promote but its refit is flagged
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 3, flags=[(), ("insufficient_adults",)])
     assert rounds["action"].tolist() == [lp.RETUNE] * 3
     assert (rounds["mode"] == lp.SHADOW).all() and st.live.model is None
+    ev = [r["evidence"] for r in rounds.attrs["records"]]
+    assert [e["promote_refused"] for e in ev] == [False, True, False]
+    assert [e["streak"] for e in ev] == [1, 2, 0]  # round 3 cannot count: its evidence candidate is the flagged one
 
 
 def test_a_soft_capped_candidate_can_still_promote(split, tmp_path, monkeypatch):
@@ -325,7 +330,7 @@ def test_records_carry_the_promote_evidence_and_no_test_metrics(full):
     assert "evidence" not in records[0] and all(valid_decision(r) for r in records)
     for r in records[1:]:
         ev = r["evidence"]
-        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "streak", "promote_refused"}
+        assert set(ev) == {"round_audit_adults", "cand_ft", "cand_t_verify", "cand_unsafe", "streak", "promote_refused"}
         assert ev["round_audit_adults"] > 0 and ev["streak"] >= 0 and ev["promote_refused"] is False
     hold = [r["evidence"] for r in records[1:] if r["rule_decision"]["action"] == lp.HOLD]
     assert hold and all(e["cand_ft"] is None and e["cand_t_verify"] is None and e["streak"] == 0 for e in hold)
@@ -336,8 +341,8 @@ def test_evidence_shows_the_streak_building_and_a_refused_promote(split, tmp_pat
     ev = [r["evidence"] for r in rounds.attrs["records"]]
     assert [e["streak"] for e in ev] == [1, 2, 2] and all(e["cand_ft"] == 0.0 for e in ev)
     assert ev[0]["cand_t_verify"] == 0.9 and not any(e["promote_refused"] for e in ev)
-    rounds, _, _ = run_rounds(split, tmp_path / "x", monkeypatch, 3, flags=("insufficient_teens",))
-    assert [e["promote_refused"] for e in (r["evidence"] for r in rounds.attrs["records"])] == [False, True, True]
+    rounds, _, _ = run_rounds(split, tmp_path / "x", monkeypatch, 3, flags=[(), ("insufficient_teens",)])
+    assert [e["promote_refused"] for e in (r["evidence"] for r in rounds.attrs["records"])] == [False, True, False]
 
 
 def test_a_failure_after_the_reveal_restores_the_state(split, tmp_path, monkeypatch):
@@ -354,3 +359,23 @@ def test_a_failure_after_the_reveal_restores_the_state(split, tmp_path, monkeypa
     after = {f.name: getattr(st, f.name) for f in dataclasses.fields(st)}
     assert after.keys() == before.keys() and len(st.seen) == seen_rows
     assert all(after[k] is before[k] for k in before)  # same objects: streak 1, candidate, live_scores, ...
+
+
+def test_a_candidate_with_insufficient_flags_does_not_build_the_streak(split, tmp_path, monkeypatch):
+    rounds, _, _ = run_rounds(split, tmp_path, monkeypatch, 3, start_flags=("insufficient_adults",))
+    ev = [r["evidence"] for r in rounds.attrs["records"]]
+    assert [e["cand_unsafe"] for e in ev] == [True, False, False]
+    assert [e["streak"] for e in ev] == [0, 1, 2]  # the first round is lost, then it builds as usual
+    assert rounds["mode"].tolist() == [lp.SHADOW, lp.SHADOW, lp.ACTIVE]
+
+
+def test_write_run_starts_the_new_rows_on_their_own_line(tmp_path):
+    rounds = pd.DataFrame([{c: 0 for c in ROUNDS_COLS}])
+    recs = [lp.make_record("r", 0, {"cutoff": 0.5, "cap": 0.15, "action": "starter"}, "starter")]
+    r_path, d_path = tmp_path / "rounds.csv", tmp_path / "decisions.jsonl"
+    lp.write_run(rounds, recs, r_path, d_path)
+    r_path.write_text(r_path.read_text().strip(), encoding="utf-8")  # no final newline, as if edited by hand
+    d_path.write_text(d_path.read_text().strip(), encoding="utf-8")
+    lp.write_run(rounds, recs, r_path, d_path)
+    assert len(pd.read_csv(r_path)) == 2
+    assert [json.loads(x)["round"] for x in d_path.read_text().splitlines()] == [0, 0]
