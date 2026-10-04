@@ -130,6 +130,7 @@ class AgentTimer:
         self.run = run or _new_run_id()
         self.round: int | None = None  # caller sets this at the start of each round
         self.write_errors = 0  # log writes that failed; timing never breaks the agent
+        self.records: list[dict] = []  # this timer's own records, so a round roll-up never re-reads the log
         self._lock = threading.Lock()
 
     @contextmanager
@@ -205,6 +206,7 @@ class AgentTimer:
             self._write_failed(f"could not encode record: {exc}")
             return
         with self._lock:
+            self.records.append(record)
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("a", encoding="utf-8") as f:

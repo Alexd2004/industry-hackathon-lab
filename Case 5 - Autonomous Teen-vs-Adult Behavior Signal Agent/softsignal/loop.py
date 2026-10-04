@@ -29,16 +29,21 @@ every revealed row instead: the verify band is the top-scored accounts, so adult
 ones and the picked cutoff is biased. The toggle exists to show that. The frozen test set is scored
 for the report columns only (prec..auc) and never feeds state, thresholds or an agent.
 
-Not here yet: agents. Every round is applied_source "rule" ("starter" for R0); rule_decision() is the
-decision A2 will later be compared against and fall back to.
+Agents plug in through two optional callbacks (crew.py uses them). before_decision(state, batch, prior,
+psi) runs after the reveal and the PSI, before the decision, and returns agent blocks for the record
+(A1 now, A2 later reads them here); prior is the rows of every earlier batch, handed over explicitly.
+on_round(result) runs after each round, e.g. to append it to the files. Every round is still
+applied_source "rule" ("starter" for R0); rule_decision() is what A2 will be compared against.
 
 Run: python -m softsignal.loop [--source audit|all_verified] [--rounds N]
 """
 import argparse
+import contextlib
 import io
 import json
-import os
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
@@ -240,11 +245,6 @@ def _unsafe(rule: Rule) -> bool:
     return any(f in UNSAFE_FLAGS for f in rule.th.flags)
 
 
-def _ends_with_newline(text: str) -> str:
-    """text, plus a final newline when it has content without one, so an appended line starts on its own."""
-    return text if not text or text.endswith("\n") else text + "\n"
-
-
 def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict | None = None) -> dict:
     """decisions.jsonl line. Agents are not built yet, so every agent block is empty.
 
@@ -279,22 +279,29 @@ def make_row(env: Env, state: State, rnd: int, action: str, source: str, **kw) -
     return {c: row[c] for c in ROUNDS_COLS}
 
 
-def round0(env: Env, state: State) -> RoundResult:
-    """R0: the starter rule on the frozen test set, before any batch or label."""
+BeforeDecision = Callable[[State, "Batch | None", pd.DataFrame, "float | None"], dict]
+OnRound = Callable[[RoundResult], None]
+
+
+def round0(env: Env, state: State, before_decision: BeforeDecision | None = None) -> RoundResult:
+    """R0: the starter rule on the frozen test set, before any batch or label (before_decision gets batch None)."""
     env.timer.round = 0
+    blocks = before_decision(state, None, state.seen, None) if before_decision is not None else {}
     dec = {"cutoff": float(state.live.th.t_verify), "cap": clamp_cap(env.policy["cap_false_teen"]), "action": STARTER}
-    return RoundResult(make_row(env, state, 0, STARTER, STARTER), make_record(env.timer.run, 0, dec, STARTER))
+    record = make_record(env.timer.run, 0, dec, STARTER)
+    record.update(blocks)
+    return RoundResult(make_row(env, state, 0, STARTER, STARTER), record)
 
 
 # ---- one round ----
-def run_round(state: State, batch: Batch, env: Env) -> RoundResult:
+def run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None) -> RoundResult:
     """Run one round and update state in place. See the module docstring for the order."""
     env.timer.round = batch.round
     with env.timer.call(AGENT, RUN_ROUND_STEP, "tool"):
-        return _run_round(state, batch, env)
+        return _run_round(state, batch, env, before_decision)
 
 
-def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
+def _run_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None) -> RoundResult:
     """Run the round; if anything raises, put the state back to how the last finished round left it.
 
     The oracle cannot undo a reveal and refuses a second one for the same round, so after a failure past
@@ -302,14 +309,14 @@ def _run_round(state: State, batch: Batch, env: Env) -> RoundResult:
     """
     before = replace(state)  # fields are reassigned during a round, never mutated in place
     try:
-        return _apply_round(state, batch, env)
+        return _apply_round(state, batch, env, before_decision)
     except Exception:
         for f in fields(state):
             setattr(state, f.name, getattr(before, f.name))
         raise
 
 
-def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
+def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDecision | None = None) -> RoundResult:
     rows, ids, oracle = batch.rows, list(batch.ids), env.oracle
     prior = state.seen
 
@@ -340,6 +347,8 @@ def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
         cand_ft = false_teen(y_audit, cand_s, t_cand)
         cand_fts = int(((cand_s >= t_cand) & (y_audit == 0)).sum())
     psi_val = psi(ref_scores, live_s) if len(ref_scores) else None
+    # agents that inform the decision (A1 now): mode is still this round's, prior is the earlier batches only
+    blocks = before_decision(state, batch, prior, psi_val) if before_decision is not None else {}
 
     # 4. decision: streak first, then the rule
     round_adults = int((y_audit == 0).sum())
@@ -379,54 +388,85 @@ def _apply_round(state: State, batch: Batch, env: Env) -> RoundResult:
     decision = _decision_block(rule_dec, state.live)
     row = make_row(env, state, batch.round, rule_dec["action"], SOURCE_RULE, n_flagged=n_flagged,
                    n_verify=len(verify_ids), audit_ft=audit_ft, psi=psi_val, refit_s=refit_s)
-    return RoundResult(row, make_record(env.timer.run, batch.round, decision, SOURCE_RULE, evidence))
+    record = make_record(env.timer.run, batch.round, decision, SOURCE_RULE, evidence)
+    record.update(blocks)
+    return RoundResult(row, record)
 
 
 # ---- whole run ----
-def run_loop(env: Env, n_rounds: int | None = None, state: State | None = None) -> tuple[pd.DataFrame, list[dict]]:
+def run_loop(env: Env, n_rounds: int | None = None, state: State | None = None,
+             before_decision: BeforeDecision | None = None,
+             on_round: OnRound | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """R0 then each batch the oracle has (at most n_rounds). Returns the rounds table and the records.
 
     Pass a state to read the final live rule and candidate afterwards (it is updated in place).
+    before_decision / on_round: see the module docstring (agents and per-round writes).
     """
     state = new_state(env.policy) if state is None else state
-    results = [round0(env, state)]
+    results = [round0(env, state, before_decision)]
+    if on_round is not None:
+        on_round(results[0])
     for batch in env.oracle:
         if n_rounds is not None and batch.round > n_rounds:
             break
-        results.append(run_round(state, batch, env))
+        results.append(run_round(state, batch, env, before_decision))
+        if on_round is not None:
+            on_round(results[-1])
     return pd.DataFrame([r.row for r in results], columns=ROUNDS_COLS), [r.record for r in results]
+
+
+_thread_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _write_lock(folder: Path):
+    """One writer at a time across threads and processes (the app's background run and a CLI run):
+    a thread lock plus fcntl.flock on folder/.write.lock (POSIX; on other systems the thread lock only)."""
+    with _thread_lock:
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / ".write.lock", "a", encoding="utf-8") as lock:
+            try:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            except ImportError:
+                pass
+            yield
 
 
 def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROUNDS_CSV,
               decisions_path: Path = DECISIONS_JSONL) -> None:
-    """Append this run to rounds.csv and decisions.jsonl (rows carry their run id; header written once).
+    """Append rows to rounds.csv and records to decisions.jsonl (rows carry their run id; header written once).
 
-    Raises ValueError, writing nothing, if rounds.csv already has a different header. Each file is built
-    in full next to the original and swapped in with os.replace, so neither is ever half-written. The two
-    swaps are separate, so a failure between them can leave rounds.csv with the run and decisions.jsonl
-    without it. Nothing checks for a run id that is already present, so a repeated run id appends twice.
+    Raises ValueError, writing nothing, if rounds.csv already has a different header. Both appends happen
+    under one lock (_write_lock), so two writers (the app's background run and a CLI run) never lose a
+    round or race on a temp file. Appends are small; a reader that catches one mid-write sees a last line
+    with no newline, which the readers skip. Nothing checks for a run id that is already present.
     """
-    rounds_path.parent.mkdir(parents=True, exist_ok=True)
-    old_rounds = _ends_with_newline(rounds_path.read_text(encoding="utf-8") if rounds_path.exists() else "")
-    if old_rounds.strip():
-        header = old_rounds.splitlines()[0].split(",")
-        if header != list(rounds.columns):
-            raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}")
-    buf = io.StringIO()
-    rounds.to_csv(buf, header=not old_rounds.strip(), index=False, lineterminator="\n")
-    old_dec = _ends_with_newline(decisions_path.read_text(encoding="utf-8") if decisions_path.exists() else "")
-    new_dec = "".join(json.dumps(r) + "\n" for r in records)
-    tmps = []
-    try:
-        for path, text in ((rounds_path, old_rounds + buf.getvalue()), (decisions_path, old_dec + new_dec)):
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(text, encoding="utf-8", newline="")
-            tmps.append((tmp, path))
-        for tmp, path in tmps:
-            os.replace(tmp, path)
-    finally:
-        for tmp, _ in tmps:
-            tmp.unlink(missing_ok=True)
+    with _write_lock(rounds_path.parent):
+        first = ""
+        if rounds_path.exists():
+            with open(rounds_path, encoding="utf-8") as f:
+                first = f.readline().strip()  # the header only: the file is never read in full
+        if first:
+            header = first.split(",")
+            if header != list(rounds.columns):
+                raise ValueError(f"{rounds_path.name} has header {header}, this run has {list(rounds.columns)}")
+        buf = io.StringIO()
+        rounds.to_csv(buf, header=not first, index=False, lineterminator="\n")
+        new_dec = "".join(json.dumps(r) + "\n" for r in records)
+        for path, text in ((rounds_path, buf.getvalue()), (decisions_path, new_dec)):
+            tail = _last_char(path)
+            with open(path, "a", encoding="utf-8", newline="") as f:
+                f.write(("\n" if tail and tail != "\n" else "") + text)  # an unterminated last line ends first
+
+
+def _last_char(path: Path) -> str:
+    """The file's last character ("" if missing or empty), without reading the whole file."""
+    if not path.exists() or path.stat().st_size == 0:
+        return ""
+    with open(path, "rb") as f:
+        f.seek(-1, 2)
+        return f.read(1).decode("utf-8", errors="replace")
 
 
 def main() -> None:

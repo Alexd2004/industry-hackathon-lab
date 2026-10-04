@@ -1,9 +1,11 @@
 """Loop tab (step 12): header, tiles, round chart, agent cards, decision log, footer.
 
-Reads results/rounds.csv and results/decisions.jsonl (written by loop.py / crew.py). The placeholders are used
-only when both real files are missing. The tab re-reads the files every REFRESH_S seconds (a fragment), so a
-run appending round by round shows up as it lands. "Run loop" starts crew.py in a background thread; the tab
-itself only reads, never writes anything an agent reads, and never calls a model. Replay is still a stub.
+Reads, in this order: the live files results/rounds.csv and decisions.jsonl (gitignored; appended by loop.py /
+crew.py runs), else the committed recorded run (rounds_recorded.csv, decisions_recorded.jsonl), else the
+placeholders. While a run started here is going, the tab re-reads the files every REFRESH_S seconds (a
+fragment), so rounds show up as they land; otherwise it does not poll. "Run loop" starts crew.py in a
+background thread; the tab itself only reads, never writes anything an agent reads, and never calls a model.
+Replay is still a stub.
 """
 import io
 import json
@@ -23,6 +25,7 @@ from softsignal.ui_results import FOOTER, FT_CI, FT_HUE, REC_HUE, headline_rows,
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 ROUNDS_FILE, DECISIONS_FILE = "rounds.csv", "decisions.jsonl"
+ROUNDS_RECORDED, DECISIONS_RECORDED = "rounds_recorded.csv", "decisions_recorded.jsonl"
 ROUNDS_PLACEHOLDER, DECISIONS_PLACEHOLDER = "rounds_placeholder.csv", "decisions_placeholder.jsonl"
 
 BANNER = ("PLACEHOLDER, projected, not measured. Loop numbers are a hand-made path between the plan's "
@@ -53,6 +56,7 @@ class LoopData:
     is_placeholder: bool
     n_skipped: int
     warnings: list = field(default_factory=list)
+    source: str = "live"  # live / recorded / placeholder / none
 
 
 def read_complete_lines(path: Path) -> list[str]:
@@ -160,18 +164,19 @@ def load_decisions(path: Path) -> tuple[list, int]:
 
 
 def load_loop(results_dir: Path | None = None) -> LoopData:
-    """Real mode if either real file exists (a missing one counts as empty); placeholders only when both are missing."""
+    """The first pair with either file present: live, then recorded, then placeholder (a missing file of a
+    pair counts as empty)."""
     results_dir = RESULTS if results_dir is None else results_dir
-    real_r, real_d = results_dir / ROUNDS_FILE, results_dir / DECISIONS_FILE
-    if real_r.exists() or real_d.exists():
-        r_path, d_path, is_placeholder = real_r, real_d, False
-    else:
-        r_path, d_path = results_dir / ROUNDS_PLACEHOLDER, results_dir / DECISIONS_PLACEHOLDER
-        is_placeholder = r_path.exists() or d_path.exists()
+    source, r_path, d_path = "none", results_dir / ROUNDS_FILE, results_dir / DECISIONS_FILE
+    for name, (r, d) in (("live", (ROUNDS_FILE, DECISIONS_FILE)), ("recorded", (ROUNDS_RECORDED, DECISIONS_RECORDED)),
+                         ("placeholder", (ROUNDS_PLACEHOLDER, DECISIONS_PLACEHOLDER))):
+        if (results_dir / r).exists() or (results_dir / d).exists():
+            source, r_path, d_path = name, results_dir / r, results_dir / d
+            break
     warnings: list = []
     rounds = load_rounds(r_path, warnings) if r_path.exists() else empty_rounds()
     decisions, skipped = load_decisions(d_path) if d_path.exists() else ([], 0)
-    return LoopData(rounds, decisions, is_placeholder, skipped, warnings)
+    return LoopData(rounds, decisions, source == "placeholder", skipped, warnings, source)
 
 
 def runs(data: LoopData) -> list[str]:
@@ -386,8 +391,11 @@ def loop_chart(rounds: pd.DataFrame, cap: float, tag: str) -> alt.LayerChart:
 def _start_run() -> None:
     """Button callback: start crew.py in the background and make the run picker follow the new run."""
     run_id = crew.start_background(RESULTS)
-    if run_id is not None:
-        st.session_state["loop_run"] = run_id
+    if run_id is None:
+        st.toast("A loop run is already going; it shows here as it lands.")
+        return
+    st.session_state["loop_run"] = run_id
+    st.session_state["loop_started_run"] = run_id  # this session's run: only it sees that run's error
 
 
 def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisions: list, running: bool) -> None:
@@ -413,15 +421,19 @@ def render_header(data: LoopData, run: str | None, rounds: pd.DataFrame, decisio
 
 
 def render_loop_tab() -> None:
-    _loop_fragment()
+    """The tab as a fragment that polls every REFRESH_S seconds only while a run is going (no idle polling)."""
+    running = crew.status()["running"]
+    st.session_state["loop_polling"] = running
+    st.fragment(run_every=REFRESH_S if running else None)(_loop_fragment)()
 
 
-@st.fragment(run_every=REFRESH_S)
 def _loop_fragment() -> None:
-    """The whole tab, re-run every REFRESH_S seconds on its own (the Results tab is not re-run)."""
+    """The whole tab; while polling it re-runs on its own, without re-running the Results tab."""
     status = crew.status()
-    if status["error"]:
-        st.error(f"The last loop run started here failed: {status['error']}")
+    if status["running"] != st.session_state.get("loop_polling", False):
+        st.rerun()  # a run started or ended: rebuild the fragment with (or without) polling
+    if status["error"] and status["run"] == st.session_state.get("loop_started_run"):
+        st.error(f"The loop run you started failed: {status['error']}")
     try:
         data = load_loop()
     except ValueError as e:
@@ -430,6 +442,9 @@ def _loop_fragment() -> None:
         return
     if data.is_placeholder:
         st.warning(BANNER)
+    elif data.source == "recorded":
+        st.caption(f"Showing the recorded run ({ROUNDS_RECORDED}, {DECISIONS_RECORDED}). Run loop starts a new "
+                   f"one in {ROUNDS_FILE} / {DECISIONS_FILE}, which then show here instead.")
     for w in data.warnings:
         st.warning(w)
     if data.n_skipped:

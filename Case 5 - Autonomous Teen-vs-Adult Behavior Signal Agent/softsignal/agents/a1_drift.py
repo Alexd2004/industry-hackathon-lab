@@ -13,18 +13,19 @@ group or score PSI reaches it, badged FALLBACK. No reference rows yet (round 0, 
 returns insufficient_data without a model call.
 
 What to expect (Crew Plan): batches are random draws from one population, so most rounds read not_real.
-Measured over 60 no-drift batches the largest PSI was 0.161, under the 0.25 threshold. Nothing stages drift.
+calibrate() measures that: python -m softsignal.agents.a1_drift --calibrate. Nothing stages drift.
 
 A1 runs on the decision path, so it keeps the 4 s timeout (base.TIMEOUT_S).
 """
+import argparse
 import json
 
 from softsignal.agent_timer import AgentTimer
 from softsignal.agents.base import (
-    AGE_CLAIM, FALLBACK, INSUFFICIENT, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, age_claims,
-    call_model, input_hash, numbers_not_in_input,
+    AGE_CLAIM, FALLBACK, INSUFFICIENT, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, UNSUPPORTED, AgentResult,
+    age_claims, call_model, input_hash, numbers_not_in_input,
 )
-from softsignal.agents.contracts import a1_fields
+from softsignal.agents.contracts import PSI_GROUPS, a1_fields, floor_psi
 from softsignal.agents.schemas import A1_MAX_REASON_CHARS, A1Output
 
 AGENT = "A1"
@@ -35,24 +36,26 @@ a teen or an adult from writing style and app activity. Each round a new batch o
 whether the drift in this batch is real or noise. You inform the loop controller; you change nothing.
 
 The input is JSON:
-- psi: population stability index of this batch against the batches seen in earlier rounds. score is the PSI \
-of the live rule's scores (null when there is no earlier score history). For each feature group (activity: 9 \
-app-activity columns; text: 7 writing-style columns): the largest feature PSI (_max), the mean (_mean) and the \
-feature with the largest PSI (_top_feature).
+- psi: population stability index of this batch against the batches seen in earlier rounds, floored to 3 \
+decimals. score is the PSI of the live rule's scores (null when there is no earlier score history, or once the \
+live model changes every round). For each feature group (n_features gives the number of app-activity and \
+writing-style columns): the largest feature PSI (_max), the mean (_mean) and the feature with the largest PSI \
+(_top_feature).
 - psi_drift: the threshold the fallback rule uses (drift is real at or above it).
+- psi_conventions: the usual PSI levels (under stable: stable; stable to large: moderate; over large: large).
 - audit: audit accounts revealed so far (adults, teens).
 - history: the earlier rounds' PSI (score, activity_max, text_max).
 - n_reference, n_batch: accounts in the earlier batches and in this batch.
 - fields: every numeric field you may cite as evidence, as path -> value.
 
-Conventions: PSI under 0.10 is stable, 0.10 to 0.25 moderate, over 0.25 a large shift. Small batches are \
-noisy, so a single moderate value is usually noise. A shift that persists across rounds in history, or a \
-value at or above psi_drift, is more likely real.
+Small batches are noisy, so a single moderate value is usually noise. A shift that persists across rounds in \
+history, or a value at or above psi_drift, is more likely real.
 
 Rules:
 - Use only the input. Batches are random draws from one population, so not_real is the expected answer most \
 rounds. Say so plainly; never invent a drift to look busy.
-- evidence: up to 4 items, each a path copied exactly from fields with its value copied exactly.
+- evidence: up to 4 items, each a path copied exactly from fields with its value copied exactly. A real \
+verdict must cite at least one psi field.
 - Every number in reason must appear in the input exactly as written there. Do not compute new numbers.
 - insufficient_data only if the input lacks what you need.
 - reason: one or two plain sentences, at most {A1_MAX_REASON_CHARS} characters, no markdown."""
@@ -90,14 +93,16 @@ def fallback_output(payload: dict) -> dict:
 
 
 def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]:
-    """(fallback reason or None, errors): evidence names input fields with their exact values, every number in
-    the reason is in the input, no numeric age."""
+    """(fallback reason or None, errors): evidence names input fields with their exact values, a real verdict
+    cites at least one PSI, every number in the reason is in the input, no numeric age."""
     if age_claims(output["reason"]):
         return AGE_CLAIM, [f"states an age: {age_claims(output['reason'])}"]
     fields = a1_fields(payload)
     for ev in output["evidence"]:
         if ev["field"] not in fields or abs(fields[ev["field"]] - ev["value"]) > 1e-9:
             return UNKNOWN_FIELD, [f"evidence {ev} does not match an input field and its value"]
+    if output["drift"] == REAL and not any(ev["field"].startswith("psi.") for ev in output["evidence"]):
+        return UNSUPPORTED, ["drift is real but no psi value is cited as evidence"]
     invented = numbers_not_in_input(output["reason"], payload)
     if invented:
         return NUMBER_NOT_IN_INPUT, [f"numbers not in the input: {invented}"]
@@ -129,3 +134,54 @@ def run_a1(payload: dict, client=None, timer: AgentTimer | None = None, round_id
     if reply.fallback_reason is not None:
         return _fallback(payload, h, reply.fallback_reason, reply.errors, timer, round_id, reply.raw)
     return AgentResult(AGENT, LIVE, reply.output, None, h)
+
+
+def calibrate(seeds=range(10)) -> "pd.DataFrame":
+    """The measurement behind policy.yaml psi_drift: each oracle batch's PSI against the earlier batches, for
+    every seed (stratified random draws from one population, so no drift by construction). One row per
+    (seed, round >= 2) with the group maxima and the starter-score PSI, floored like A1's input."""
+    import pandas as pd
+
+    from softsignal.data import load_data
+    from softsignal.features import ID_COL
+    from softsignal.loop import starter_score
+    from softsignal.metrics import psi
+    from softsignal.oracle import Oracle
+    from softsignal.agents.contracts import group_psi
+
+    train, test = load_data(on_param_mismatch="error")
+    rows = []
+    for k in seeds:
+        seen = []
+        for b in Oracle(train, test[ID_COL].tolist(), seed=42 + k):
+            if seen:
+                ref = pd.concat(seen, ignore_index=True)
+                g = group_psi(ref, b.rows)
+                rows.append({"seed": 42 + k, "round": b.round, **{f"{grp}_max": g[f"{grp}_max"] for grp in PSI_GROUPS},
+                             "score": floor_psi(psi(starter_score(ref), starter_score(b.rows)))})
+            seen.append(b.rows)
+    return pd.DataFrame(rows)
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description="A1 drift watcher tools")
+    ap.add_argument("--calibrate", action="store_true", help="measure no-drift PSI against policy.yaml psi_drift")
+    ap.add_argument("--seeds", type=int, default=10)
+    args = ap.parse_args(argv)
+    if not args.calibrate:
+        ap.print_help()
+        return
+    from softsignal.policy import load_policy
+
+    threshold = load_policy()["psi_drift"]
+    d = calibrate(range(args.seeds))
+    top = d[[c for c in d.columns if c not in ("seed", "round")]].max(axis=1)
+    alarms = int((top >= threshold).sum()) if threshold is not None else None
+    print(d.describe(percentiles=[0.5, 0.95, 0.99]).drop(columns=["seed", "round"]).round(3).to_string())
+    print(f"\n{len(d)} no-drift batches; largest PSI {top.max():.3f}; psi_drift {threshold}; false alarms {alarms}")
+    if alarms == 0:  # rule of three: 0 of n bounds the per-batch rate at about 3/n with 95% confidence
+        print(f"0 false alarms in {len(d)} batches bounds the per-batch false-alarm rate to about {3 / len(d):.0%} (95%)")
+
+
+if __name__ == "__main__":
+    main()
