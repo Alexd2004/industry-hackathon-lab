@@ -15,9 +15,11 @@ so an agent never breaks the round:
     insufficient_data   the input lacks what the agent needs; no model call is made
 
 Model: claude-opus-5 for all five agents (Crew Plan section 9: one setup to measure), effort "low".
-Timeouts: 4 s for agents on the decision path (Crew Plan section 6); A4 and A5 run after the round, off the
-path, so they get longer (TIMEOUTS; not measured yet, set after measuring). Overrides:
-SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S.
+Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A4, off the decision
+path, gets longer (TIMEOUTS; not measured yet, set after measuring); A5's one-off slide pass gets 60 s. Overrides:
+SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S /
+SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
+forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
 The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. Refusals go to the
 deterministic fallback, as the plan says, not to a server-side model fallback.
 """
@@ -36,7 +38,9 @@ from softsignal.agent_timer import AgentTimer
 MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-opus-5")
 EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "low")
 TIMEOUT_S = float(os.environ.get("SOFTSIGNAL_AGENT_TIMEOUT_S", "4.0"))  # decision-path agents (A1-A3)
-TIMEOUTS = {"A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0"))}  # off the decision path
+TIMEOUTS = {"A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
+            # A5 per round is a live call (Crew Plan section 9: 4 s); its one-off slide pass uses 60 s
+            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}
 MAX_RETRIES = 0  # the SDK retries twice by default, which turns a 4 s timeout into about 12 s
 MAX_TOKENS = 4096  # adaptive thinking at low effort shares this with the short JSON answer
 MAX_REJECTED_CHARS = 2000  # a rejected reply is kept (truncated) for A5 and prompt tuning
@@ -97,6 +101,18 @@ def input_hash(payload: Any) -> str:
 
 def _strip_thousands(text: str) -> str:
     return re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+
+
+def number_spans(text: str) -> list[tuple[str, int, int]]:
+    """(number as written, start, end) for every number in text (no thousands commas inside a token: "1,000" is
+    two tokens here; claims write counts without them)."""
+    return [(m.group(), m.start(), m.end()) for m in _NUMBER.finditer(text)]
+
+
+def number_tokens(text: str) -> list[str]:
+    """Every number written in text as written ("92%", "0.955", "1000"), thousands commas removed: the
+    precision a claim states matters when it is compared with a file (A5)."""
+    return [m.group() for m in _NUMBER.finditer(_strip_thousands(text))]
 
 
 def numbers_in(text: str) -> list[float]:
