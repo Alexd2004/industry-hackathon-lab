@@ -356,3 +356,10 @@ def test_every_failure_is_no_analysis(payload, tmp_path, make, reason):
     assert (result.status, result.fallback_reason) == (FALLBACK, reason)
     assert result.output == fallback_output() and result.errors and payload == before
     assert all(r["status"] == FALLBACK for r in records)
+
+
+def test_system_prompt_is_fully_rendered_and_states_the_signal_caveat():
+    assert "{" not in SYSTEM and "}" not in SYSTEM  # an f-string placeholder must not reach the model unfilled
+    assert "up to 4 items" in SYSTEM  # A3_MAX_PATTERNS, the schema's own limit
+    assert "fit on these same accounts" in SYSTEM and "do not show why" in SYSTEM.lower().replace("\n", " ")
+    assert "caused" in SYSTEM  # no causal claims about a signal
