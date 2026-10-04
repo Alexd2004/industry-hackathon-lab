@@ -2,7 +2,7 @@
 
 Each builder copies only the fields its agent's contract allows (Combined Plan section 7a). A1-A4 never get
 a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
-Only A4 is built so far; each owner adds theirs here.
+A2 and A4 are built so far; each owner adds theirs here.
 
 A4 (verify-band triager) gets explain.py's output for the accounts sent to verification (score, band, the
 top 3 signed contributions, the teen-leaning words), summarised in code for the batch: score range and
@@ -112,4 +112,63 @@ def a4_input(frame: pd.DataFrame, verify_ids, round_id: int | None, test_ids=Non
                       for w, k in sorted(words.items(), key=lambda kv: (-kv[1], kv[0]))[:A4_TOP_WORDS]],
     }
     check_barrier(payload)
+    return payload
+
+
+INSUFFICIENT_INPUT = "insufficient_data"  # what an absent A1 / A3 output looks like to A2 (contract: no guessing)
+A2_ACTIONS = ("hold", "re-tune", "promote")
+A2_THRESHOLD_KEYS = ("t_verify", "t_soft", "cap", "flags")
+A2_AUDIT_KEYS = ("mode", "streak", "audit_adults", "audit_teens", "round_audit_adults", "pooled_adults",
+                 "pooled_false_teen", "candidate_false_teen")
+A2_BOUND_KEYS = ("cap_min", "cap_max", "min_audit_adults", "cap_default")
+A2_GUARD_KEYS = ("hold_required", "promote_allowed")
+
+
+def _pick(src: dict, keys, where: str) -> dict:
+    missing = [k for k in keys if k not in src]
+    if missing:
+        raise ValueError(f"A2 input {where} is missing {missing}")
+    return {k: src[k] for k in keys}
+
+
+def dotted_paths(payload, prefix: str = "") -> set:
+    """Every dotted path to a dict node or leaf in the payload ("audit", "audit.audit_adults"): what A2 may cite."""
+    out = set()
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            path = f"{prefix}.{k}" if prefix else str(k)
+            out.add(path)
+            out |= dotted_paths(v, path)
+    return out
+
+
+def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards: dict, rule: dict,
+             a1=INSUFFICIENT_INPUT, a3=INSUFFICIENT_INPUT) -> dict:
+    """A2's input for one round (Combined Plan section 7a): A1 and A3 output, current thresholds, the last
+    audit-slice metrics, the rule-based decision. Only the listed keys are copied, so a test metric, a label or
+    any other field the caller holds never reaches the prompt; check_barrier() then checks the whole payload.
+
+    thresholds: the live rule's (t_verify, t_soft, cap, flags). audit: audit-slice counts and the candidate's
+    audit false-teen rate (audit_false_teen, never a test-set figure). bounds: the clamp and the hold floor.
+    guards: hold_required (fewer than min_audit_adults audit adults) and promote_allowed (SHADOW and the pooled
+    test passed), both computed by loop.py in code; the agent is told them and the checks enforce them.
+    rule: {action, cap}, loop.rule_decision(). a1 / a3: the agent's output dict, or "insufficient_data" (round 0,
+    or an agent not built yet); never a guess.
+    """
+    rule = _pick(rule, ("action", "cap"), "rule")
+    if rule["action"] not in A2_ACTIONS:
+        raise ValueError(f"rule action must be one of {A2_ACTIONS}, got {rule['action']!r}")
+    payload = {
+        "agent": "A2",
+        "round": int(round_id),
+        "a1": a1,
+        "a3": a3,
+        "thresholds": _pick(thresholds, A2_THRESHOLD_KEYS, "thresholds"),
+        "audit": _pick(audit, A2_AUDIT_KEYS, "audit"),
+        "bounds": _pick(bounds, A2_BOUND_KEYS, "bounds"),
+        "guards": _pick(guards, A2_GUARD_KEYS, "guards"),
+        "rule": rule,
+    }
+    check_barrier(payload)
+    json.dumps(payload)  # must be plain JSON: fail here, not inside the prompt
     return payload
