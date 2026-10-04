@@ -159,8 +159,8 @@ def test_dotted_paths_name_nodes_and_leaves(payload):
 
 # --- schema ---------------------------------------------------------------------------------------
 
-def test_schema_has_action_and_cap_only():
-    assert set(A2Output.model_fields) == {"action", "cap", "reason", "cites"}  # no blend_w, no cutoff
+def test_schema_has_action_cap_and_margin_only():
+    assert set(A2Output.model_fields) == {"action", "cap", "cap_margin", "reason", "cites"}  # no blend_w, no cutoff
 
 
 @pytest.mark.parametrize("bad", [
@@ -262,6 +262,38 @@ def test_cap_is_clamped_to_bounds(payload, cap, want):
     assert all(n.startswith("CLAMPED") for n in notes)
 
 
+@pytest.mark.parametrize("margin,want", [(0.02, 0.02), (0.0, 0.0), (0.2, 0.05), (-0.1, 0.0), (None, None)])
+def test_cap_margin_is_clamped_to_the_code_limit(payload, margin, want):
+    out, notes = clamp_output(good(cap_margin=margin), payload)
+    assert out.get("cap_margin") == want and bool(notes) == (margin != want)
+    assert all(n.startswith("CLAMPED cap_margin") for n in notes)
+
+
+def test_cap_margin_never_exceeds_the_cap(payload):
+    assert clamp_output(good(cap=0.08, cap_margin=0.05), payload)[0]["cap_margin"] == 0.05
+    assert clamp_output(good(cap=0.08, cap_margin=0.05), payload)[1] == []
+
+
+def test_clamped_reason_names_both_changes(payload):
+    out, notes = clamp_output(good(cap=0.5, cap_margin=0.4, reason="Wants more."), payload)
+    assert out["cap"] == 0.3 and out["cap_margin"] == 0.05 and len(notes) == 2
+    assert "cap clamped from 0.5 to 0.3" in out["reason"] and "cap_margin clamped from 0.4 to 0.05" in out["reason"]
+
+
+def test_margin_as_a_percent_is_invalid_not_clamped(payload):
+    assert validate_output(good(cap_margin=2.0), payload)[0] == "invalid_output"
+
+
+def test_own_margin_may_be_named_in_the_reason(payload):
+    assert validate_output(good(cap_margin=0.02, reason="Margin 0.02 or 2% under the cap."), payload) == (None, [])
+
+
+def test_fallback_leaves_the_margin_to_the_policy(payload):
+    out = fallback_output(payload)
+    assert out.get("cap_margin") is None
+    assert run_a2(payload, client=None).output.get("cap_margin") is None
+
+
 # --- fallback -------------------------------------------------------------------------------------
 
 def test_clamped_reason_matches_the_applied_cap(payload):
@@ -293,7 +325,7 @@ def test_live_reply_is_used(payload, tmp_path):
     timer = AgentTimer(path=tmp_path / "calls.jsonl", run="t")
     r = run_a2(payload, client=FakeClient(reply(good())), timer=timer, round_id=3)
     assert r.status == LIVE and r.fallback_reason is None and r.errors == []
-    assert r.output == good()
+    assert r.output == good() | {"cap_margin": None}
     assert round_agent_summary(load_records(timer.path), 3, "t")["A2"]["status"] == LIVE
 
 

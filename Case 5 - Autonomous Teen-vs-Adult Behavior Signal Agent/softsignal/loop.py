@@ -87,6 +87,7 @@ HOLD, RETUNE, PROMOTE, STARTER = "hold", "re-tune", "promote", "starter"
 SOURCE_RULE = "rule"
 RUN_MODES = ("rule", "crew")  # the CLI switch: who decides each round
 CAP_MIN, CAP_MAX = 0.08, 0.30  # clamp for any cap the loop or A2 applies (policy.py does not clamp)
+MARGIN_MAX = 0.05  # clamp for any cap_margin A2 proposes: the verify cutoff aims at cap - margin (policy.py needs margin <= cap)
 PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs the pooled audit false-teen <= cap + this ...
 PROMOTE_STREAK = 2  # ... pooled over this many rounds in a row
 PROMOTE_MIN_ADULTS = 40  # ... and over at least this many pooled audit adults (2 x 20, the old per-round floor)
@@ -98,6 +99,11 @@ AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
 
 def clamp_cap(cap: float) -> float:
     return float(min(CAP_MAX, max(CAP_MIN, cap)))
+
+
+def clamp_margin(margin: float, cap: float) -> float:
+    """A cap_margin inside 0..MARGIN_MAX, and never above the cap it is taken from."""
+    return float(min(MARGIN_MAX, cap, max(0.0, margin)))
 
 
 def starter_score(df: pd.DataFrame) -> np.ndarray:

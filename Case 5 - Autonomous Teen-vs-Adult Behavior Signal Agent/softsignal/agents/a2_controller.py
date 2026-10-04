@@ -5,8 +5,10 @@ A1 (drift) and A3 (errors) and before run_round() in the per-round flow, reads t
 audit-slice counts and the rule-based decision, and writes a short reason. It chooses parameters only, never a
 label, and never sees the frozen test set (contracts.a2_input copies a fixed key list, check_barrier checks it).
 
-Scope: action and cap only. blend_w and cutoff are not A2's (the stack has no blend_w, and the plan gives no
-mapping from a cutoff to t_verify / t_soft: Combined Plan 5b, open decision 5). The verify band <= 25% limit
+Scope: action, cap and cap_margin. blend_w and cutoff are not A2's (the stack has no blend_w, and the plan gives no
+mapping from a cutoff to t_verify / t_soft: Combined Plan 5b, open decision 5). cap_margin is how far below the cap
+the refit's verify cutoff aims (policy.py); it is clamped to 0..loop.MARGIN_MAX in code and None keeps the policy value,
+so the fallback (which never sets it) stays the rule. The verify band <= 25% limit
 stays in loop.py, which truncates to the oracle's budget itself.
 
 Checks, in this order (the first failure sends the round to the rule decision, badged FALLBACK):
@@ -39,7 +41,7 @@ from softsignal.agents.base import (
     AGE_CLAIM, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, age_claims,
     call_model, input_hash, numbers_in, numbers_not_in_input,
 )
-from softsignal.agents.contracts import cap_limits, dotted_paths
+from softsignal.agents.contracts import cap_limits, dotted_paths, margin_limit
 from softsignal.agents.schemas import A2_MAX_REASON_CHARS, A2Output
 
 AGENT = "A2"
@@ -62,7 +64,7 @@ promote).
 - rule: the rule-based decision (action and cap). Follow it unless the input gives a reason not to.
 
 Actions: hold keeps the current thresholds. re-tune refits the model and recomputes the thresholds. promote \
-moves SHADOW to ACTIVE. cap is the share of adults you accept being sent to verification, as a fraction.
+moves SHADOW to ACTIVE. cap is the share of adults you accept being sent to verification, as a fraction. cap_margin (0 to 0.05, or null to keep the policy value) is how far below the cap the verify cutoff aims: a larger margin lowers the chance the false-teen rate overshoots the cap and costs some recall. Raise it when the audit false-teen rate runs above the cap, keep it small when it runs below.
 
 Rules:
 - Use only the input. Never state or guess an age, an identity, or anything the input does not say.
@@ -113,7 +115,12 @@ def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]
     unknown = [c for c in cites if c not in known]
     if unknown or len(set(cites)) != len(cites):
         return UNKNOWN_FIELD, [f"cites {unknown or cites}: not distinct fields of the input"]
+    margin = output.get("cap_margin")
+    if margin is not None and not 0 <= margin <= 1:  # same unit slip as a percent cap: never clamp it
+        return INVALID, [f"cap_margin {margin} is not a fraction between 0 and 1"]
     own_cap = [output["cap"], round(output["cap"] * 100, 10)]
+    if margin is not None:
+        own_cap += [margin, round(margin * 100, 10)]
     invented = numbers_not_in_input(output["reason"], [payload, percent_forms(payload), own_cap])
     if invented:
         return NUMBER_NOT_IN_INPUT, [f"numbers not in the input: {invented}"]
@@ -133,19 +140,25 @@ def percent_forms(payload: dict) -> list:
 
 
 def clamp_output(output: dict, payload: dict) -> tuple[dict, list[str]]:
-    """The cap inside bounds.cap_min..cap_max; the second value says what was changed (empty if nothing)."""
+    """The cap inside bounds.cap_min..cap_max and the cap_margin inside 0..margin_limit(); the second value says what
+    was changed (empty if nothing)."""
     lo_code, hi_code = cap_limits()
     lo, hi = max(payload["bounds"]["cap_min"], lo_code), min(payload["bounds"]["cap_max"], hi_code)
     cap = float(min(hi, max(lo, output["cap"])))
-    if cap == output["cap"]:
+    margin = output.get("cap_margin")
+    new_margin = None if margin is None else float(min(margin_limit(), cap, max(0.0, margin)))
+    if cap == output["cap"] and new_margin == margin:
         return output, []
-    note = f" (cap clamped from {output['cap']} to {cap})"
+    changes = ([f"CLAMPED cap {output['cap']} -> {cap}"] if cap != output["cap"] else []) + (
+        [f"CLAMPED cap_margin {margin} -> {new_margin}"] if new_margin != margin else [])
+    note = "".join([f" (cap clamped from {output['cap']} to {cap})" if cap != output["cap"] else "",
+                    f" (cap_margin clamped from {margin} to {new_margin})" if new_margin != margin else ""])
     room = A2_MAX_REASON_CHARS - len(note)
     text = output["reason"]
     if len(text) > room:  # cut at a word boundary, so a number is never cut in half
         text = text[:room].rsplit(" ", 1)[0].rstrip(",;:")
     reason = text + note  # the text must match the applied cap
-    return {**output, "cap": cap, "reason": reason}, [f"CLAMPED cap {output['cap']} -> {cap}"]
+    return {**output, "cap": cap, **({} if margin is None else {"cap_margin": new_margin}), "reason": reason}, changes
 
 
 def _rule_output(payload: dict) -> tuple[dict, list[str]]:

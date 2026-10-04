@@ -57,9 +57,10 @@ A2_MAX_CITES = 5
 
 
 class A2Output(BaseModel):
-    """A2 loop controller: this round's action and false-teen cap. Only these two are A2's to choose: the
-    stack has no blend_w and the plan gives no mapping from a cutoff to t_verify / t_soft (Combined Plan 5b,
-    open decision 5), so neither is in the schema. An out-of-range cap is clamped in code, not rejected."""
+    """A2 loop controller: this round's action, false-teen cap and cap margin. The stack has no blend_w and the plan
+    gives no mapping from a cutoff to t_verify / t_soft (Combined Plan 5b, open decision 5), so neither is in the
+    schema. cap_margin is the one model lever: how far below the cap the verify cutoff aims. An out-of-range cap
+    or margin is clamped in code, not rejected."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -71,6 +72,11 @@ class A2Output(BaseModel):
         strict=True, allow_inf_nan=False,  # a bool or a string is not a cap (lax mode would take true as 1.0)
         description="Cap on the false-teen rate (share of adults sent to verification) for this round, "
                     "as a fraction, e.g. 0.15. Stay within input.bounds.",
+    )
+    cap_margin: float | None = Field(
+        default=None, strict=True, allow_inf_nan=False,
+        description="How far below the cap the verify cutoff aims, as a fraction between 0 and 0.05, e.g. 0.02. "
+                    "A larger margin lowers false-teen overshoot and costs some recall. null keeps the policy value.",
     )
     reason: str = Field(
         min_length=1, max_length=A2_MAX_REASON_CHARS,
