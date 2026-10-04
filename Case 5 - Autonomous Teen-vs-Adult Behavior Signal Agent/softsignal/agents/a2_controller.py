@@ -14,7 +14,10 @@ Checks, in this order (the first failure sends the round to the rule decision, b
   guardrails enforced in code: hold when guards.hold_required (fewer than 120 audit adults), promote only when
   guards.promote_allowed (SHADOW and the loop's pooled test passed).
 A schema-valid cap outside bounds is not a failure: it is clamped to cap_min..cap_max and logged "CLAMPED ..."
-in the result's errors (the status stays LIVE).
+in the result's errors (the status stays LIVE), and the reason is rewritten to say so. The model's own cap may be
+named in its reason without being an input number. The bounds and the audit floor are never looser than the code
+limits (contracts.hard_limits: loop.CAP_MIN / CAP_MAX, policy.yaml), whatever the payload says. The fallback
+obeys the guards too (guarded_action), and a2_input rejects a rule that breaks them.
 
 Missing A1 / A3 output arrives as "insufficient_data" and A2 still decides, from the rest of its input.
 Fallback: loop.rule_decision()'s {action, cap}, with a templated reason. Wiring into run_round and the
@@ -27,7 +30,7 @@ from softsignal.agents.base import (
     AGE_CLAIM, FALLBACK, GUARDRAIL, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, age_claims,
     call_model, input_hash, numbers_in, numbers_not_in_input,
 )
-from softsignal.agents.contracts import dotted_paths
+from softsignal.agents.contracts import dotted_paths, hard_limits
 from softsignal.agents.schemas import A2_MAX_REASON_CHARS, A2Output
 
 AGENT = "A2"
@@ -69,14 +72,27 @@ def user_message(payload: dict) -> str:
 def fallback_output(payload: dict) -> dict:
     """The rule-based decision with a templated reason built from the input's own numbers."""
     rule = payload["rule"]
-    return {"action": rule["action"], "cap": rule["cap"],
-            "reason": f"Rule-based decision: {rule['action']} at cap {rule['cap']} "
+    action = guarded_action(rule["action"], payload)
+    return {"action": action, "cap": rule["cap"],
+            "reason": f"Rule-based decision: {action} at cap {rule['cap']} "
                       f"with {payload['audit']['audit_adults']} audit adults.",
             "cites": ["rule.action", "rule.cap", "audit.audit_adults"]}
 
 
+def guarded_action(action: str, payload: dict) -> str:
+    """The action the guardrails allow: hold before the audit floor, and no promote unless the loop allowed it in
+    SHADOW (then re-tune). Used by the fallback, so it never returns what validate_output would refuse."""
+    floor = max(payload["bounds"]["min_audit_adults"], hard_limits()[2])
+    if payload["guards"]["hold_required"] or payload["audit"]["audit_adults"] < floor:
+        return "hold"
+    if action == "promote" and not (payload["guards"]["promote_allowed"] and payload["audit"]["mode"] == "SHADOW"):
+        return "re-tune"
+    return action
+
+
 def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]:
-    """(fallback reason or None, errors). Does not touch the cap: a schema-valid cap is clamped by clamp_output."""
+    """(fallback reason or None, errors). The model's own cap (and its percent form) may appear in the reason
+    without being in the input: it is A2's output, and clamp_output rewrites the reason if it clamps the cap."""
     ages = age_claims(output["reason"])
     if ages:
         return AGE_CLAIM, [f"states an age: {ages}"]
@@ -85,10 +101,12 @@ def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]
     unknown = [c for c in cites if c not in known]
     if unknown or len(set(cites)) != len(cites):
         return UNKNOWN_FIELD, [f"cites {unknown or cites}: not distinct fields of the input"]
-    invented = numbers_not_in_input(output["reason"], [payload, percent_forms(payload)])
+    own_cap = [output["cap"], round(output["cap"] * 100, 10)]
+    invented = numbers_not_in_input(output["reason"], [payload, percent_forms(payload), own_cap])
     if invented:
         return NUMBER_NOT_IN_INPUT, [f"numbers not in the input: {invented}"]
-    action, audit, floor = output["action"], payload["audit"], payload["bounds"]["min_audit_adults"]
+    action, audit = output["action"], payload["audit"]
+    floor = max(payload["bounds"]["min_audit_adults"], hard_limits()[2])  # never looser than the code limit
     guards = payload["guards"]  # re-derived from the counts too: the flags are not trusted alone
     if (guards["hold_required"] or audit["audit_adults"] < floor) and action != "hold":
         return GUARDRAIL, [f"{action} before {floor} audit adults (hold rule)"]
@@ -104,7 +122,8 @@ def percent_forms(payload: dict) -> list:
 
 def clamp_output(output: dict, payload: dict) -> tuple[dict, list[str]]:
     """The cap inside bounds.cap_min..cap_max; the second value says what was changed (empty if nothing)."""
-    lo, hi = payload["bounds"]["cap_min"], payload["bounds"]["cap_max"]
+    lo_code, hi_code, _ = hard_limits()
+    lo, hi = max(payload["bounds"]["cap_min"], lo_code), min(payload["bounds"]["cap_max"], hi_code)
     cap = float(min(hi, max(lo, output["cap"])))
     if cap == output["cap"]:
         return output, []

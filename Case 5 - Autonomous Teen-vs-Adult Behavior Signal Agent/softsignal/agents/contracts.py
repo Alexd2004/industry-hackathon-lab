@@ -124,6 +124,15 @@ A2_BOUND_KEYS = ("cap_min", "cap_max", "min_audit_adults", "cap_default")
 A2_GUARD_KEYS = ("hold_required", "promote_allowed")
 
 
+def hard_limits() -> tuple[float, float, int]:
+    """(cap_min, cap_max, min_audit_adults): the code constants (loop.CAP_MIN / CAP_MAX, policy.yaml's floor) that
+    the payload's own bounds may never loosen. Imported here, not at module level: loop.py will import the agents."""
+    from softsignal.loop import CAP_MAX, CAP_MIN
+    from softsignal.policy import load_policy
+
+    return CAP_MIN, CAP_MAX, int(load_policy()["min_audit_adults"])
+
+
 def _pick(src: dict, keys, where: str) -> dict:
     missing = [k for k in keys if k not in src]
     if missing:
@@ -152,7 +161,8 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     audit false-teen rate (candidate_false_teen, never a test-set figure). bounds: the clamp and the hold floor.
     guards: hold_required (fewer than min_audit_adults audit adults) and promote_allowed (SHADOW and the pooled
     test passed), both computed by loop.py in code; the agent is told them and the checks enforce them. They are
-    cross-checked here against the counts and the mode, so a caller that builds them wrongly fails loudly.
+    cross-checked here against the counts and the mode, and so is the rule, so a caller that builds them wrongly
+    fails loudly. bounds may not be looser than hard_limits() (the loop's cap clamp, policy.yaml's audit floor).
     rule: {action, cap}, loop.rule_decision(). a1 / a3: the agent's output dict, or "insufficient_data" (round 0,
     or an agent not built yet); never a guess.
     """
@@ -164,12 +174,22 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     audit = _pick(audit, A2_AUDIT_KEYS, "audit")
     if not 0 <= bounds["cap_min"] <= bounds["cap_max"] <= 1:
         raise ValueError(f"A2 bounds need 0 <= cap_min <= cap_max <= 1, got {bounds['cap_min']}, {bounds['cap_max']}")
+    lo, hi, floor = hard_limits()
+    if bounds["cap_min"] < lo or bounds["cap_max"] > hi or bounds["min_audit_adults"] < floor:
+        raise ValueError(f"A2 bounds are looser than the code limits: cap {lo}..{hi} and {floor} audit adults "
+                         f"(got {bounds['cap_min']}..{bounds['cap_max']} and {bounds['min_audit_adults']})")
+    if audit["mode"] not in ("SHADOW", "ACTIVE"):
+        raise ValueError(f"audit mode must be SHADOW or ACTIVE, got {audit['mode']!r}")
     if not bounds["cap_min"] <= rule["cap"] <= bounds["cap_max"]:
         raise ValueError(f"rule cap {rule['cap']} is outside the bounds {bounds['cap_min']}..{bounds['cap_max']}")
     if guards["hold_required"] != (audit["audit_adults"] < bounds["min_audit_adults"]):
         raise ValueError("guards.hold_required contradicts audit_adults and bounds.min_audit_adults")
     if guards["promote_allowed"] and (guards["hold_required"] or audit["mode"] != "SHADOW"):
         raise ValueError("guards.promote_allowed needs mode SHADOW and the hold rule satisfied")
+    if guards["hold_required"] and rule["action"] != "hold":
+        raise ValueError(f"rule action {rule['action']} breaks guards.hold_required")
+    if rule["action"] == "promote" and not guards["promote_allowed"]:
+        raise ValueError("rule action promote breaks guards.promote_allowed")
     payload = {
         "agent": "A2",
         "round": int(round_id),

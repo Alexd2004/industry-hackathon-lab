@@ -11,13 +11,13 @@ from pydantic import ValidationError
 
 from softsignal.agent_timer import AgentTimer, load_records, round_agent_summary
 from softsignal.agents.a2_controller import (
-    SYSTEM, clamp_output, fallback_output, percent_forms, run_a2, user_message, validate_output,
+    SYSTEM, clamp_output, fallback_output, guarded_action, percent_forms, run_a2, user_message, validate_output,
 )
 from softsignal.agents.base import (
     AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, REFUSAL, TIMEOUT,
     UNKNOWN_FIELD, merge_block,
 )
-from softsignal.agents.contracts import BarrierError, a2_input, dotted_paths
+from softsignal.agents.contracts import BarrierError, a2_input, dotted_paths, hard_limits
 from softsignal.agents.schemas import A2Output
 
 THRESHOLDS = {"t_verify": 0.81, "t_soft": 0.42, "cap": 0.15, "flags": []}
@@ -105,9 +105,18 @@ def test_agent_output_carrying_a_forbidden_key_is_refused(key):
 @pytest.mark.parametrize("over,match", [
     ({"bounds": BOUNDS | {"cap_min": 0.4}}, "cap_min <= cap_max"),
     ({"bounds": BOUNDS | {"cap_max": 1.5}}, "cap_min <= cap_max"),
+    ({"bounds": BOUNDS | {"cap_min": 0.0, "cap_max": 1.0}}, "looser than the code limits"),
+    ({"bounds": BOUNDS | {"cap_max": 0.5}}, "looser than the code limits"),
+    ({"bounds": BOUNDS | {"cap_min": 0.05}}, "looser than the code limits"),
+    ({"bounds": BOUNDS | {"min_audit_adults": 0}}, "looser than the code limits"),
+    ({"bounds": BOUNDS | {"min_audit_adults": 119}}, "looser than the code limits"),
+    ({"audit": AUDIT | {"mode": "shadow"}}, "mode must be"),
+    ({"guards": GUARDS | {"hold_required": True}, "audit": AUDIT | {"audit_adults": 10}}, "breaks guards.hold_required"),
+    ({"rule": RULE | {"action": "promote"}}, "breaks guards.promote_allowed"),
     ({"rule": RULE | {"cap": 0.5}}, "outside the bounds"),
     ({"rule": RULE | {"cap": 0.01}}, "outside the bounds"),
-    ({"guards": GUARDS | {"hold_required": True}}, "hold_required contradicts"),
+    ({"guards": GUARDS | {"hold_required": True}, "rule": {"action": "hold", "cap": 0.15}},
+     "hold_required contradicts"),
     ({"audit": AUDIT | {"audit_adults": 10}}, "hold_required contradicts"),
     ({"guards": GUARDS | {"promote_allowed": True}, "audit": AUDIT | {"mode": "ACTIVE"}}, "promote_allowed needs"),
     ({"guards": GUARDS | {"promote_allowed": True, "hold_required": True}, "audit": AUDIT | {"audit_adults": 10}},
@@ -116,6 +125,19 @@ def test_agent_output_carrying_a_forbidden_key_is_refused(key):
 def test_inconsistent_input_is_refused(over, match):
     with pytest.raises(ValueError, match=match):
         make_payload(**over)
+
+
+def test_a_stricter_floor_or_narrower_cap_is_allowed():
+    p = make_payload(bounds=BOUNDS | {"cap_min": 0.1, "cap_max": 0.25, "min_audit_adults": 150},
+                     audit=AUDIT | {"audit_adults": 150})
+    assert p["bounds"]["cap_max"] == 0.25
+
+
+def test_hard_limits_are_the_loop_and_policy_constants():
+    from softsignal.loop import CAP_MAX, CAP_MIN
+    from softsignal.policy import load_policy
+
+    assert hard_limits() == (CAP_MIN, CAP_MAX, load_policy()["min_audit_adults"]) == (0.08, 0.3, 120)
 
 
 def test_non_json_input_is_refused():
@@ -179,7 +201,8 @@ def test_bad_outputs_are_rejected(payload, change, reason):
 
 
 def test_hold_rule_is_enforced_in_code():
-    p = make_payload(guards=GUARDS | {"hold_required": True}, audit=AUDIT | {"audit_adults": 90})
+    p = make_payload(guards=GUARDS | {"hold_required": True}, audit=AUDIT | {"audit_adults": 90},
+                     rule={"action": "hold", "cap": 0.15})
     assert validate_output(good(action="re-tune", reason="90 audit adults."), p)[0] == GUARDRAIL
     assert validate_output(good(action="promote", reason="90 audit adults."), p)[0] == GUARDRAIL
     assert validate_output(good(action="hold", reason="90 audit adults."), p) == (None, [])
@@ -340,3 +363,64 @@ def test_input_is_not_mutated(payload):
     before = copy.deepcopy(payload)
     run_a2(payload, client=FakeClient(reply(good())))
     assert payload == before
+
+
+# --- hard limits, rule guards and the model's own cap ----------------------------------------------
+
+def hand_built(**over):
+    """A payload that skipped a2_input (a caller bug): the checks must still hold the code limits."""
+    p = copy.deepcopy(make_payload())
+    for k, v in over.items():
+        p[k] |= v
+    return p
+
+
+def test_loose_bounds_in_a_hand_built_payload_do_not_loosen_the_clamp_or_the_floor():
+    p = hand_built(bounds={"cap_min": 0.0, "cap_max": 1.0, "min_audit_adults": 0})
+    out, notes = clamp_output(good(cap=0.95), p)
+    assert out["cap"] == 0.3 and notes
+    out, _ = clamp_output(good(cap=0.0), p)
+    assert out["cap"] == 0.08
+    p = hand_built(bounds={"min_audit_adults": 0}, audit={"audit_adults": 10}, guards={"hold_required": False})
+    assert validate_output(good(action="re-tune", reason="10 audit adults."), p)[0] == GUARDRAIL
+
+
+@pytest.mark.parametrize("action,allowed,mode,adults,want", [
+    ("re-tune", False, "SHADOW", 150, "re-tune"),
+    ("hold", False, "SHADOW", 150, "hold"),
+    ("promote", True, "SHADOW", 150, "promote"),
+    ("promote", False, "SHADOW", 150, "re-tune"),
+    ("promote", True, "ACTIVE", 150, "re-tune"),
+    ("re-tune", False, "SHADOW", 10, "hold"),
+    ("promote", True, "SHADOW", 10, "hold"),
+])
+def test_guarded_action(action, allowed, mode, adults, want):
+    p = hand_built(guards={"promote_allowed": allowed, "hold_required": adults < 120},
+                   audit={"mode": mode, "audit_adults": adults})
+    assert guarded_action(action, p) == want
+
+
+def test_fallback_obeys_the_guards_even_if_the_rule_does_not():
+    p = hand_built(rule={"action": "re-tune", "cap": 0.15}, guards={"hold_required": True}, audit={"audit_adults": 10})
+    r = run_a2(p, client=None)
+    assert r.output["action"] == "hold" and r.fallback_reason == OFFLINE
+    A2Output(**r.output)
+
+
+def test_a_cap_the_model_states_is_not_an_invented_number(payload):
+    assert validate_output(good(cap=0.2, reason="Raise the cap to 0.2 for 150 audit adults."), payload) == (None, [])
+    assert validate_output(good(cap=0.2, reason="Raise the cap to 20% for 150 audit adults."), payload) == (None, [])
+    assert validate_output(good(cap=0.2, reason="Raise the cap to 0.25."), payload)[0] == NUMBER_NOT_IN_INPUT
+
+
+def test_a_stated_out_of_range_cap_is_clamped_live_not_a_fallback(payload):
+    r = run_a2(payload, client=FakeClient(reply(good(cap=0.5, reason="Cap 0.5 wanted, 150 audit adults."))))
+    assert r.status == LIVE and r.output["cap"] == 0.3 and r.errors == ["CLAMPED cap 0.5 -> 0.3"]
+    assert r.output["reason"].endswith("(cap clamped from 0.5 to 0.3)")
+
+
+def test_hold_rule_end_to_end_through_the_model_path():
+    p = make_payload(guards=GUARDS | {"hold_required": True}, audit=AUDIT | {"audit_adults": 90},
+                     rule={"action": "hold", "cap": 0.15})
+    r = run_a2(p, client=FakeClient(reply(good(action="re-tune", reason="90 audit adults."))))
+    assert r.status == FALLBACK and r.fallback_reason == GUARDRAIL and r.output["action"] == "hold"
