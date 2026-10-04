@@ -16,7 +16,8 @@ Checks, in this order (the first failure sends the round to the rule decision, b
 A schema-valid cap outside bounds is not a failure: it is clamped to cap_min..cap_max and logged "CLAMPED ..."
 in the result's errors (the status stays LIVE), and the reason is rewritten to say so. The model's own cap may be
 named in its reason without being an input number. The bounds and the audit floor are never looser than the code
-limits (contracts.hard_limits: loop.CAP_MIN / CAP_MAX, policy.yaml), whatever the payload says. The fallback
+limits (contracts.hard_limits: loop.CAP_MIN / CAP_MAX applied again in clamp_output, and the audit floor of the
+loop's own policy, checked in a2_input, which is the only way in: a hand-built payload skips that check). The fallback
 obeys the guards too (guarded_action), and a2_input rejects a rule that breaks them.
 
 Missing A1 / A3 output arrives as "insufficient_data" and A2 still decides, from the rest of its input.
@@ -26,7 +27,8 @@ side-by-side decisions.jsonl diff is step 15.
 How loop.py will call it (step 15), after the streak update and before the refit; a2_input raises on an inconsistent
 input, so the caller wraps both calls and uses rule_decision() if it fails (logged as FALLBACK):
 
-    payload = a2_input(rnd, thresholds, audit, bounds, guards, rule_decision(state, policy, n_audit_adults), a1, a3)
+    payload = a2_input(rnd, thresholds, audit, bounds, guards, rule_decision(state, policy, n_audit_adults), a1, a3,
+                       policy=policy)
     result = run_a2(payload, client=client, timer=timer, round_id=rnd)
     record["a2"] = merge_block(result, round_agent_summary(load_records(), rnd, timer.run).get("A2"))
 """
@@ -37,7 +39,7 @@ from softsignal.agents.base import (
     AGE_CLAIM, FALLBACK, GUARDRAIL, INVALID, LIVE, NUMBER_NOT_IN_INPUT, OFFLINE, UNKNOWN_FIELD, AgentResult, age_claims,
     call_model, input_hash, numbers_in, numbers_not_in_input,
 )
-from softsignal.agents.contracts import dotted_paths, hard_limits
+from softsignal.agents.contracts import cap_limits, dotted_paths
 from softsignal.agents.schemas import A2_MAX_REASON_CHARS, A2Output
 
 AGENT = "A2"
@@ -90,7 +92,7 @@ def fallback_output(payload: dict) -> dict:
 def guarded_action(action: str, payload: dict) -> str:
     """The action the guardrails allow: hold before the audit floor, and no promote unless the loop allowed it in
     SHADOW (then re-tune). Used by the fallback, so it never returns what validate_output would refuse."""
-    floor = max(payload["bounds"]["min_audit_adults"], hard_limits()[2])
+    floor = payload["bounds"]["min_audit_adults"]  # a2_input checked it against the loop's policy
     if payload["guards"]["hold_required"] or payload["audit"]["audit_adults"] < floor:
         return "hold"
     if action == "promote" and not (payload["guards"]["promote_allowed"] and payload["audit"]["mode"] == "SHADOW"):
@@ -116,7 +118,7 @@ def validate_output(output: dict, payload: dict) -> tuple[str | None, list[str]]
     if invented:
         return NUMBER_NOT_IN_INPUT, [f"numbers not in the input: {invented}"]
     action, audit = output["action"], payload["audit"]
-    floor = max(payload["bounds"]["min_audit_adults"], hard_limits()[2])  # never looser than the code limit
+    floor = payload["bounds"]["min_audit_adults"]  # a2_input checked it against the loop's policy
     guards = payload["guards"]  # re-derived from the counts too: the flags are not trusted alone
     if (guards["hold_required"] or audit["audit_adults"] < floor) and action != "hold":
         return GUARDRAIL, [f"{action} before {floor} audit adults (hold rule)"]
@@ -132,7 +134,7 @@ def percent_forms(payload: dict) -> list:
 
 def clamp_output(output: dict, payload: dict) -> tuple[dict, list[str]]:
     """The cap inside bounds.cap_min..cap_max; the second value says what was changed (empty if nothing)."""
-    lo_code, hi_code, _ = hard_limits()
+    lo_code, hi_code = cap_limits()
     lo, hi = max(payload["bounds"]["cap_min"], lo_code), min(payload["bounds"]["cap_max"], hi_code)
     cap = float(min(hi, max(lo, output["cap"])))
     if cap == output["cap"]:

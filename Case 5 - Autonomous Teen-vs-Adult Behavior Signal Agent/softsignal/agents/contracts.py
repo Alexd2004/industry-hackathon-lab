@@ -133,13 +133,33 @@ def _limits_from(path: str, mtime_ns: int) -> tuple[float, float, int]:
     return CAP_MIN, CAP_MAX, int(load_policy(Path(path))["min_audit_adults"])
 
 
-def hard_limits() -> tuple[float, float, int]:
-    """(cap_min, cap_max, min_audit_adults): the code constants (loop.CAP_MIN / CAP_MAX, policy.yaml's floor) that
-    the payload's own bounds may never loosen. Imported lazily (loop.py will import the agents) and cached per
-    policy.yaml modification time, so it is read once, not on every check."""
+def cap_limits() -> tuple[float, float]:
+    """(cap_min, cap_max): loop.CAP_MIN / CAP_MAX, the clamp no payload may loosen. Imported lazily because
+    loop.py will import the agents. Reads no file."""
+    from softsignal.loop import CAP_MAX, CAP_MIN
+
+    return CAP_MIN, CAP_MAX
+
+
+def hard_limits(policy: dict | None = None) -> tuple[float, float, int]:
+    """(cap_min, cap_max, min_audit_adults). The audit floor is the policy the loop runs with when it is passed
+    (loop.rule_decision reads env.policy), else policy.yaml, read once per modification time."""
+    lo, hi = cap_limits()
+    if policy is not None:
+        return lo, hi, int(policy["min_audit_adults"])
     from softsignal.policy import POLICY_FILE
 
     return _limits_from(str(POLICY_FILE), POLICY_FILE.stat().st_mtime_ns)
+
+
+ROUND_DIGITS = 3  # rates and thresholds are rounded for the prompt: a model cannot copy 0.1333333333333333 verbatim
+
+
+def _round(value):
+    """A float rounded to ROUND_DIGITS (None and non-numbers unchanged), so the numbers-in-input check can pass."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    return round(float(value), ROUND_DIGITS) if isinstance(value, float) else value
 
 
 def _pick(src: dict, keys, where: str) -> dict:
@@ -161,7 +181,7 @@ def dotted_paths(payload, prefix: str = "") -> set:
 
 
 def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards: dict, rule: dict,
-             a1=INSUFFICIENT_INPUT, a3=INSUFFICIENT_INPUT) -> dict:
+             a1=INSUFFICIENT_INPUT, a3=INSUFFICIENT_INPUT, policy: dict | None = None) -> dict:
     """A2's input for one round (Combined Plan section 7a): A1 and A3 output, current thresholds, the last
     audit-slice metrics, the rule-based decision. Only the listed keys are copied, so a test metric, a label or
     any other field the caller holds never reaches the prompt; check_barrier() then checks the whole payload.
@@ -171,7 +191,9 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     guards: hold_required (fewer than min_audit_adults audit adults) and promote_allowed (SHADOW and the pooled
     test passed), both computed by loop.py in code; the agent is told them and the checks enforce them. They are
     cross-checked here against the counts and the mode, and so is the rule, so a caller that builds them wrongly
-    fails loudly. bounds may not be looser than hard_limits() (the loop's cap clamp, policy.yaml's audit floor).
+    fails loudly. bounds may not be looser than hard_limits(policy): the loop's cap clamp and the audit floor of
+    policy (pass env.policy; None means policy.yaml). t_verify, t_soft and the two false-teen rates are rounded
+    to ROUND_DIGITS decimals, so the model can copy them and the numbers-in-input check can accept them.
     rule: {action, cap}, loop.rule_decision(). a1 / a3: the agent's output dict, or "insufficient_data" (round 0,
     or an agent not built yet); never a guess.
     """
@@ -183,7 +205,7 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     audit = _pick(audit, A2_AUDIT_KEYS, "audit")
     if not 0 <= bounds["cap_min"] <= bounds["cap_max"] <= 1:
         raise ValueError(f"A2 bounds need 0 <= cap_min <= cap_max <= 1, got {bounds['cap_min']}, {bounds['cap_max']}")
-    lo, hi, floor = hard_limits()
+    lo, hi, floor = hard_limits(policy)
     if bounds["cap_min"] < lo or bounds["cap_max"] > hi or bounds["min_audit_adults"] < floor:
         raise ValueError(f"A2 bounds are looser than the code limits: cap {lo}..{hi} and {floor} audit adults "
                          f"(got {bounds['cap_min']}..{bounds['cap_max']} and {bounds['min_audit_adults']})")
@@ -204,8 +226,10 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
         "round": int(round_id),
         "a1": a1,
         "a3": a3,
-        "thresholds": _pick(thresholds, A2_THRESHOLD_KEYS, "thresholds"),
-        "audit": audit,
+        "thresholds": {k: _round(v) if k in ("t_verify", "t_soft") else v
+                       for k, v in _pick(thresholds, A2_THRESHOLD_KEYS, "thresholds").items()},
+        "audit": {k: _round(v) if k in ("pooled_false_teen_rate", "candidate_false_teen") else v
+                  for k, v in audit.items()},
         "bounds": bounds,
         "guards": guards,
         "rule": rule,

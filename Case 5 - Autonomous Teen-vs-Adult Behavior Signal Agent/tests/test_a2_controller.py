@@ -392,14 +392,12 @@ def hand_built(**over):
     return p
 
 
-def test_loose_bounds_in_a_hand_built_payload_do_not_loosen_the_clamp_or_the_floor():
-    p = hand_built(bounds={"cap_min": 0.0, "cap_max": 1.0, "min_audit_adults": 0})
+def test_loose_cap_bounds_in_a_hand_built_payload_do_not_loosen_the_clamp():
+    p = hand_built(bounds={"cap_min": 0.0, "cap_max": 1.0})
     out, notes = clamp_output(good(cap=0.95), p)
     assert out["cap"] == 0.3 and notes
     out, _ = clamp_output(good(cap=0.0), p)
     assert out["cap"] == 0.08
-    p = hand_built(bounds={"min_audit_adults": 0}, audit={"audit_adults": 10}, guards={"hold_required": False})
-    assert validate_output(good(action="re-tune", reason="10 audit adults."), p)[0] == GUARDRAIL
 
 
 @pytest.mark.parametrize("action,allowed,mode,adults,want", [
@@ -518,7 +516,7 @@ def test_a_fraction_outside_the_bounds_is_still_clamped(payload, cap):
 def break_limits(monkeypatch):
     def boom():
         raise OSError("policy.yaml is gone")
-    monkeypatch.setattr("softsignal.agents.a2_controller.hard_limits", boom)
+    monkeypatch.setattr("softsignal.agents.a2_controller.cap_limits", boom)
 
 
 def test_unreadable_limits_do_not_break_the_offline_fallback(payload, monkeypatch):
@@ -589,8 +587,56 @@ def test_the_payload_builds_from_every_round_of_a_real_loop_run(real_run):
             guards={"hold_required": adults < pol["min_audit_adults"],
                     "promote_allowed": prev["mode"] == loop.SHADOW and ev["streak"] >= loop.PROMOTE_STREAK
                     and adults >= pol["min_audit_adults"]},
-            rule=rule)
+            rule=rule, policy=pol)
         assert p["rule"]["action"] == row["action"] or ev["promote_refused"]
         assert validate_output(fallback_output(p), p) == (None, [])
         seen.add(rule["action"])
     assert {"hold", "re-tune"} <= seen  # the run covered both the hold rule and re-tuning
+
+
+# --- review 5: floats are rounded for the prompt; the audit floor is the loop's policy -------------
+
+REAL_FLOATS = {"thresholds": THRESHOLDS | {"t_verify": 0.8123456789012345, "t_soft": 0.4166666666666667},
+               "audit": AUDIT | {"pooled_false_teen_rate": 0.1333333333333333, "candidate_false_teen": 0.0689655}}
+
+
+def test_loop_floats_are_rounded_in_the_input_and_the_model_can_quote_them():
+    p = make_payload(**REAL_FLOATS)
+    assert p["thresholds"]["t_verify"] == 0.812 and p["thresholds"]["t_soft"] == 0.417
+    assert p["audit"]["pooled_false_teen_rate"] == 0.133 and p["audit"]["candidate_false_teen"] == 0.069
+    for reason in ("Pooled rate 0.133 is within the cap.", "Pooled rate 13.3% is within the cap.",
+                   "Candidate 6.9% at t_verify 0.812."):
+        assert validate_output(good(reason=reason, cites=["audit.pooled_false_teen_rate"]), p) == (None, [])
+    assert validate_output(good(reason="Pooled rate 0.1333333333333333."), p)[0] == NUMBER_NOT_IN_INPUT
+
+
+def test_rounding_leaves_counts_none_and_bools_alone():
+    p = make_payload(audit=AUDIT | {"candidate_false_teen": None, "pooled_false_teen_rate": None})
+    assert p["audit"]["candidate_false_teen"] is None and p["audit"]["audit_adults"] == 150
+    assert p["thresholds"]["cap"] == 0.15 and p["rule"]["cap"] == 0.15 and p["bounds"] == BOUNDS
+
+
+def test_the_floor_is_the_loops_policy_when_it_is_passed():
+    lower = {"min_audit_adults": 50}
+    bounds = BOUNDS | {"min_audit_adults": 50}
+    with pytest.raises(ValueError, match="looser than the code limits"):  # without the policy, policy.yaml's 120 rules
+        make_payload(bounds=bounds, audit=AUDIT | {"audit_adults": 60}, guards=GUARDS)
+    p = make_payload(bounds=bounds, audit=AUDIT | {"audit_adults": 60}, guards=GUARDS, policy=lower)
+    assert validate_output(good(action="re-tune", reason="60 audit adults."), p) == (None, [])  # not held at 120
+    assert guarded_action("re-tune", p) == "re-tune"
+    p = make_payload(bounds=bounds, audit=AUDIT | {"audit_adults": 40},
+                     guards=GUARDS | {"hold_required": True}, rule={"action": "hold", "cap": 0.15}, policy=lower)
+    assert validate_output(good(action="re-tune", reason="40 audit adults."), p)[0] == GUARDRAIL
+
+
+def test_a_bounds_floor_below_the_loops_policy_is_refused():
+    with pytest.raises(ValueError, match="looser than the code limits"):
+        make_payload(policy={"min_audit_adults": 150})  # BOUNDS says 120
+
+
+def test_cap_limits_read_no_file(monkeypatch):
+    from softsignal.agents import contracts
+
+    monkeypatch.setattr(contracts, "_limits_from", lambda *a: (_ for _ in ()).throw(AssertionError("read the file")))
+    assert contracts.cap_limits() == (0.08, 0.3)
+    assert hard_limits({"min_audit_adults": 77}) == (0.08, 0.3, 77)
