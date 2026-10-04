@@ -1,20 +1,34 @@
-"""A3 error analyst (Tier 3, step 16): schema and input contract (sub-step 1).
+"""A3 error analyst (Tier 3, step 16): schema, input contract, checks and every run path.
 
-No test calls the network or reads the real data.
+No test calls the network or reads the real data. Live replies come from a fake client.
 """
 import copy
+from types import SimpleNamespace
 
+import anthropic
+import httpx2
 import numpy as np
 import pandas as pd
 import pytest
 from pydantic import ValidationError
 
+from softsignal.agent_timer import AgentTimer, load_records, round_agent_summary
+from softsignal.agents import base
+from softsignal.agents.a3_errors import (
+    SYSTEM, fallback_output, insufficient_reason, run_a3, user_message, validate_output,
+)
+from softsignal.agents.base import (
+    AGE_CLAIM, API_ERROR, CONNECTION, FALLBACK, FORBIDDEN_COLUMN, INSUFFICIENT, INVALID, LIVE, NUMBER_NOT_IN_INPUT,
+    OFFLINE, REFUSAL, TIMEOUT, UNKNOWN_FIELD, UNSUPPORTED,
+)
 from softsignal.agents.contracts import (
     A3_COLS, A3_ERROR_TYPES, A3_MAX_SIGNALS, LABEL_KEYS, TEST_METRIC_KEYS, BarrierError, a3_fields, a3_input,
     check_barrier,
 )
 from softsignal.agents.schemas import A3Output
 from softsignal.features import ID_COL
+
+from agent_fakes import REQ, FakeClient, reply
 
 CHIPS = [("logit_text_score", "writes like a teen"), ("night_notification_open_rate", "opens notifications at night"),
          ("pct_active_school_hours", "quiet in school hours"), ("share_news_views", "reads little news")]
@@ -213,3 +227,132 @@ def test_schema_accepts_a_valid_reply_and_rejects_bad_ones():
         mutate(bad)
         with pytest.raises(ValidationError):
             A3Output.model_validate(bad)
+
+
+# --- checks and run paths ---------------------------------------------------------------------------------
+
+def live_output(p, kind="false_teen"):
+    """A reply that passes every check: one pattern citing the type's own count, one advisory change."""
+    n = p[kind]["n_accounts"]
+    sig = p[kind]["signals"][0]
+    return {"status": "ok",
+            "patterns": [{"error_type": kind,
+                          "description": f"{sig['signal']} shows in {sig['n_accounts']} of {n} {kind} accounts.",
+                          "n_accounts": n,
+                          "evidence": [{"field": f"{kind}.n_accounts", "value": n},
+                                       {"field": f"{kind}.signals.{sig['id']}.n_accounts",
+                                        "value": sig["n_accounts"]}]}],
+            "suggested_param_changes": [{"param": "cap", "direction": "down",
+                                         "reason": f"{p['n_errors'][kind]} errors at t_verify {p['t_verify']}."}]}
+
+
+def run(p, client, tmp_path, rnd=4):
+    timer = AgentTimer(tmp_path / "calls.jsonl", run="test-run")
+    return run_a3(p, client=client, timer=timer, round_id=rnd), load_records(timer.path)
+
+
+def with_pattern(p, **change):
+    out = live_output(p)
+    out["patterns"][0].update(change)
+    return out
+
+
+def test_valid_output_passes(payload):
+    assert validate_output(live_output(payload), payload) == (None, [])
+    assert validate_output(live_output(payload, "missed_teen"), payload) == (None, [])
+
+
+def test_insufficient_status_with_empty_lists_passes(payload):
+    assert validate_output(fallback_output(), payload) == (None, [])
+
+
+@pytest.mark.parametrize("make, reason", [
+    (lambda p: with_pattern(p, description="Teens aged 15 write like this."), AGE_CLAIM),
+    (lambda p: with_pattern(p, description="The job field explains it."), FORBIDDEN_COLUMN),
+    (lambda p: with_pattern(p, description="account_age_days is low."), FORBIDDEN_COLUMN),
+    (lambda p: with_pattern(p, description="Seen in 99 accounts."), NUMBER_NOT_IN_INPUT),
+    (lambda p: {**live_output(p), "suggested_param_changes": [
+        {"param": "cap", "direction": "up", "reason": "Raise it by 7777."}]}, NUMBER_NOT_IN_INPUT),
+    (lambda p: with_pattern(p, n_accounts=p["false_teen"]["n_accounts"] - 1), UNSUPPORTED),
+    (lambda p: with_pattern(p, error_type="missed_teen"), UNSUPPORTED),  # cites false_teen counts for missed_teen
+    (lambda p: with_pattern(p, evidence=[{"field": "audit.adults", "value": 99}]), UNKNOWN_FIELD),
+    (lambda p: with_pattern(p, evidence=[{"field": "made_up.path", "value": 1}]), UNKNOWN_FIELD),
+    (lambda p: with_pattern(p, evidence=[{"field": "audit.adults", "value": 20}]), UNSUPPORTED),  # not a count
+    (lambda p: {**live_output(p), "patterns": []}, UNSUPPORTED),
+    (lambda p: {**fallback_output(), "suggested_param_changes": live_output(p)["suggested_param_changes"]}, INVALID),
+    (lambda p: {**live_output(p), "suggested_param_changes": live_output(p)["suggested_param_changes"] * 2},
+     UNSUPPORTED),
+])
+def test_bad_outputs_are_rejected(payload, make, reason):
+    got, errors = validate_output(make(payload), payload)
+    assert got == reason and errors
+
+
+def test_insufficient_reasons(parts):
+    df, labels = parts
+    ok = a3_input(df, labels, T_VERIFY, 4, 5, test_ids=[])
+    assert insufficient_reason(ok) is None
+    assert insufficient_reason(a3_input(df, labels, T_VERIFY, 4, None, test_ids=[])) == "no min_a3_errors in policy.yaml"
+    assert insufficient_reason(a3_input(df, labels, None, 4, 5, test_ids=[])) == "no live t_verify"
+    assert "fewer than" in insufficient_reason(a3_input(df, labels, T_VERIFY, 4, 500, test_ids=[]))
+    empty = a3_input(pd.DataFrame(columns=A3_COLS), {}, T_VERIFY, 0, 5, test_ids=[])
+    assert "no audit labels" in insufficient_reason(empty)
+    n = sum(ok["n_errors"].values())  # the floor is inclusive
+    assert insufficient_reason(a3_input(df, labels, T_VERIFY, 4, n, test_ids=[])) is None
+    assert insufficient_reason(a3_input(df, labels, T_VERIFY, 4, n + 1, test_ids=[])) is not None
+
+
+def test_live_reply_is_used_with_the_decision_path_timeout(payload, tmp_path):
+    client = FakeClient(reply(live_output(payload)))
+    result, records = run(payload, client, tmp_path)
+    assert (result.status, result.output, result.fallback_reason) == (LIVE, live_output(payload), None)
+    assert client.options == [{"timeout": base.TIMEOUT_S, "max_retries": 0}]
+    (kw,) = client.calls
+    assert kw["system"] == SYSTEM and kw["messages"] == [{"role": "user", "content": user_message(payload)}]
+    assert kw["output_config"]["format"]["schema"] == anthropic.transform_schema(A3Output)
+    assert '"fields":' in kw["messages"][0]["content"]
+    assert [(r["kind"], r["status"]) for r in records] == [("model", LIVE)]
+
+
+def test_prompt_holds_no_id_label_or_forbidden_input(parts, payload):
+    text = user_message(payload)
+    assert not any(i in text for i in parts[1])
+    for word in ("label_teen", "is_teen", "blogger_id"):
+        assert word not in text
+
+
+def test_offline_is_no_analysis(payload, tmp_path):
+    result, records = run(payload, None, tmp_path)
+    assert (result.status, result.fallback_reason, result.output) == (FALLBACK, OFFLINE, fallback_output())
+    assert round_agent_summary(records, 4, "test-run")["A3"]["status"] == FALLBACK
+
+
+def test_insufficient_input_makes_no_call(parts, tmp_path):
+    df, labels = parts
+    client = FakeClient(reply(fallback_output()))
+    for p in (a3_input(df, labels, T_VERIFY, 4, None, test_ids=[]),
+              a3_input(df, labels, T_VERIFY, 4, 500, test_ids=[]),
+              a3_input(pd.DataFrame(columns=A3_COLS), {}, T_VERIFY, 0, 5, test_ids=[])):
+        result, _ = run(p, client, tmp_path, rnd=p["round"])
+        assert (result.status, result.fallback_reason, result.output["status"]) == (FALLBACK, INSUFFICIENT, INSUFFICIENT)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("make, reason", [
+    (lambda p: FakeClient(raises=anthropic.APITimeoutError(request=REQ)), TIMEOUT),
+    (lambda p: FakeClient(raises=anthropic.APIConnectionError(request=REQ)), CONNECTION),
+    (lambda p: FakeClient(raises=anthropic.RateLimitError("slow", response=httpx2.Response(429, request=REQ),
+                                                           body=None)), API_ERROR),
+    (lambda p: FakeClient(reply(stop_reason="refusal", text='{"status": "o')), REFUSAL),
+    (lambda p: FakeClient(reply(live_output(p), stop_reason="max_tokens")), INVALID),
+    (lambda p: FakeClient(reply(live_output(p) | {"status": "maybe"})), INVALID),
+    (lambda p: FakeClient(SimpleNamespace(stop_reason="end_turn")), INVALID),
+    (lambda p: FakeClient(reply(with_pattern(p, description="Seen in 99 accounts."))), NUMBER_NOT_IN_INPUT),
+    (lambda p: FakeClient(reply(with_pattern(p, description="The gender gap."))), FORBIDDEN_COLUMN),
+])
+def test_every_failure_is_no_analysis(payload, tmp_path, make, reason):
+    before = copy.deepcopy(payload)
+    result, records = run(payload, make(payload), tmp_path)
+    assert (result.status, result.fallback_reason) == (FALLBACK, reason)
+    assert result.output == fallback_output() and result.errors and payload == before
+    assert all(r["status"] == FALLBACK for r in records)
