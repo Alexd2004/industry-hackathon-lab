@@ -256,9 +256,10 @@ def split():
     return train, test, build_matrix(tuple(train[ID_COL].astype(str)))
 
 
-def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=()):
+def run_rounds(split, tmp_path, monkeypatch, n, flags=(), start_flags=(), min_adults=1):
     """n rounds with min_audit_adults=1 and a stubbed refit; the state starts SHADOW with a candidate in place."""
     train, test, tm = split
+    monkeypatch.setattr(lp, "PROMOTE_MIN_ADULTS", min_adults)  # these test the promote logic, not the real floor
     seq = list(flags) if isinstance(flags, list) else [flags]  # a list gives each refit its own flags, the last repeats
     monkeypatch.setattr(lp, "refit", lambda env, st, cap: candidate(seq.pop(0) if len(seq) > 1 else seq[0]))
     env = lp.make_env(train, test, policy={**POL, "min_audit_adults": 1}, tm=tm,
@@ -296,8 +297,7 @@ def test_a_soft_capped_candidate_can_still_promote(split, tmp_path, monkeypatch)
 
 
 def test_rounds_with_too_few_audit_adults_do_not_build_the_streak(split, tmp_path, monkeypatch):
-    monkeypatch.setattr(lp, "PROMOTE_MIN_ADULTS", 10**6)
-    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 4)
+    rounds, st, _ = run_rounds(split, tmp_path, monkeypatch, 4, min_adults=10**6)
     assert (rounds["mode"] == lp.SHADOW).all() and st.streak == 0
 
 
@@ -379,3 +379,9 @@ def test_write_run_starts_the_new_rows_on_their_own_line(tmp_path):
     lp.write_run(rounds, recs, r_path, d_path)
     assert len(pd.read_csv(r_path)) == 2
     assert [json.loads(x)["round"] for x in d_path.read_text().splitlines()] == [0, 0]
+
+
+def test_real_rounds_below_the_adult_floor_leave_the_streak_at_zero(full):
+    _, _, _, records, _ = full
+    thin = [r["evidence"] for r in records[1:] if r["evidence"]["round_audit_adults"] < lp.PROMOTE_MIN_ADULTS]
+    assert thin and all(e["streak"] == 0 for e in thin)

@@ -61,7 +61,7 @@ SOURCE_RULE = "rule"
 CAP_MIN, CAP_MAX = 0.08, 0.30  # clamp for any cap the loop or A2 applies (policy.py does not clamp)
 PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs audit false-teen <= cap + this ...
 PROMOTE_STREAK = 2  # ... in this many rounds in a row
-PROMOTE_MIN_ADULTS = 20  # a round's audit slice needs this many adults to count toward the streak
+PROMOTE_MIN_ADULTS = 30  # a round's audit slice needs this many adults to count toward the streak
 UNSAFE_FLAGS = (INSUFFICIENT_ADULTS, INSUFFICIENT_TEENS)  # a candidate with these is never promoted
 THRESHOLD_SOURCES = ("audit", "all_verified")
 AGENT = "loop"
