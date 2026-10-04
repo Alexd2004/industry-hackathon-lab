@@ -21,7 +21,8 @@ path, gets longer (TIMEOUTS; not measured yet, set after measuring); A5's one-of
 SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S /
 SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
 forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
-The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. Refusals go to the
+The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. For local use it can sit in a
+`.env` file in the case folder (gitignored), read by load_env_file below; a variable already set wins. Refusals go to the
 deterministic fallback, as the plan says, not to a server-side model fallback.
 """
 from __future__ import annotations
@@ -35,6 +36,34 @@ from pathlib import Path
 from typing import Any, Callable
 
 from softsignal.agent_timer import AgentTimer
+
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def load_env_file(path: Path = ENV_FILE) -> list[str]:
+    """Set KEY=value lines of a .env file into os.environ and return the names set. Variables already set are
+    kept, blank lines and # comments are skipped, one pair of quotes around a value is removed. A missing or
+    unreadable file sets nothing."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return []
+    names = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.removeprefix("export ").strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            names.append(key)
+    return names
+
+
+load_env_file()  # before the settings below, so SOFTSIGNAL_* in .env applies too
 
 MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-haiku-4-5-20251001")
 EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "")  # empty: no effort sent

@@ -242,3 +242,36 @@ def test_a_recorded_run_hashes_a5_like_a_normal_run(split_and_tm, tmp_path):
                               rounds_path=live_dir / "rounds.csv", decisions_path=live_dir / "decisions.jsonl",
                               replayer=__import__("softsignal.replay", fromlist=["Replayer"]).Replayer.from_records(live))
     assert {r["a5"]["status"] for r in normal} == {"REPLAY"}
+
+
+def _rec(run, rnd, **blocks):
+    return {"run": run, "round": rnd, **{k: {"status": s, "fallback_reason": why} for k, (s, why) in blocks.items()}}
+
+
+def test_pick_canonical_takes_the_run_with_fewest_unexpected_fallbacks_and_ignores_metrics():
+    ok, bad = ("LIVE", None), ("FALLBACK", "timeout")
+    expected = ("FALLBACK", "insufficient_data")  # no model call was needed: not a failure
+    recs = [_rec("r1", 0, a1=expected, a5=ok), _rec("r1", 1, a1=ok, a5=bad),
+            _rec("r2", 0, a1=expected, a5=ok), _rec("r2", 1, a1=ok, a5=ok),
+            _rec("r3", 0, a1=expected, a5=ok), _rec("r3", 1, a1=ok, a5=ok)]
+    assert crew.run_fallbacks([r for r in recs if r["run"] == "r1"]) == 1
+    assert crew.run_fallbacks([r for r in recs if r["run"] == "r2"]) == 0
+    assert crew.pick_canonical(recs, 2) == "r2"  # r2 and r3 tie at 0: the earliest id
+
+
+def test_pick_canonical_skips_incomplete_runs_and_returns_none_when_all_are_incomplete():
+    ok = ("LIVE", None)
+    recs = [_rec("r1", 0, a1=ok), _rec("r2", 0, a1=ok), _rec("r2", 1, a1=ok)]
+    assert crew.pick_canonical(recs, 2) == "r2"
+    assert crew.pick_canonical(recs, 3) is None
+
+
+def test_keep_run_leaves_only_that_run_in_both_files(tmp_path):
+    rounds = tmp_path / "rounds_recorded.csv.new"
+    dec = tmp_path / "decisions_recorded.jsonl.new"
+    pd.DataFrame({"run": ["r1", "r1", "r2", "r2"], "round": [0, 1, 0, 1]}).to_csv(rounds, index=False)
+    import json
+    dec.write_text("".join(json.dumps({"run": r, "round": n}) + "\n" for r in ("r1", "r2") for n in (0, 1)))
+    crew.keep_run((rounds, dec), "r2")
+    assert list(pd.read_csv(rounds, dtype={"run": str})["run"]) == ["r2", "r2"]
+    assert [json.loads(line)["run"] for line in dec.read_text().splitlines()] == ["r2", "r2"]

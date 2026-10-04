@@ -5,6 +5,7 @@ through a mocked HTTP transport so the request shape the API receives is checked
 """
 import copy
 import json
+import os
 from types import SimpleNamespace
 
 import anthropic
@@ -448,3 +449,18 @@ def test_model_text_is_shown_as_typed_not_rendered():
     at = AppTest.from_function(card, kwargs={"rec": record}).run()
     shown = next(c.value for c in at.caption if "evil" in c.value)
     assert "](http" not in shown and r"\[this\]" in shown and r"\$x\$" in shown and r"\*\*now\*\*" in shown
+
+
+def test_env_file_sets_missing_variables_only(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_text('# note\nexport SS_TEST_A=one\nSS_TEST_B = "two"\nSS_TEST_KEEP=new\nbad line\n', encoding="utf-8")
+    monkeypatch.delenv("SS_TEST_A", raising=False)
+    monkeypatch.delenv("SS_TEST_B", raising=False)
+    monkeypatch.setenv("SS_TEST_KEEP", "old")
+    try:
+        assert base.load_env_file(f) == ["SS_TEST_A", "SS_TEST_B"]
+        assert (os.environ["SS_TEST_A"], os.environ["SS_TEST_B"], os.environ["SS_TEST_KEEP"]) == ("one", "two", "old")
+    finally:
+        os.environ.pop("SS_TEST_A", None)
+        os.environ.pop("SS_TEST_B", None)
+    assert base.load_env_file(tmp_path / "missing.env") == []

@@ -198,6 +198,37 @@ def compact_decisions(path: Path) -> None:
     path.write_text("".join(json.dumps(by_key[k]) + "\n" for k in sorted(by_key)), encoding="utf-8")
 
 
+AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
+
+
+def run_fallbacks(records: list[dict]) -> int:
+    """FALLBACK blocks in one run that are not the expected "insufficient_data" (no model call was needed)."""
+    return sum(1 for r in records for k in AGENT_KEYS
+               if (r.get(k) or {}).get("status") == FALLBACK and (r[k].get("fallback_reason") != "insufficient_data"))
+
+
+def pick_canonical(records: list[dict], n_rounds: int) -> str | None:
+    """The run id to commit as the recording, or None if no run has all n_rounds rounds.
+
+    Rule, fixed before any run is looked at: among complete runs, the fewest unexpected FALLBACK blocks, ties to
+    the earliest run id. It never looks at recall, false-teen or any metric, so picking the recording cannot
+    be picking the best-looking numbers.
+    """
+    by_run: dict[str, list[dict]] = {}
+    for r in records:
+        by_run.setdefault(r["run"], []).append(r)
+    complete = {run: rs for run, rs in by_run.items() if len({r["round"] for r in rs}) == n_rounds}
+    return min(complete, key=lambda run: (run_fallbacks(complete[run]), run), default=None)
+
+
+def keep_run(paths: tuple[Path, Path], run: str) -> None:
+    """Rewrite the rounds csv and decisions jsonl at paths so they hold only this run."""
+    rounds = pd.read_csv(paths[0], dtype={"run": str})
+    rounds[rounds["run"] == run].to_csv(paths[0], index=False, lineterminator="\n")
+    kept = [r for r in read_records(paths[1]) if r["run"] == run]
+    paths[1].write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+
+
 # ---- background run for the Loop tab ----
 @dataclass
 class BackgroundRun:
@@ -255,6 +286,9 @@ def main() -> None:
     ap.add_argument("--mode", choices=RUN_MODES, default="crew",
                     help="crew: apply A2; rule: apply the rule")
     ap.add_argument("--rounds", type=int, default=None)
+    ap.add_argument("--runs", type=int, default=1,
+                    help="repeat the full run N times, each with its own run id (timings for p50 / p95); "
+                         "with --record the canonical run (pick_canonical) is the one committed")
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--no-write", action="store_true", help="print only")
     out.add_argument("--record", action="store_true", help="replace the committed recorded run with this one")
@@ -264,10 +298,11 @@ def main() -> None:
         ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
     if args.record and args.mode != "crew":
         ap.error("--record writes the crew run that a fresh clone shows; drop --mode rule")
+    if args.runs < 1:
+        ap.error("--runs must be at least 1")
     if not (args.no_write or args.record):
         check_rounds_header(ROUNDS_CSV, ROUNDS_COLS)  # fail now, not after every refit has run
     train, test = load_data(on_param_mismatch="error")
-    env = make_env(train, test)
     client = make_client()
     recorded = (ROUNDS_RECORDED, DECISIONS_RECORDED)
     # --record builds the new run next to the committed one and swaps it in only once the run has finished
@@ -276,14 +311,30 @@ def main() -> None:
         p.unlink(missing_ok=True)
     try:
         replayer = None if args.record or args.no_replay else Replayer.from_file(DECISIONS_RECORDED)
-        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer,
-                                   apply_a2=args.mode == "crew")
+        all_rounds, all_records = [], []
+        for _ in range(args.runs):
+            # a fresh timer per run: its own run id, its calls logged next to the other runs' calls
+            env = make_env(train, test, timer=AgentTimer(DEFAULT_LOG) if args.runs > 1 else None)
+            rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths, replayer=replayer,
+                                       apply_a2=args.mode == "crew")
+            all_rounds.append(rounds)
+            all_records.append(records)
+            if args.runs > 1:
+                print(f"run {env.timer.run}: {run_fallbacks(records)} unexpected FALLBACK blocks")
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)
         raise
     if args.record:
         compact_decisions(paths[1])  # the committed file: one record per round (Crew Plan section 8)
+        if args.runs > 1:
+            canon = pick_canonical(read_records(paths[1]), len(all_rounds[0]))
+            if canon is None:
+                raise SystemExit("no run has every round; nothing recorded")
+            keep_run(paths, canon)
+            rounds = next(r for r in all_rounds if (r["run"] == canon).all())
+            records = [r for rs in all_records for r in rs if r["run"] == canon]
+            print(f"canonical run: {canon} (fewest unexpected FALLBACKs, ties to the earliest; metrics not used)")
         for new, old in zip(paths, recorded):
             os.replace(new, old)
         paths = recorded
