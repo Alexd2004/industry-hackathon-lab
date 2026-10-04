@@ -1,6 +1,5 @@
 """Output schemas for the agents (Combined Plan section 7a, per-agent contract). One Pydantic model per agent,
-sent as output_config.format and checked again in code. A1, A2, A4 and A5 are built; A3's owner adds
-its patterns schema here.
+sent as output_config.format and checked again in code.
 """
 from typing import Literal
 
@@ -83,6 +82,59 @@ class A2Output(BaseModel):
         description="1 to 5 dotted field paths copied exactly from the input (for example audit.audit_adults) "
                     "that the reason relies on, most important first.",
     )
+
+
+A3_MAX_DESC_CHARS = 250
+A3_MAX_REASON_CHARS = 200
+A3_MAX_PATTERNS = 4
+A3_MAX_EVIDENCE = 4
+A3_MAX_CHANGES = 3
+A3_PARAMS = ("cap", "cutoff", "blend_w")  # the plan's enum; advisory only, A2 acts on action and cap alone
+
+
+class A3Evidence(BaseModel):
+    """One input value a pattern rests on: field is a path from contracts.a3_fields() ("false_teen.n_accounts")."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str = Field(description="A field path copied exactly from the input's fields list.")
+    value: float = Field(description="That field's value, copied exactly from the input.")
+
+
+class A3Pattern(BaseModel):
+    """One recurring trait among the audit accounts the live model got wrong."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_type: Literal["false_teen", "missed_teen"]
+    description: str = Field(min_length=1, max_length=A3_MAX_DESC_CHARS,
+                             description="The trait the errors share, under 250 characters. Every number in it "
+                                         "must appear in the input exactly as written there.")
+    n_accounts: int = Field(strict=True, ge=1, description="Accounts of this error type that show the trait, "
+                                                           "copied from the input; never above that type's total.")
+    evidence: list[A3Evidence] = Field(min_length=1, max_length=A3_MAX_EVIDENCE)
+
+
+class A3Change(BaseModel):
+    """An advisory parameter change. A2 reads it as data and decides alone."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    param: Literal["cap", "cutoff", "blend_w"]
+    direction: Literal["up", "down"]
+    reason: str = Field(min_length=1, max_length=A3_MAX_REASON_CHARS,
+                        description="Why, under 200 characters. Every number in it must appear in the input "
+                                    "exactly as written there.")
+
+
+class A3Output(BaseModel):
+    """A3 error analyst: patterns among the audit-slice errors of earlier rounds, and advisory changes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "insufficient_data"]
+    patterns: list[A3Pattern] = Field(max_length=A3_MAX_PATTERNS)
+    suggested_param_changes: list[A3Change] = Field(max_length=A3_MAX_CHANGES)
 
 
 A5_VERDICTS = ("supported", "unsupported", "projected", "cannot_check")

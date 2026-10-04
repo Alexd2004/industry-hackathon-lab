@@ -42,7 +42,7 @@ def test_crew_changes_nothing_the_rule_decides(split_and_tm, tmp_path, crew_run)
     plain_rounds, plain_records = loop.run_loop(env(split_and_tm, tmp_path, "20261004T000000.000000Z-crew"), N_ROUNDS)
     pd.testing.assert_frame_equal(rounds, plain_rounds)
     for got, want in zip(records, plain_records):
-        agents = ("a1", "a2", "a5")  # the crew's own blocks; everything the rule decides must be identical
+        agents = ("a1", "a2", "a3", "a5")  # the crew's own blocks; everything the rule decides must be identical
         assert {k: v for k, v in got.items() if k not in agents} == {k: v for k, v in want.items() if k not in agents}
 
 

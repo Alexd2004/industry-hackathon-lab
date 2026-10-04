@@ -51,6 +51,7 @@ OFFLINE, TIMEOUT, CONNECTION, API_ERROR = "offline", "timeout", "connection", "a
 REFUSAL, INVALID = "refusal", "invalid_output"
 NUMBER_NOT_IN_INPUT, UNKNOWN_FIELD, AGE_CLAIM = "number_not_in_input", "cites_unknown_field", "age_claim"
 UNSUPPORTED = "unsupported_verdict"  # e.g. A1 says drift is real without citing any PSI
+FORBIDDEN_COLUMN = "forbidden_column"  # A3: the text names a column the model never uses (age, job, ...)
 GUARDRAIL = "guardrail"  # A2: an action the hold rule or the promote guard forbids
 CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID")
 

@@ -2,7 +2,7 @@
 
 Each builder copies only the fields its agent's contract allows (Combined Plan section 7a). A1-A4 never get
 a label, a frozen test account or a test-set metric; check_barrier() enforces the key part on every payload.
-A1, A2, A4 and A5 are built so far; A3's owner adds its builder here.
+All five builders are here.
 
 A5 (honesty auditor) is the one agent that reads test-set metrics: claims plus the results files as rows
 (a5_sources), and the section 8 risk list (load_checklist). It runs after the round, and nothing it writes
@@ -24,6 +24,12 @@ the recurring words. No per-account rows and no account ids: the note is about t
 evidence, and per-account numbers (ranks 1..n, one account's contribution) would let the numbers-in-input
 check pass an invented count or one account's value presented as a batch figure. Every number in the
 input is a batch-level fact, so every number A4 may cite is one too. It also keeps the prompt short.
+
+A3 (error analyst) gets the same kind of summary for the audit-slice accounts the live model got wrong in
+earlier rounds: false teens (adults at or above the live t_verify) and missed teens (teens below it), each
+with its count, rate, the signals and words they share. The label only decides the error type in code; the
+payload holds counts and that derived type, never a label or an id. Audit slice only: verify-band labels are
+selected for high scores, so they would show almost no missed teens.
 """
 import json
 import math
@@ -201,6 +207,107 @@ def a1_fields(payload: dict) -> dict:
     out |= {f"audit.{k}": v for k, v in payload["audit"].items()}
     for h in payload["history"]:
         out |= {f"history.round{h['round']}.{k}": v for k, v in h.items() if k != "round"}
+    return {k: float(v) for k, v in out.items() if v is not None}
+
+
+A3_COLS = [ID_COL, "score", "c1", "c2", "c3", "f1", "f2", "f3", "v1", "v2", "v3", "words"]
+A3_ERROR_TYPES = ("false_teen", "missed_teen")
+A3_TOP_WORDS = 10
+A3_MAX_SIGNALS = 6  # per error type: the most common first, so the prompt stays short
+
+
+def _slug(phrase: str) -> str:
+    return "_".join("".join(ch if ch.isalnum() else " " for ch in phrase.lower()).split())
+
+
+def a3_input(frame: pd.DataFrame, labels: dict, t_verify: float | None, round_id: int, min_errors: int | None,
+             test_ids=None) -> dict:
+    """A3's input for one round: the audit-slice errors of EARLIER rounds, summarised in code.
+
+    frame: explain.explain_frame rows (A3_COLS, scored by the live model) for the audit accounts revealed
+    before this round. labels: {account id: 0 / 1} for exactly those accounts (oracle.revealed("audit",
+    before_round=round_id)); a label is used here to say which side of the live t_verify the account's error
+    is on, and is never copied: the payload carries counts and the derived error type only. An error is a
+    false teen (adult scored at or above t_verify) or a missed teen (teen scored below t_verify).
+    min_errors: the policy floor on false + missed teens (None: no floor set, A3 returns insufficient_data).
+
+    Like A4's, the payload is batch-level: no ids and no per-account rows, so every number A3 may cite is a
+    group fact. Raises BarrierError for a frozen test account, ValueError for a frame or labels mismatch.
+    """
+    missing = [c for c in A3_COLS if c not in frame.columns]
+    if missing:
+        raise ValueError(f"A3 needs explain.explain_frame output; missing columns {missing}")
+    ids = frame[ID_COL].astype(str)
+    if ids.duplicated().any() or set(ids) != {str(k) for k in labels}:
+        raise ValueError("labels must cover exactly the accounts in the frame, once each")
+    bad = {v for v in labels.values() if v not in (0, 1)}
+    if bad:
+        raise ValueError(f"labels must be 0 or 1, got {sorted(bad, key=str)}")
+    test = frozen_test_ids() if test_ids is None else frozenset(str(i) for i in test_ids)
+    leaked = sorted(set(ids) & test)
+    if leaked:
+        raise BarrierError(f"{len(leaked)} audit ids are frozen test accounts (e.g. {leaked[0]}); A3 never sees them")
+    if t_verify is not None and math.isnan(float(t_verify)):
+        raise ValueError("t_verify is NaN")
+    y = ids.map({str(k): int(v) for k, v in labels.items()}).to_numpy()
+    n_adults, n_teens = int((y == 0).sum()), int((y == 1).sum())
+    score = frame["score"].astype(float).to_numpy()
+    if t_verify is None:  # no live threshold, so nothing is an error
+        masks = {k: np.zeros(len(frame), dtype=bool) for k in A3_ERROR_TYPES}
+    else:
+        flagged = score >= float(t_verify)
+        masks = {"false_teen": (y == 0) & flagged, "missed_teen": (y == 1) & ~flagged}
+    payload = {
+        "agent": "A3",
+        "round": int(round_id),
+        "t_verify": None if t_verify is None else _round(float(t_verify)),
+        "min_errors": None if min_errors is None else int(min_errors),
+        "audit": {"adults": n_adults, "teens": n_teens},
+        "n_errors": {k: int(m.sum()) for k, m in masks.items()},
+    }
+    for kind, base_n in zip(A3_ERROR_TYPES, (n_adults, n_teens)):
+        rows = frame[masks[kind]]
+        groups, leads, words = {}, Counter(), Counter()
+        for r in rows.itertuples(index=False):
+            top = [(f, _phrase(c), float(v)) for f, c, v in zip((r.f1, r.f2, r.f3), (r.c1, r.c2, r.c3),
+                                                                (r.v1, r.v2, r.v3))
+                   if isinstance(f, str) and f and isinstance(c, str) and c]
+            for f, p, v in top:
+                groups.setdefault((f, p), []).append(v)
+            if top:
+                leads[top[0][:2]] += 1
+            words.update({w for w in str(r.words).split(", ") if w} if isinstance(r.words, str) else set())
+        n = len(rows)
+        signals = [{"id": f"{f}__{_slug(p)}", "feature": f, "signal": p, "n_accounts": len(v),
+                    "share_pct": round(100 * len(v) / n), "mean_contribution": round(float(np.mean(v)), 2),
+                    "n_leading": leads[(f, p)]} for (f, p), v in groups.items()]
+        signals.sort(key=lambda s: (-s["n_accounts"], -abs(s["mean_contribution"]), s["id"]))
+        payload[kind] = {
+            "n_accounts": n,
+            "rate": _round(n / base_n) if base_n else None,  # false teens per audit adult, missed teens per audit teen
+            "score_median": round(float(np.median(score[masks[kind]])), 2) if n else None,
+            "signals": signals[:A3_MAX_SIGNALS],
+            "top_words": [{"word": w, "n_accounts": k}
+                          for w, k in sorted(words.items(), key=lambda kv: (-kv[1], kv[0]))[:A3_TOP_WORDS]],
+        }
+    check_barrier(payload)
+    return payload
+
+
+def a3_fields(payload: dict) -> dict:
+    """Every numeric input field A3 may cite as evidence, by path: "false_teen.n_accounts", "false_teen.rate",
+    "false_teen.signals.<id>.n_accounts", "audit.adults", "n_errors.missed_teen", ... (None left out)."""
+    out = {"t_verify": payload["t_verify"], "min_errors": payload["min_errors"]}
+    out |= {f"audit.{k}": v for k, v in payload["audit"].items()}
+    out |= {f"n_errors.{k}": v for k, v in payload["n_errors"].items()}
+    for kind in A3_ERROR_TYPES:
+        block = payload[kind]
+        out |= {f"{kind}.{k}": block[k] for k in ("n_accounts", "rate", "score_median")}
+        for s in block["signals"]:
+            out |= {f"{kind}.signals.{s['id']}.{k}": s[k]
+                    for k in ("n_accounts", "share_pct", "mean_contribution", "n_leading")}
+        for w in block["top_words"]:
+            out[f"{kind}.top_words.{w['word']}"] = w["n_accounts"]
     return {k: float(v) for k, v in out.items() if v is not None}
 
 
