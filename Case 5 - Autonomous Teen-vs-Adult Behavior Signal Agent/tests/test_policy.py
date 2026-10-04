@@ -12,9 +12,9 @@ import pytest
 
 import softsignal.policy as pol
 from softsignal.data import load_data
-from softsignal.features import ID_COL, TARGET
+from softsignal.features import FEATURE_COLS, ID_COL, TARGET
 from softsignal.metrics import prf
-from softsignal.stack import STACK_OOF
+from softsignal.stack import STACK_OOF, meta_path, write_oof
 
 
 def scores_and_labels(n=200, seed=0):
@@ -235,25 +235,81 @@ def test_band_summary_with_labels():
 
 
 # ---- audit slice ----
-def make_oof(tmp_path, ids):
+def make_train(ids=("B1", "B2", "B3"), labels=(0, 1, 0)):
+    train = pd.DataFrame({ID_COL: list(ids), TARGET: list(labels)})
+    for c in FEATURE_COLS:
+        train[c] = np.linspace(0.0, 1.0, len(train))
+    return train
+
+
+def make_oof(tmp_path, train, ids=None, meta=True):
+    """An OOF cache with its meta file (written by the real write_oof), ids optionally altered."""
     p = tmp_path / "oof.csv"
-    pd.DataFrame({ID_COL: ids, "stack_oof": np.linspace(0, 1, len(ids))}).to_csv(p, index=False)
+    write_oof(train, np.linspace(0, 1, len(train)), p)
+    if ids is not None:
+        pd.DataFrame({ID_COL: ids, "stack_oof": np.linspace(0, 1, len(ids))}).to_csv(p, index=False)
+    if not meta:
+        meta_path(p).unlink()
     return p
 
 
 def test_audit_slice_joins_labels_by_id(tmp_path):
-    train = pd.DataFrame({ID_COL: ["B1", "B2", "B3"], TARGET: [0, 1, 0]})
-    got = pol.load_audit_slice(train, make_oof(tmp_path, ["B3", "B1", "B2"]))  # order differs
-    assert got.set_index(ID_COL).loc["B2", TARGET] == 1
-    assert got.set_index(ID_COL).loc["B3", "stack_oof"] == 0.0
+    train = make_train()
+    p = make_oof(tmp_path, train)
+    shuffled = pd.read_csv(p).iloc[[2, 0, 1]]  # file order differs from train order
+    shuffled.to_csv(p, index=False)
+    got = pol.load_audit_slice(train, p).set_index(ID_COL)
+    assert got.loc["B2", TARGET] == 1
+    assert got.loc["B3", "stack_oof"] == 1.0
     assert len(got) == 3
 
 
 @pytest.mark.parametrize("ids", [["B1", "B2"], ["B1", "B2", "B3", "B4"], ["B1", "B2", "B2"]])
-def test_audit_slice_rejects_stale_or_duplicate_cache(tmp_path, ids):
-    train = pd.DataFrame({ID_COL: ["B1", "B2", "B3"], TARGET: [0, 1, 0]})
+def test_audit_slice_rejects_wrong_ids_or_duplicates(tmp_path, ids):
+    train = make_train()
     with pytest.raises(ValueError, match="rerun"):
-        pol.load_audit_slice(train, make_oof(tmp_path, ids))
+        pol.load_audit_slice(train, make_oof(tmp_path, train, ids=ids))
+
+
+def test_audit_slice_rejects_a_cache_without_a_sidecar(tmp_path):
+    train = make_train()
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(train, make_oof(tmp_path, train, meta=False))
+
+
+def test_audit_slice_rejects_a_cache_built_from_other_rows(tmp_path):
+    # same ids, but a label or a feature changed after the cache was written
+    train = make_train()
+    p = make_oof(tmp_path, train)
+    flipped = train.assign(**{TARGET: [1, 1, 0]})
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(flipped, p)
+    moved = train.copy()
+    moved.loc[0, FEATURE_COLS[0]] += 0.5
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(moved, p)
+
+
+@pytest.mark.parametrize("bad", ["not json", "[]", "{}", '{"cache_key": "x", "use_text": true}'])
+def test_audit_slice_rejects_a_damaged_sidecar(tmp_path, bad):
+    train = make_train()
+    p = make_oof(tmp_path, train)
+    meta_path(p).write_text(bad, encoding="utf-8")
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(train, p)
+
+
+def test_audit_slice_rejects_a_tabular_only_cache(tmp_path):
+    train = make_train()
+    p = tmp_path / "oof.csv"
+    write_oof(train, np.linspace(0, 1, 3), p, use_text=False)
+    with pytest.raises(ValueError, match="cache key"):
+        pol.load_audit_slice(train, p)
+
+
+def test_audit_slice_accepts_a_matching_cache(tmp_path):
+    train = make_train()
+    assert len(pol.load_audit_slice(train, make_oof(tmp_path, train))) == 3
 
 
 # ---- real data ----

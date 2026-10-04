@@ -14,6 +14,7 @@ ladder rows use 5% and 10%. The A1 PSI key is added to policy.yaml in step 11.
 
 Run: python -m softsignal.policy
 """
+import json
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -25,7 +26,7 @@ import yaml
 from softsignal.data import ROOT, load_data
 from softsignal.features import ID_COL, TARGET
 from softsignal.metrics import DEFAULT_CAP, as_binary, cap_threshold, prf
-from softsignal.stack import STACK_OOF, Stack
+from softsignal.stack import STACK_OOF, Stack, meta_path, oof_cache_key
 
 POLICY_FILE = ROOT / "policy.yaml"
 POLICY_KEYS = {
@@ -83,9 +84,18 @@ class Thresholds:
 def load_audit_slice(train: pd.DataFrame, path: Path = STACK_OOF) -> pd.DataFrame:
     """Train labels joined to their nested-OOF stack scores: columns ID_COL, TARGET, stack_oof.
 
-    The static audit slice is the whole train set. Raises if the cache does not cover exactly
-    the train ids (a stale cache).
+    The static audit slice is the whole train set. Raises if the cache is stale: no sidecar, a sidecar
+    whose cache key differs from the current train rows, text model, posts or scoring code, or an id
+    set that is not exactly the train ids. Rerun python -m softsignal.stack to rebuild it.
     """
+    try:
+        meta = json.loads(meta_path(path).read_text(encoding="utf-8"))
+        stored = meta["cache_key"] if isinstance(meta, dict) and meta.get("use_text") is True else None
+    except (OSError, ValueError, KeyError):
+        stored = None
+    if stored is None or stored != oof_cache_key(train, use_text=True):
+        raise ValueError(f"{path} has no matching cache key (cache from other data, code or a "
+                         "tabular-only run): rerun python -m softsignal.stack")
     oof = pd.read_csv(path, dtype={ID_COL: str})
     if oof[ID_COL].duplicated().any() or set(oof[ID_COL]) != set(train[ID_COL].astype(str)):
         raise ValueError(f"{path} does not match the train ids: rerun python -m softsignal.stack")

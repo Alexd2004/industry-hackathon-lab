@@ -3,6 +3,8 @@
 Small tests use synthetic accounts and posts in tmp_path; the real-data tests cache to tmp_path
 too, never to the repo's cache/. Pinned numbers depend on results/split.json and the sklearn version.
 """
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -359,3 +361,80 @@ def test_main_explains_why_test_false_teen_can_exceed_the_cap(capsys, monkeypatc
     monkeypatch.setattr(stk, "auc", lambda *a: 0.9)
     stk.main()
     assert "test false-teen can land above it" in capsys.readouterr().out
+
+
+# --- meta file: a stale OOF cache must be detectable ----------------------------
+
+def test_cache_key_is_deterministic_and_a_sha256_hex(frame, posts):
+    a = stk.oof_cache_key(frame, posts_path=posts)
+    assert a == stk.oof_cache_key(frame.copy(), posts_path=posts)
+    assert len(a) == 64
+
+
+def test_cache_key_changes_with_label_feature_or_id(frame, posts):
+    base = stk.oof_cache_key(frame, posts_path=posts)
+    flipped = frame.copy()
+    flipped.loc[0, TARGET] = 1 - flipped.loc[0, TARGET]
+    moved = frame.copy()
+    moved.loc[0, FEATURE_COLS[0]] += 1.0
+    renamed = frame.copy()
+    renamed.loc[0, ID_COL] = "B999"
+    for other in (flipped, moved, renamed):
+        assert stk.oof_cache_key(other, posts_path=posts) != base
+
+
+def test_cache_key_ignores_columns_outside_the_allow_list(frame, posts):
+    other = frame.copy()
+    other["age"] = 99
+    assert stk.oof_cache_key(other, posts_path=posts) == stk.oof_cache_key(frame, posts_path=posts)
+
+
+def test_cache_key_changes_with_posts_text_params_and_mode(frame, posts, tmp_path, monkeypatch):
+    base = stk.oof_cache_key(frame, posts_path=posts)
+    edited = tmp_path / "posts2.csv"
+    edited.write_text(posts.read_text() + "\nB000,9,extra post\n")
+    assert stk.oof_cache_key(frame, posts_path=edited) != base
+    assert stk.oof_cache_key(frame, use_text=False) != base
+    monkeypatch.setattr(tmod, "C", tmod.C + 1.0)
+    assert stk.oof_cache_key(frame, posts_path=posts) != base
+
+
+def test_tabular_cache_key_does_not_depend_on_posts_or_text_params(frame, monkeypatch):
+    base = stk.oof_cache_key(frame, use_text=False)
+    monkeypatch.setattr(tmod, "C", tmod.C + 1.0)
+    assert stk.oof_cache_key(frame, use_text=False) == base
+
+
+def test_cache_key_changes_when_scoring_code_changes(frame, posts, monkeypatch):
+    base = stk.oof_cache_key(frame, posts_path=posts)
+
+    def _fit_level2(X, y):  # a different body, same name
+        return None
+
+    monkeypatch.setattr(stk, "_fit_level2", _fit_level2)
+    assert stk.oof_cache_key(frame, posts_path=posts) != base
+
+
+def test_stack_writes_the_sidecar_beside_the_csv(posts, small_params, frame, tmp_path):
+    train, test = frame.iloc[:40].reset_index(drop=True), frame.iloc[40:].reset_index(drop=True)
+    tm = tmod.build_matrix(train[ID_COL], posts_path=posts, cache_dir=None)
+    out = tmp_path / "stack_oof.csv"
+    stk.stack(train, test, tm=tm, oof_path=out)
+    meta = json.loads(stk.meta_path(out).read_text())
+    assert stk.meta_path(out).name == "stack_oof.meta.json"
+    assert meta["use_text"] is True and meta["n"] == len(train)
+    assert meta["cache_key"] == stk.oof_cache_key(train)
+
+
+def test_write_oof_removes_the_old_sidecar_if_the_csv_write_fails(frame, tmp_path, monkeypatch):
+    out = tmp_path / "o.csv"
+    stk.write_oof(frame, np.zeros(len(frame)), out, use_text=False)
+    assert stk.meta_path(out).exists()
+
+    def boom(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", boom)
+    with pytest.raises(OSError):
+        stk.write_oof(frame, np.zeros(len(frame)), out, use_text=False)
+    assert not stk.meta_path(out).exists()  # no old sidecar left to bless a half-written csv
