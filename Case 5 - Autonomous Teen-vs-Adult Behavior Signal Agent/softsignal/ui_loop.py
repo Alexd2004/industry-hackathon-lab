@@ -1,8 +1,8 @@
 """Loop tab (step 12): header, tiles, round chart, agent cards, decision log, footer.
 
-Reads, in this order: the live files results/rounds.csv and decisions.jsonl (gitignored; appended by loop.py /
-crew.py runs), else the committed recorded run (rounds_recorded.csv, decisions_recorded.jsonl), else the
-placeholders. While a run started here is going, the tab re-reads the files every REFRESH_S seconds (a
+Reads the live files results/rounds.csv and decisions.jsonl (gitignored; appended by loop.py / crew.py runs)
+together with the committed recorded run (rounds_recorded.csv, decisions_recorded.jsonl), so a rehearsal never
+hides the recorded run (it is marked "(recorded)" in the picker); the placeholders only when neither exists. While a run started here is going, the tab re-reads the files every REFRESH_S seconds (a
 fragment), so rounds show up as they land; otherwise it does not poll. "Run loop" starts crew.py in a
 background thread; the tab itself only reads, never writes anything an agent reads, and never calls a model.
 Replay is still a stub.
@@ -56,7 +56,8 @@ class LoopData:
     is_placeholder: bool
     n_skipped: int
     warnings: list = field(default_factory=list)
-    source: str = "live"  # live / recorded / placeholder / none
+    source: str = "live"  # live / recorded / placeholder / none (live when live files exist, even with recorded)
+    recorded: frozenset = frozenset()  # run ids that come from the committed recorded run
 
 
 def read_complete_lines(path: Path) -> list[str]:
@@ -163,20 +164,38 @@ def load_decisions(path: Path) -> tuple[list, int]:
     return [by_key[k] for k in sorted(by_key)], skipped
 
 
-def load_loop(results_dir: Path | None = None) -> LoopData:
-    """The first pair with either file present: live, then recorded, then placeholder (a missing file of a
-    pair counts as empty)."""
-    results_dir = RESULTS if results_dir is None else results_dir
-    source, r_path, d_path = "none", results_dir / ROUNDS_FILE, results_dir / DECISIONS_FILE
-    for name, (r, d) in (("live", (ROUNDS_FILE, DECISIONS_FILE)), ("recorded", (ROUNDS_RECORDED, DECISIONS_RECORDED)),
-                         ("placeholder", (ROUNDS_PLACEHOLDER, DECISIONS_PLACEHOLDER))):
-        if (results_dir / r).exists() or (results_dir / d).exists():
-            source, r_path, d_path = name, results_dir / r, results_dir / d
-            break
-    warnings: list = []
+def _load_pair(r_path: Path, d_path: Path, warnings: list) -> tuple[pd.DataFrame, list, int]:
+    """(rounds, decisions, n_skipped) of one pair; a missing file counts as empty."""
     rounds = load_rounds(r_path, warnings) if r_path.exists() else empty_rounds()
     decisions, skipped = load_decisions(d_path) if d_path.exists() else ([], 0)
-    return LoopData(rounds, decisions, source == "placeholder", skipped, warnings, source)
+    return rounds, decisions, skipped
+
+
+def load_loop(results_dir: Path | None = None) -> LoopData:
+    """The live runs together with the committed recorded run, so a rehearsal never hides the recorded one
+    (a run in both: the live copy wins); the placeholders only when neither pair has a file."""
+    results_dir = RESULTS if results_dir is None else results_dir
+    pairs = {"live": (ROUNDS_FILE, DECISIONS_FILE), "recorded": (ROUNDS_RECORDED, DECISIONS_RECORDED)}
+    present = [n for n, (r, d) in pairs.items() if (results_dir / r).exists() or (results_dir / d).exists()]
+    warnings: list = []
+    if not present:
+        r_path, d_path = results_dir / ROUNDS_PLACEHOLDER, results_dir / DECISIONS_PLACEHOLDER
+        source = "placeholder" if r_path.exists() or d_path.exists() else "none"
+        rounds, decisions, skipped = _load_pair(r_path, d_path, warnings)
+        return LoopData(rounds, decisions, source == "placeholder", skipped, warnings, source)
+    loaded = {n: _load_pair(results_dir / pairs[n][0], results_dir / pairs[n][1], warnings) for n in present}
+    frames = [loaded[n][0] for n in present if len(loaded[n][0])]
+    rounds = (pd.concat(frames, ignore_index=True).drop_duplicates(["run", "round"])  # live first: it wins
+              .sort_values(["run", "round"]).reset_index(drop=True)) if frames else empty_rounds()
+    by_key = {(d["run"], d["round"]): d for n in reversed(present) for d in loaded[n][1]}  # live last: it wins
+
+    def run_ids(name: str) -> set:
+        r, d, _ = loaded.get(name, (empty_rounds(), [], 0))
+        return set(r["run"]) | {x["run"] for x in d}
+
+    recorded = frozenset(run_ids("recorded") - run_ids("live"))
+    return LoopData(rounds, [by_key[k] for k in sorted(by_key)], False, sum(loaded[n][2] for n in present),
+                    warnings, present[0], recorded)
 
 
 def runs(data: LoopData) -> list[str]:
@@ -243,6 +262,8 @@ def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
                  if decision.get(a) is not None and decision[a]["status"] == "FALLBACK"]
     if fallbacks:
         parts.append("Fallback: " + ", ".join(fallbacks))
+    if decision.get("agent_error"):
+        parts.append(f"Agents failed, the rule decided: {decision['agent_error']}")
     a1 = (decision.get("a1") or {}).get("output")
     if isinstance(a1, dict) and a1.get("drift") in ("real", "not_real"):
         parts.append(f"A1 drift {a1['drift']}")
@@ -442,9 +463,9 @@ def _loop_fragment() -> None:
         return
     if data.is_placeholder:
         st.warning(BANNER)
-    elif data.source == "recorded":
-        st.caption(f"Showing the recorded run ({ROUNDS_RECORDED}, {DECISIONS_RECORDED}). Run loop starts a new "
-                   f"one in {ROUNDS_FILE} / {DECISIONS_FILE}, which then show here instead.")
+    elif data.recorded:
+        st.caption(f"Runs marked (recorded) are the committed run ({ROUNDS_RECORDED}, {DECISIONS_RECORDED}). "
+                   f"Run loop adds new runs to {ROUNDS_FILE} / {DECISIONS_FILE}; the recorded run stays in the picker.")
     for w in data.warnings:
         st.warning(w)
     if data.n_skipped:
@@ -457,7 +478,8 @@ def _loop_fragment() -> None:
     if st.session_state.get("loop_run") not in all_runs:  # e.g. the placeholder run once real files exist
         st.session_state.pop("loop_run", None)
     run = st.selectbox("Run (newest first)", all_runs, key="loop_run",
-                       format_func=lambda r: f"{r} (running)" if r == live_run else r) if all_runs else None
+                       format_func=lambda r: f"{r} (running)" if r == live_run
+                       else f"{r} (recorded)" if r in data.recorded else r) if all_runs else None
     rounds, decisions = for_run(data, run)
     tag = " (projected)" if data.is_placeholder else ""
     render_header(data, run, rounds, decisions, status["running"])

@@ -32,6 +32,7 @@ for the report columns only (prec..auc) and never feeds state, thresholds or an 
 Agents plug in through two optional callbacks (crew.py uses them). before_decision(state, batch, prior,
 psi) runs after the reveal and the PSI, before the decision, and returns agent blocks for the record
 (A1 now, A2 later reads them here); prior is the rows of every earlier batch, handed over explicitly.
+A hook that raises never breaks the round: its error goes in the record (agent_error), the rule decides.
 on_round(result) runs after each round, e.g. to append it to the files. Every round is still
 applied_source "rule" ("starter" for R0); rule_decision() is what A2 will be compared against.
 
@@ -283,10 +284,24 @@ BeforeDecision = Callable[[State, "Batch | None", pd.DataFrame, "float | None"],
 OnRound = Callable[[RoundResult], None]
 
 
+def _agent_blocks(before_decision: BeforeDecision | None, state: State, batch: "Batch | None",
+                  prior: pd.DataFrame, psi_val: "float | None") -> dict:
+    """The hook's agent blocks. Never raises: the reveal cannot be undone, so an agent must not break the
+    round. A failing hook leaves the agents unrun, the error goes in the record (agent_error) and the rule
+    decides. Only AGENT_KEYS are taken, so a hook cannot overwrite the rule's decision."""
+    if before_decision is None:
+        return {}
+    try:
+        blocks = before_decision(state, batch, prior, psi_val)
+    except Exception as e:  # noqa: BLE001 - the contract is "agents never break the round"
+        return {"agent_error": f"{type(e).__name__}: {e}"[:500]}
+    return {k: v for k, v in blocks.items() if k in AGENT_KEYS}
+
+
 def round0(env: Env, state: State, before_decision: BeforeDecision | None = None) -> RoundResult:
     """R0: the starter rule on the frozen test set, before any batch or label (before_decision gets batch None)."""
     env.timer.round = 0
-    blocks = before_decision(state, None, state.seen, None) if before_decision is not None else {}
+    blocks = _agent_blocks(before_decision, state, None, state.seen, None)
     dec = {"cutoff": float(state.live.th.t_verify), "cap": clamp_cap(env.policy["cap_false_teen"]), "action": STARTER}
     record = make_record(env.timer.run, 0, dec, STARTER)
     record.update(blocks)
@@ -348,7 +363,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
         cand_fts = int(((cand_s >= t_cand) & (y_audit == 0)).sum())
     psi_val = psi(ref_scores, live_s) if len(ref_scores) else None
     # agents that inform the decision (A1 now): mode is still this round's, prior is the earlier batches only
-    blocks = before_decision(state, batch, prior, psi_val) if before_decision is not None else {}
+    blocks = _agent_blocks(before_decision, state, batch, prior, psi_val)
 
     # 4. decision: streak first, then the rule
     round_adults = int((y_audit == 0).sum())
@@ -440,9 +455,12 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
     Raises ValueError, writing nothing, if rounds.csv already has a different header. Both appends happen
     under one lock (_write_lock), so two writers (the app's background run and a CLI run) never lose a
     round or race on a temp file. Appends are small; a reader that catches one mid-write sees a last line
-    with no newline, which the readers skip. Nothing checks for a run id that is already present.
+    with no newline, which the readers skip. A torn last line (a writer killed mid-append) is cut off first,
+    never completed into a malformed row. Nothing checks for a run id that is already present.
     """
     with _write_lock(rounds_path.parent):
+        for path in (rounds_path, decisions_path):
+            _drop_torn_tail(path)
         first = ""
         if rounds_path.exists():
             with open(rounds_path, encoding="utf-8") as f:
@@ -455,18 +473,30 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
         rounds.to_csv(buf, header=not first, index=False, lineterminator="\n")
         new_dec = "".join(json.dumps(r) + "\n" for r in records)
         for path, text in ((rounds_path, buf.getvalue()), (decisions_path, new_dec)):
-            tail = _last_char(path)
             with open(path, "a", encoding="utf-8", newline="") as f:
-                f.write(("\n" if tail and tail != "\n" else "") + text)  # an unterminated last line ends first
+                f.write(text)
 
 
-def _last_char(path: Path) -> str:
-    """The file's last character ("" if missing or empty), without reading the whole file."""
+def _drop_torn_tail(path: Path, chunk: int = 4096) -> None:
+    """Cut an unterminated last line back to the last newline (the readers already skip it), reading the
+    file backwards from the end, not in full. Ending it with a newline instead would turn the fragment into
+    a complete, malformed row that load_rounds rejects, taking the Loop tab down."""
     if not path.exists() or path.stat().st_size == 0:
-        return ""
-    with open(path, "rb") as f:
-        f.seek(-1, 2)
-        return f.read(1).decode("utf-8", errors="replace")
+        return
+    with open(path, "rb+") as f:
+        end = f.seek(0, 2)
+        f.seek(end - 1)
+        if f.read(1) == b"\n":
+            return
+        pos = end
+        while pos > 0:
+            pos = max(0, pos - chunk)
+            f.seek(pos)
+            i = f.read(min(chunk, end - pos)).rfind(b"\n")
+            if i != -1:
+                f.truncate(pos + i + 1)
+                return
+        f.truncate(0)  # no complete line at all
 
 
 def main() -> None:

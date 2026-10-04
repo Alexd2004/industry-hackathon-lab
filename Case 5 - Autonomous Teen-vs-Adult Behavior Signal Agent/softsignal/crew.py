@@ -16,12 +16,14 @@ starter blend picks the verify band and has no explanations; wire it once the li
 
 Files: run_crew writes nothing unless asked (write=True). The CLI and the Loop tab's "Run loop" append to
 the live files results/rounds.csv and decisions.jsonl, which are gitignored. --record writes one run to
-results/rounds_recorded.csv and decisions_recorded.jsonl instead (replacing them): the committed run a
+results/rounds_recorded.csv and decisions_recorded.jsonl instead (swapped in only once the full run has
+finished, so a failed run leaves the old one; --rounds is refused): the committed run a
 fresh clone shows.
 
 Run: python -m softsignal.crew [--rounds N] [--no-write | --record]   (agents offline unless ANTHROPIC_API_KEY)
 """
 import argparse
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,14 +126,26 @@ def main() -> None:
     out.add_argument("--no-write", action="store_true", help="print only")
     out.add_argument("--record", action="store_true", help="replace the committed recorded run with this one")
     args = ap.parse_args()
+    if args.record and args.rounds is not None:
+        ap.error("--record writes the full run that a fresh clone shows; drop --rounds")
     train, test = load_data(on_param_mismatch="error")
     env = make_env(train, test)
     client = make_client()
-    paths = (ROUNDS_RECORDED, DECISIONS_RECORDED) if args.record else (ROUNDS_CSV, DECISIONS_JSONL)
-    if args.record:
-        for p in paths:
+    recorded = (ROUNDS_RECORDED, DECISIONS_RECORDED)
+    # --record builds the new run next to the committed one and swaps it in only once the run has finished
+    paths = tuple(p.with_name(p.name + ".new") for p in recorded) if args.record else (ROUNDS_CSV, DECISIONS_JSONL)
+    for p in paths if args.record else ():
+        p.unlink(missing_ok=True)
+    try:
+        rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths)
+    except BaseException:
+        for p in paths if args.record else ():
             p.unlink(missing_ok=True)
-    rounds, records = run_crew(env, client, args.rounds, not args.no_write, *paths)
+        raise
+    if args.record:
+        for new, old in zip(paths, recorded):
+            os.replace(new, old)
+        paths = recorded
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))
     print(f"\nA1 ({'live' if client else 'offline: policy.yaml threshold'}):")

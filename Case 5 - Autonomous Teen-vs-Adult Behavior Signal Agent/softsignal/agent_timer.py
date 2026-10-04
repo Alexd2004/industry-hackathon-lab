@@ -50,7 +50,7 @@ import uuid
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -58,6 +58,7 @@ DEFAULT_LOG = Path(__file__).resolve().parent.parent / "results" / "agent_calls.
 KINDS = ("model", "tool", "retrieval")
 STATUSES = ("LIVE", "FALLBACK", "REPLAY")
 RUN_ROUND_STEP = "run_round"
+DECISION_AGENTS = ("A1", "A2", "A3")  # on the decision path: may run inside run_round (loop.py's hook)
 RECORD_KEYS = frozenset({"run", "round", "agent", "step", "kind", "status", "start", "end",
                          "ms", "tokens_in", "tokens_out", "error"})
 MAX_ERROR_CHARS = 500
@@ -375,18 +376,35 @@ def round_agent_summary(records: list[dict], round_id: int, run: str | None = No
     return _agent_rollup(_round_records(records, round_id, run))
 
 
+def _within(inner: dict, outer: dict) -> bool:
+    """True when inner's timed span lies inside outer's (1 ms slack: start and end are written to the ms)."""
+    try:
+        s_in, e_in = _parse_ts(inner["start"]), _parse_ts(inner["end"])
+        s_out, e_out = _parse_ts(outer["start"]), _parse_ts(outer["end"])
+    except (TypeError, ValueError, AttributeError):
+        return False
+    slack = timedelta(milliseconds=1)
+    return s_out - slack <= s_in and e_in <= e_out + slack
+
+
 def round_time_ms(records: list[dict], round_id: int, run: str | None = None) -> float:
     """max(A1, A3) + A2 + tool_time(run_round) + max(A4, A5); missing agents count as 0.
 
     This models the planned critical path from timed blocks only. It assumes
     A1/A3 and A4/A5 really run in parallel and ignores untimed work between
-    calls; compare it with round_span_ms(), the measured wall time.
+    calls; compare it with round_span_ms(), the measured wall time. When A1-A3
+    run inside run_round (loop.py's before_decision hook), run_round's ms already
+    holds them, so their part is taken out of it first and not counted twice.
     """
     rs = _round_records(records, round_id, run)
     agents = _agent_rollup(rs)
     ms = {name: agents.get(name, {}).get("ms", 0.0) for name in ("A1", "A2", "A3", "A4", "A5")}
-    run_round = sum(r["ms"] for r in rs if r["step"] == RUN_ROUND_STEP)
-    return max(ms["A1"], ms["A3"]) + ms["A2"] + run_round + max(ms["A4"], ms["A5"])
+    outer = [r for r in rs if r["step"] == RUN_ROUND_STEP]
+    run_round = sum(r["ms"] for r in outer)
+    decision = max(ms["A1"], ms["A3"]) + ms["A2"]
+    if any(r["agent"] in DECISION_AGENTS and any(_within(r, o) for o in outer) for r in rs):
+        run_round = max(run_round - decision, 0.0)
+    return decision + run_round + max(ms["A4"], ms["A5"])
 
 
 def _parse_ts(s: str) -> datetime:
