@@ -13,7 +13,8 @@ cannot tell them apart from scored ones, so its soft_up rates include them.
 Thresholds come from honest out-of-fold scores only (cache/stack_oof.csv, written by stack.py), never
 from test. Decisions: the cap wins over review_budget (the verify band is never truncated, budget_binding
 reports when it is over budget); the 8-30% cap clamp lives in loop.py and A2, not here, because the
-ladder rows use 5% and 10%. psi_drift (the A1 fallback threshold) is in policy.yaml, measured over loop batches.
+ladder rows use 5% and 10%. psi_drift (the A1 fallback threshold) is in policy.yaml, measured over loop batches; min_a3_errors (A3's
+floor on audit errors) is null there until it is measured.
 
 Run: python -m softsignal.policy
 """
@@ -40,7 +41,8 @@ POLICY_KEYS = {
     "audit_per_batch": int,
     "cap_margin": float,
 }
-OPTIONAL_KEYS = {"psi_drift": float}  # present with a number, or null while the value is still to be measured
+# present with a number, or null while the value is still to be measured (min_a3_errors: A3's floor on errors)
+OPTIONAL_KEYS = {"psi_drift": float, "min_a3_errors": int}
 MIN_CLASS = 5  # fewer audit adults (or teens) than this: keep the prior threshold
 BANDS = ("verify", "soft", "none")
 LADDER_CAPS = (0.10, 0.05)  # reported next to the policy cap by main(); the ladder rows use these
@@ -79,6 +81,8 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
         v = raw.get(key)
         if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0):
             raise ValueError(f"{key} must be null or a positive number, got {v!r}")
+        if v is not None and kind is int and v != int(v):
+            raise ValueError(f"{key} must be null or a whole number, got {v!r}")
         out[key] = None if v is None else kind(v)
     for key in ("min_audit_adults", "audit_per_batch"):
         if out[key] < 1:

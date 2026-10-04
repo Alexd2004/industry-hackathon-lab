@@ -10,3 +10,5 @@ psi_drift: 0.25       # A1 fallback: drift is real when a feature-group or score
                       # batches, 10 oracle seeds x rounds 2-7 = 60 no-drift batches): max 0.161, 99th pct 0.149, so 0
                       # false alarms (bounds the per-batch rate to about 5%, 95% conf.). Mean shifts of 0.58-1.16 sd in
                       # one feature gave PSI 0.66-2.66.
+min_a3_errors: null   # A3 floor: fewer false + missed teens than this among earlier audit labels means no analysis.
+                      # null = not measured yet, so A3 returns insufficient_data. Pick it from a real run's error counts per round.

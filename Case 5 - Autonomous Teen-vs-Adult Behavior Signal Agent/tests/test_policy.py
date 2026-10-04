@@ -39,6 +39,7 @@ def test_committed_policy_has_exactly_the_policy_keys_with_their_types():
     assert set(p) == set(pol.POLICY_KEYS) | set(pol.OPTIONAL_KEYS)
     assert all(type(p[k]) is kind for k, kind in pol.POLICY_KEYS.items())
     assert p["psi_drift"] == 0.25  # measured for A1, see policy.yaml
+    assert p["min_a3_errors"] is None  # not measured yet: A3 stays insufficient_data until it is set
 
 
 def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):
@@ -54,7 +55,8 @@ def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):
 @pytest.mark.parametrize("over", [{"cap_false_teen": 1.5}, {"soft_recall": -0.1}, {"min_audit_adults": 0},
                                   {"audit_per_batch": 2.5}, {"cap_false_teen": "x"}, {"review_budget": "true"},
                                   {"min_audit_adults": ".inf"}, {"cap_false_teen": ".nan"}, {"cap_margin": 0.5},
-                                  {"cap_margin": -0.01}, {"psi_drift": 0}, {"psi_drift": "x"}])
+                                  {"cap_margin": -0.01}, {"psi_drift": 0}, {"psi_drift": "x"},
+                                  {"min_a3_errors": 0}, {"min_a3_errors": 2.5}, {"min_a3_errors": "x"}])
 def test_load_policy_rejects_bad_values(tmp_path, over):
     with pytest.raises(ValueError):
         pol.load_policy(write_policy(tmp_path, **over))

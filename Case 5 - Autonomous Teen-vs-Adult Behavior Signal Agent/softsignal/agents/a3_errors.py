@@ -71,7 +71,8 @@ def user_message(payload: dict) -> str:
 
 def insufficient_reason(payload: dict) -> str | None:
     """Why there is nothing to analyse, or None: no audit labels yet (round 0), no live t_verify, no
-    min_errors set in policy.yaml, or fewer errors (false + missed teens) than the floor."""
+    min_errors set in policy.yaml, fewer errors (false + missed teens) than the floor, or no explanation
+    signals (the loop has no stack model to explain them with until the first refit)."""
     if payload["audit"]["adults"] + payload["audit"]["teens"] == 0:
         return "no audit labels revealed in earlier rounds"
     if payload["t_verify"] is None:
@@ -81,6 +82,8 @@ def insufficient_reason(payload: dict) -> str | None:
     n = sum(payload["n_errors"].values())
     if n < payload["min_errors"]:
         return f"{n} errors, fewer than the {payload['min_errors']} needed"
+    if not any(payload[k]["signals"] for k in A3_ERROR_TYPES):  # no stack model to explain the errors yet
+        return "no explanation signals for the errors (no stack model yet)"
     return None
 
 

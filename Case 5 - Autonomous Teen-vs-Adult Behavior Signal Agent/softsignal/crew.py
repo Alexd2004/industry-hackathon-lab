@@ -1,13 +1,14 @@
 """Crew run (Tier 3): loop.py with the agents built so far, each round appended as it lands.
 
-Today that is loop.py's rule plus A1 (drift watcher), A2 (controller) and A5 (honesty auditor), through
+Today that is loop.py's rule plus A1 (drift watcher), A3 (error analyst), A2 (controller) and A5 (honesty auditor), through
 loop.run_loop's three callbacks:
 
     before_decision(state, batch, prior, psi)  -> A1 on (prior = the earlier batches, the batch rows, the score
                                                   PSI while the live rule is the starter, audit counts, earlier
-                                                  rounds' PSI); its block goes into the round's record
+                                                  rounds' PSI), then A3 on (the audit-slice errors of earlier
+                                                  rounds, see a3_payload); their blocks go into the round's record
     decide(context, blocks)                    -> A2 on (the live thresholds, audit counts, bounds, guards, the rule's
-                                                  decision and A1's output; A3 is insufficient_data until step 16),
+                                                  decision, A1's output and A3's when it analysed something),
                                                   after the streak update and before the refit; its block and the diff
                                                   against the rule go in the record, and its action and cap are applied
                                                   unless it fell back or apply_a2 is False
@@ -47,23 +48,60 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
-from softsignal.agents import a1_drift, a5_audit
+from softsignal.agents import a1_drift, a3_errors, a5_audit
 from softsignal.agents.a2_controller import run_a2
 from softsignal.agents.base import FALLBACK, AgentResult, make_client, merge_block
 from softsignal.agents.contracts import (
-    INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a5_input, a5_sources, evidence_source, load_checklist,
-    round_claims,
+    A3_COLS, INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a3_input, a5_input, a5_sources, evidence_source,
+    load_checklist, round_claims,
 )
 from softsignal.data import load_data
+from softsignal.explain import explain_frame
+from softsignal.features import ID_COL, TARGET
 from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, DecisionContext, Env, State,
                              check_rounds_header, make_env, run_loop, write_run)
 from softsignal.metrics import ROUNDS_COLS
 from softsignal.replay import Replayer, read_records, serve
 
 A5_ERROR = "agent_error"  # A5 raised: the round keeps going with an empty, FALLBACK A5 block
+A3_ERROR = "agent_error"  # A3's input or run raised: the round keeps going with a FALLBACK, no-analysis A3 block
+
+
+def a3_payload(env: Env, state: State, batch, prior: pd.DataFrame) -> dict:
+    """A3's input for one round (call it from before_decision, where state.seen and state.live_scores already
+    include this round's batch and prior does not).
+
+    Errors: the audit-slice accounts revealed in EARLIER rounds, each scored as the live rule scored its batch
+    when it arrived (state.live_scores, never re-scored, so never in-sample), against the live t_verify.
+    After a promote live_scores restarts, so only the rounds scored since then (on the live stack's scale) count.
+    Signals and words: explain.py's contributions from the live stack, else the candidate (the latest refit), else
+    none. The candidate was fit on these accounts' labels, so the signals describe the accounts and are not an
+    out-of-sample explanation; with no stack yet there are no signals and A3 returns insufficient_data.
+    """
+    rnd = 0 if batch is None else batch.round
+    n_cur = 0 if batch is None else len(batch.rows)
+    scores = np.asarray(state.live_scores, dtype=float)[: len(state.live_scores) - n_cur]
+    rows = prior.iloc[len(prior) - len(scores):]  # live_scores and seen grow together, so these line up
+    audit = env.oracle.revealed("audit", before_round=rnd)
+    labels = dict(zip(audit[ID_COL].astype(str), audit[TARGET].astype(int)))
+    ids = rows[ID_COL].astype(str).to_numpy()
+    keep = np.array([i in labels for i in ids], dtype=bool)
+    rows, scores, ids = rows[keep], scores[keep], ids[keep]
+    model = state.live.model or (None if state.candidate is None else state.candidate.model)
+    if model is not None and len(rows):
+        frame = explain_frame(model, rows)
+        frame["score"] = scores  # the live rule's score at arrival, not the explaining model's
+    else:
+        frame = pd.DataFrame({ID_COL: ids, "score": scores})
+        for col in A3_COLS[2:]:
+            frame[col] = np.nan if col.startswith("v") else ""
+    th = state.live.th
+    return a3_input(frame[A3_COLS], {i: labels[i] for i in ids}, float(th.t_verify), rnd,
+                    env.policy.get("min_a3_errors"), test_ids=env.test[ID_COL])
 
 ROUNDS_RECORDED = ROUNDS_CSV.with_name("rounds_recorded.csv")
 DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
@@ -100,7 +138,16 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
               or a1_drift.run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
-        return {"a1": block(a1, rnd)}
+        return {"a1": block(a1, rnd), "a3": block(_a3_round(state, batch, prior, rnd), rnd)}
+
+    def _a3_round(state: State, batch, prior: pd.DataFrame, rnd: int) -> AgentResult:
+        """A3 on this round's earlier-round errors. Never raises: an A3 error must not take A1 or the round down."""
+        try:
+            payload = a3_payload(env, state, batch, prior)
+            return (serve(offline, "a3", rnd, payload, a3_errors.validate_output, env.timer)
+                    or a3_errors.run_a3(payload, client, env.timer, rnd))
+        except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
+            return AgentResult("A3", FALLBACK, a3_errors.fallback_output(), A3_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
     def _a5_round(result, rnd: int) -> AgentResult:
         """A5 on the finished round. Never raises: the round is already on disk, so an A5 error must not end it."""
@@ -121,10 +168,12 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             return AgentResult("A5", FALLBACK, [], A5_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
 
     def decide(ctx: DecisionContext, blocks: dict) -> dict:
-        a1 = (blocks.get("a1") or {}).get("output")  # whole, as A1 returned it; A3 is not built (step 16)
+        a1 = (blocks.get("a1") or {}).get("output")  # whole, as A1 returned it
+        a3 = (blocks.get("a3") or {}).get("output")  # whole when it analysed something, else insufficient_data
+        a3_ok = isinstance(a3, dict) and a3.get("status") == "ok"
         payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
-                           a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT, a3=INSUFFICIENT_INPUT,
-                           policy=env.policy)
+                           a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT,
+                           a3=a3 if a3_ok else INSUFFICIENT_INPUT, policy=env.policy)
         a2 = run_a2(payload, client, env.timer, ctx.round)
         return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
 
