@@ -13,7 +13,7 @@ cannot tell them apart from scored ones, so its soft_up rates include them.
 Thresholds come from honest out-of-fold scores only (cache/stack_oof.csv, written by stack.py), never
 from test. Decisions: the cap wins over review_budget (the verify band is never truncated, budget_binding
 reports when it is over budget); the 8-30% cap clamp lives in loop.py and A2, not here, because the
-ladder rows use 5% and 10%. The A1 PSI key is added to policy.yaml in step 11.
+ladder rows use 5% and 10%. psi_drift (the A1 fallback threshold) is in policy.yaml with no value yet.
 
 Run: python -m softsignal.policy
 """
@@ -38,7 +38,9 @@ POLICY_KEYS = {
     "soft_recall": float,
     "min_audit_adults": int,
     "audit_per_batch": int,
+    "cap_margin": float,
 }
+OPTIONAL_KEYS = {"psi_drift": float}  # present with a number, or null while the value is still to be measured
 MIN_CLASS = 5  # fewer audit adults (or teens) than this: keep the prior threshold
 BANDS = ("verify", "soft", "none")
 LADDER_CAPS = (0.10, 0.05)  # reported next to the policy cap by main(); the ladder rows use these
@@ -57,9 +59,10 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
             raise ValueError(f"{path} is not valid YAML: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must hold a mapping of policy keys")
-    if set(raw) != set(POLICY_KEYS):
+    allowed = set(POLICY_KEYS) | set(OPTIONAL_KEYS)
+    if not set(POLICY_KEYS) <= set(raw) <= allowed:
         raise ValueError(f"{path} keys differ: missing {sorted(set(POLICY_KEYS) - set(raw))}, "
-                         f"unknown {sorted(set(raw) - set(POLICY_KEYS))}")
+                         f"unknown {sorted(set(raw) - allowed)}")
     out = {}
     for key, kind in POLICY_KEYS.items():
         v = raw[key]
@@ -70,6 +73,13 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
     for key in ("cap_false_teen", "review_budget", "soft_recall"):
         if not 0.0 <= out[key] <= 1.0:
             raise ValueError(f"{key} must be between 0 and 1, got {out[key]}")
+    if not 0.0 <= out["cap_margin"] <= out["cap_false_teen"]:
+        raise ValueError(f"cap_margin must be between 0 and cap_false_teen, got {out['cap_margin']}")
+    for key, kind in OPTIONAL_KEYS.items():
+        v = raw.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0):
+            raise ValueError(f"{key} must be null or a positive number, got {v!r}")
+        out[key] = None if v is None else kind(v)
     for key in ("min_audit_adults", "audit_per_batch"):
         if out[key] < 1:
             raise ValueError(f"{key} must be at least 1, got {out[key]}")

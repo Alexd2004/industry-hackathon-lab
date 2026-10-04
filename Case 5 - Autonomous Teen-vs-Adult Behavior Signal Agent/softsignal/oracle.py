@@ -20,11 +20,12 @@ from sklearn.model_selection import StratifiedKFold
 
 from softsignal.data import JOINED, SPLIT_FILE, check_frame, load_data
 from softsignal.features import FEATURE_COLS, ID_COL, SEED, TARGET
+from softsignal.policy import load_policy
 
-# Move to policy.yaml when it exists (tier1 CAP pattern).
+_POLICY = load_policy()
 BATCH_SIZE = 300
-AUDIT_PER_BATCH = 60
-REVIEW_BUDGET = 0.25  # max share of a batch in the verify band
+AUDIT_PER_BATCH = _POLICY["audit_per_batch"]  # policy.yaml
+REVIEW_BUDGET = _POLICY["review_budget"]  # max share of a batch in the verify band, policy.yaml
 
 LABEL_COLS = [ID_COL, TARGET, "in_verify", "in_audit"]
 REVEALED_COLS = ["round", *LABEL_COLS]

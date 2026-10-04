@@ -27,7 +27,7 @@ def scores_and_labels(n=200, seed=0):
 
 def write_policy(tmp_path, **over):
     vals = {"cap_false_teen": 0.15, "review_budget": 0.25, "soft_recall": 0.9, "min_audit_adults": 120,
-            "audit_per_batch": 60, **over}
+            "audit_per_batch": 60, "cap_margin": 0.0, **over}
     p = tmp_path / "policy.yaml"
     p.write_text("\n".join(f"{k}: {v}" for k, v in vals.items()), encoding="utf-8")
     return p
@@ -36,8 +36,9 @@ def write_policy(tmp_path, **over):
 # ---- policy.yaml ----
 def test_committed_policy_has_exactly_the_policy_keys_with_their_types():
     p = pol.load_policy()
-    assert set(p) == set(pol.POLICY_KEYS)
+    assert set(p) == set(pol.POLICY_KEYS) | set(pol.OPTIONAL_KEYS)
     assert all(type(p[k]) is kind for k, kind in pol.POLICY_KEYS.items())
+    assert p["psi_drift"] is None
 
 
 def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):
@@ -52,7 +53,8 @@ def test_load_policy_rejects_unknown_and_missing_keys(tmp_path):
 
 @pytest.mark.parametrize("over", [{"cap_false_teen": 1.5}, {"soft_recall": -0.1}, {"min_audit_adults": 0},
                                   {"audit_per_batch": 2.5}, {"cap_false_teen": "x"}, {"review_budget": "true"},
-                                  {"min_audit_adults": ".inf"}, {"cap_false_teen": ".nan"}])
+                                  {"min_audit_adults": ".inf"}, {"cap_false_teen": ".nan"}, {"cap_margin": 0.5},
+                                  {"cap_margin": -0.01}, {"psi_drift": 0}, {"psi_drift": "x"}])
 def test_load_policy_rejects_bad_values(tmp_path, over):
     with pytest.raises(ValueError):
         pol.load_policy(write_policy(tmp_path, **over))
