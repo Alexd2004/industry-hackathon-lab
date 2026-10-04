@@ -41,7 +41,8 @@ before the apply step). Its block and the code-computed diff against rule_decisi
 apply_a2 (crew mode) A2's own action and cap are applied, with the guards enforced again here (no refit before
 the audit floor, no promote unless the rule's pooled test passed) and the cap clamped; applied_source is then "A2".
 A FALLBACK, a missing block or a failing decider leaves the rule's decision applied. The promote gate always uses
-the policy cap: A2's cap steers the refit only. Without apply_a2 every round is applied_source "rule" ("starter"
+the policy cap, and so does the refit on a promote (the model that goes live is thresholded at the cap the gate
+tested); A2's cap steers the refit on re-tune rounds only. The evidence logs policy_cap, refit_cap and cap_differs. Without apply_a2 every round is applied_source "rule" ("starter"
 for R0).
 
 Run: python -m softsignal.loop [--mode rule|crew] [--source audit|all_verified] [--rounds N] [--no-write]
@@ -270,7 +271,9 @@ def make_record(run: str, rnd: int, decision: dict, source: str, evidence: dict 
     cand_t_verify (the previous candidate, scored on this round's audit slice), cand_unsafe (that
     candidate carried an INSUFFICIENT_* flag, so the window is emptied), pooled_adults and pooled_ft
     (the window the test used, None when it is empty), streak (after this round) and promote_refused
-    (the new candidate carried an INSUFFICIENT_* flag).
+    (the new candidate carried an INSUFFICIENT_* flag). policy_cap is the cap the promote gate used, refit_cap
+    the cap this round's refit used (None on hold; the policy cap on a promote, A2's cap otherwise) and
+    cap_differs says whether they differ, so an A2 cap that steered the thresholds is visible in the log.
     """
     rec = {"run": run, "round": rnd}
     rec.update({k: {"status": None, "output": None, "fallback_reason": None} for k in AGENT_KEYS})
@@ -478,7 +481,7 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
 
     # 4b. A2 (after the streak update, before the refit; mode and live rule are still this round's, pre-apply).
     # Its decision is always logged; it is applied only when apply_a2 (crew mode), and only if it has a decision
-    # of its own (not FALLBACK). The promote gate above used the policy cap, so A2's cap steers the refit only.
+    # of its own (not FALLBACK). The promote gate above used the policy cap; the refit on a promote does too (step 5).
     ctx = _context(env, state, batch.round, rule_dec, evidence, cand_ft)
     a2_blocks = _a2_block(decide, ctx, blocks)
     a2_block = a2_blocks.get("a2")
@@ -490,7 +493,13 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
 
     # 5. apply it
     refit_s = None
+    policy_cap = clamp_cap(env.policy["cap_false_teen"])
+    evidence.update(policy_cap=policy_cap, refit_cap=None, cap_differs=False)
     if applied["action"] != HOLD:
+        if applied["action"] == PROMOTE:
+            # the model that goes live is thresholded at the cap the promote gate tested (the policy cap), not A2's
+            applied = {**applied, "cap": policy_cap}
+        evidence.update(refit_cap=applied["cap"], cap_differs=applied["cap"] != policy_cap)
         t0 = time.perf_counter()
         with env.timer.call(AGENT, "refit", "tool"):
             state.candidate = refit(env, state, applied["cap"])

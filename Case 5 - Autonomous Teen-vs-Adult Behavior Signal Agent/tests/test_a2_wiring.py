@@ -229,3 +229,54 @@ def test_rule_mode_applies_the_rule_but_still_logs_a2(split_and_tm, tmp_path):
     rounds, records = loop.run_loop(env, 1, decide=decide, apply_a2=False)
     assert records[1]["applied"]["source"] == "rule" and records[1]["a2"]["output"]["cap"] == 0.20
     assert rounds.loc[1, "diff_count"] == 2
+
+
+# ---- the cap the refit uses ----
+def test_evidence_logs_the_caps_when_a2_steers_the_refit(applied_run):
+    _, records, _, _ = applied_run
+    for r in records[1:5]:  # R1-R4 hold: no refit
+        assert r["evidence"]["refit_cap"] is None and r["evidence"]["cap_differs"] is False
+        assert r["evidence"]["policy_cap"] == 0.15
+    ev = records[5]["evidence"]
+    assert (ev["policy_cap"], ev["refit_cap"], ev["cap_differs"]) == (0.15, 0.10, True)
+
+
+def test_rule_mode_never_differs_from_the_policy_cap(split_and_tm, tmp_path):
+    env = make_env(split_and_tm, tmp_path)
+    _, records = loop.run_loop(env, 2, decide=scripted({1: a2_block(cap=0.20), 2: a2_block(cap=0.20)}))
+    assert all(r["evidence"]["cap_differs"] is False for r in records[1:])
+
+
+@pytest.fixture(scope="module")
+def promote_run(split_and_tm, tmp_path_factory):
+    """A2 re-tunes at cap 0.10 from R5 and promotes the first time the rule's gate allows it, also at cap 0.10."""
+    env = make_env(split_and_tm, tmp_path_factory.mktemp("promote"))
+    caps = []
+    real = loop.refit
+
+    def spy(env_, state, cap):
+        caps.append((state.round, cap))
+        return real(env_, state, cap)
+
+    def decide(ctx, blocks):
+        if ctx.guards["hold_required"]:
+            return {"a2": a2_block(action="hold", cap=0.10)}
+        action = "promote" if ctx.guards["promote_allowed"] else "re-tune"
+        return {"a2": a2_block(action=action, cap=0.10)}
+
+    with mock.patch.object(loop, "refit", spy):
+        rounds, records = loop.run_loop(env, 8, decide=decide, apply_a2=True)
+    return rounds, records, caps
+
+
+def test_a_promote_refits_at_the_policy_cap_not_a2s(promote_run):
+    rounds, records, caps = promote_run
+    promoted = [r for r in records if r["applied"]["decision"]["action"] == "promote"]
+    if not promoted:
+        pytest.skip("the pooled gate never allowed a promote with this A2 script")
+    r = promoted[0]
+    assert dict(caps)[r["round"]] == 0.15  # refit at the cap the gate tested
+    assert r["applied"]["decision"]["cap"] == 0.15 and r["applied"]["source"] == "A2"
+    assert r["evidence"]["refit_cap"] == 0.15 and r["evidence"]["cap_differs"] is False
+    assert r["a2"]["output"]["cap"] == 0.10 and r["diff"]["cap"] == [0.15, 0.10]  # A2's own cap is still logged
+    assert all(cap == 0.10 for rnd, cap in caps if rnd != r["round"])  # re-tune rounds still use A2's cap
