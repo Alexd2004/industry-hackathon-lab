@@ -26,6 +26,15 @@ RANKED_COLS = ["rank", ID_COL, "score", "band", "action", "c1", "c2", "c3", "f1"
 # (account, level-2 feature). raw: the feature's input value; z: standardized; contrib: coef x z.
 # Per account, intercept + sum(contrib) == logit(score).
 CONTRIB_COLS = [ID_COL, "score", "intercept", "feature", "raw", "z", "contrib"]
+# Frozen policy_grid.csv columns (explain.py, the Results tab cap slider): one row per slider cap.
+# t_verify / t_soft / flags: policy.pick_thresholds on the nested-OOF audit slice. Band counts and rates
+# are on the ranked accounts (the held-out test set) and mean what they mean in rounds.csv: flagged =
+# score >= t_verify (the verify band); verify = the flagged accounts sent to verification after the review
+# budget cut, i.e. score >= t_budget (explain.review_cutoff). soft_up = verify band + soft band.
+# oof_* are in-sample on the OOF scores the thresholds came from (the cap holds there by construction).
+POLICY_GRID_COLS = ["cap", "t_verify", "t_soft", "t_budget", "flags", "n", "n_flagged", "n_verify", "n_soft",
+                    "n_none", "flagged_share", "budget_binding", "rec_flagged", "ft_flagged", "prec_verify",
+                    "rec_verify", "ft_verify", "rec_soft_up", "ft_soft_up", "oof_rec_flagged", "oof_ft_flagged"]
 
 
 def as_binary(a) -> np.ndarray:

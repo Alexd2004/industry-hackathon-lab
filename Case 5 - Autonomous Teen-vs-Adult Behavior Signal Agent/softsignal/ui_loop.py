@@ -13,8 +13,10 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from softsignal.agents.contracts import TEST_METRIC_KEYS
+from softsignal.explain import FEATURE_NAMES
 from softsignal.metrics import DEFAULT_CAP, ROUNDS_COLS
-from softsignal.ui_results import FOOTER, FT_CI, headline_rows, load_ladder
+from softsignal.ui_results import FOOTER, FT_CI, FT_HUE, REC_HUE, headline_rows, load_ladder
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 ROUNDS_FILE, DECISIONS_FILE = "rounds.csv", "decisions.jsonl"
@@ -33,10 +35,10 @@ NUMERIC = [c for c in ROUNDS_COLS if c not in ("run", "mode", "action", "applied
 BLANK_OK = {"t_soft", "audit_ft", "psi", "refit_s"}
 INTS = {"round", "n_flagged", "n_verify", "n_labels", "n_audit_adults"}
 RATES = {"cap", "audit_ft", "prec", "rec", "ft", "mt", "auc"}
-TEST_METRIC_KEYS = {"prec", "rec", "ft", "mt", "f1", "auc"}  # never allowed in decisions.jsonl
 DIFF_ROWS = ("blend_w", "cutoff", "cap", "action")
-FT_HUE, REC_HUE = "#d95f02", "#1b6ca8"  # false-teen line and cap band share one hue; recall another
 LAST_ROUND = 7
+INSUFFICIENT_TEXT = {"default": "insufficient_data: not enough labels yet (normal early on, not an error).",
+                     "a4": "insufficient_data: no accounts were sent to verification in this batch."}
 
 
 @dataclass
@@ -258,6 +260,9 @@ def _card_body(key: str, block: dict, decision: dict) -> None:
         st.dataframe(diff_table(decision), hide_index=True, width="stretch")
     elif key == "a4" and isinstance(out, dict):
         st.caption(str(out.get("batch_reason", "")))  # no labels next to A4 notes
+        cites = [FEATURE_NAMES.get(f, f) for f in out.get("based_on", []) if isinstance(f, str)]
+        if cites:
+            st.caption("Based on: " + ", ".join(cites))
     elif key == "a5" and isinstance(out, list):
         verdicts = pd.Series([str(c.get("verdict")) for c in _dicts(out)]).value_counts()
         st.caption(", ".join(f"{n} {v}" for v, n in verdicts.items()) or "No claims checked.")
@@ -280,7 +285,7 @@ def agent_card(key: str, decision: dict | None, placeholder: bool = False) -> No
             label = f"{block['status']} (placeholder)" if placeholder else block["status"]  # no agent was called
             st.badge(label, color=BADGE_COLOR[block["status"]])
         if _is_insufficient(block):
-            st.caption("insufficient_data: not enough labels yet (normal early on, not an error).")
+            st.caption(INSUFFICIENT_TEXT.get(key, INSUFFICIENT_TEXT["default"]))
             return
         if block["status"] == "FALLBACK":
             st.caption(f"Fallback reason: {block['fallback_reason'] or 'not given'}")
