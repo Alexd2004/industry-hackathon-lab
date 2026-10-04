@@ -15,6 +15,11 @@ ROUNDS_COLS = ["run", "round", "mode", "action", "applied_source", "cap", "t_sof
                "n_verify", "n_labels", "n_audit_adults", "audit_ft", "psi", "prec", "rec", "ft", "mt", "auc",
                "refit_s"]
 DEFAULT_CAP = 0.15  # max false-teen rate when picking a cutoff
+# Frozen ranked.csv columns (explain.py, the "likely teen" list; no labels). c1..c3 are readable
+# chips like "quiet in school hours +0.82"; f1..f3 their level-2 feature keys and v1..v3 the signed
+# logit contributions as numbers (for A3/A4). words: the account's teen-leaning words, "im, lol".
+RANKED_COLS = ["rank", "blogger_id", "score", "band", "action", "c1", "c2", "c3", "f1", "f2", "f3",
+               "v1", "v2", "v3", "words", "reason"]
 
 
 def as_binary(a) -> np.ndarray:
@@ -60,6 +65,17 @@ def auc(y_true, score) -> float:
     if len(np.unique(y)) < 2:
         return float("nan")
     return float(roc_auc_score(y, np.asarray(score, dtype=float)))
+
+
+def top_k_precision(y_true, score, k: int) -> float:
+    """Share of teens among the k highest-scoring accounts (ties broken by original order)."""
+    y, score = as_binary(y_true), np.asarray(score, dtype=float)
+    if score.shape != y.shape:
+        raise ValueError(f"shape mismatch: {score.shape} vs {y.shape}")
+    if not 1 <= k <= len(y):
+        raise ValueError(f"k must be between 1 and {len(y)}, got {k}")
+    top = np.argsort(-score, kind="stable")[:k]
+    return float(y[top].mean())
 
 
 def eval_row(stage: str, eval_set: str, y_true, y_pred, score=None) -> dict:
