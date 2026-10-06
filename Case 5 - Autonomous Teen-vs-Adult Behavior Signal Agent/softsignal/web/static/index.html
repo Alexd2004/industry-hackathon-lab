@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoftSignal</title>
+  <!-- IBM Plex when online; offline (Wi-Fi-off demo) the system font stack in styles.css takes over -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span>SoftSignal</div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" role="tab" data-view="dashboard">Dashboard</button>
+      <button class="tab" role="tab" data-view="training">Training</button>
+      <button class="tab" role="tab" data-view="results">Results</button>
+    </nav>
+    <div class="chips">
+      <label class="chip chip-select" title="Which loop run the page shows">
+        <span class="sr-only">Run</span>
+        <select id="run-select"></select>
+      </label>
+      <span class="chip" id="round-chip">Round – of 7</span>
+      <span class="chip">Activity data: synthetic</span>
+      <span class="chip">No birthday, no camera</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Dashboard -->
+    <section class="view" id="view-dashboard">
+      <div class="grid-dash">
+        <div class="card card-headline">
+          <div class="metric">
+            <div class="metric-title"><span class="dot dot-blue"></span>Teens caught</div>
+            <div class="big" id="d-rec">–</div>
+            <div class="sub" id="d-rec-of">–</div>
+            <div class="delta blue" id="d-rec-delta"></div>
+          </div>
+          <hr>
+          <div class="metric metric-ft">
+            <div class="metric-title"><span class="dot dot-orange"></span>Adults wrongly flagged</div>
+            <div class="ft-row">
+              <div class="medium" id="d-ft">–</div>
+              <div>
+                <div class="sub" id="d-ft-of">–</div>
+                <div class="delta orange" id="d-ft-cap"></div>
+              </div>
+            </div>
+          </div>
+          <div class="inset">
+            <div class="cap-head">
+              <div><span class="cap-label">False-teen cap</span> <span class="cap-value" id="cap-value">15%</span></div>
+              <button class="pill" id="cap-default">Default 15%</button>
+            </div>
+            <input type="range" id="cap-slider" min="8" max="30" step="1" value="15" aria-label="False-teen cap">
+            <div class="range-ends"><span id="cap-min">8%</span><span id="cap-max">30%</span></div>
+            <p class="help">The share of adults the team accepts being wrongly flagged. Raise it to catch more teens.
+              Lower it to flag fewer adults.</p>
+            <p class="help strong" id="cap-readout"></p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Round by round</h2><span class="tag" id="d-chart-tag">rounds.csv</span>
+          </div>
+          <div id="d-chart" class="chart"></div>
+          <p class="caption" id="d-chart-caption"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Training -->
+    <section class="view" id="view-training">
+      <div class="train-head">
+        <h1 id="t-title">Round –</h1>
+        <div class="round-pills" id="t-pills"></div>
+        <div class="spacer"></div>
+        <div class="menu-wrap">
+          <button class="btn btn-ghost" id="run-btn" aria-haspopup="true">Run loop ▾</button>
+          <div class="menu" id="run-menu" hidden>
+            <button data-mode="crew"><b>Crew</b><span>A1–A5 run, A2 decides, rule as fallback</span></button>
+            <button data-mode="rule"><b>Rule only</b><span>loop.py decides, no agents (the baseline)</span></button>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="replay-btn">Replay run</button>
+      </div>
+      <div class="banner" id="t-banner"></div>
+      <div class="grid-train">
+        <div class="card">
+          <div class="card-head"><h2>Signal weights</h2><span class="muted small">Change against the previous round</span></div>
+          <div id="t-weights"></div>
+          <div class="legend"><span><i class="sq sq-blue"></i>Writing</span><span><i class="sq sq-black"></i>Activity (synthetic)</span></div>
+          <p class="caption" id="t-weights-note"></p>
+        </div>
+        <div class="card card-loop">
+          <div class="card-head"><h2>The loop</h2><span class="muted small">Clockwise, one lap per round</span></div>
+          <div id="t-loop" class="loop"></div>
+          <div class="agent-card" id="t-agent"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Held-out test</h2><span class="muted small">Orange = over the <span class="cap-pct">15%</span> cap</span></div>
+          <table class="table" id="t-table">
+            <thead><tr><th>Round</th><th>Teens caught</th><th>Adults flagged</th><th>Code gate</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="view" id="view-results">
+      <div class="grid-results">
+        <div class="card">
+          <div class="card-head"><h2 class="boxed">Out of every 100 accounts</h2><span class="tag" id="r-people-tag">rounds.csv</span></div>
+          <p class="sub" id="r-people-sub"></p>
+          <div id="r-people" class="people"></div>
+          <div class="people-stats" id="r-people-stats"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>When they log in</h2><span class="tag">Synthetic activity data</span></div>
+          <div id="r-heat"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Before and after retraining</h2><span class="tag" id="r-ba-tag">rounds.csv</span></div>
+          <p class="sub" id="r-ba-sub"></p>
+          <div id="r-ba"></div>
+        </div>
+      </div>
+
+      <div class="list-head">
+        <h2 class="h-list">Likely-teen list</h2>
+        <div class="filters" id="r-filters"></div>
+        <span class="muted small" id="r-list-note"></span>
+      </div>
+      <div class="card card-flush">
+        <table class="table table-list" id="r-list">
+          <thead><tr><th>Rank</th><th>Account</th><th>Teen score</th><th>Action</th><th>Why</th><th id="r-reviewed">Reviewer</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="more"><button class="btn btn-ghost" id="r-more">Show more</button></div>
+      </div>
+
+      <div class="list-head">
+        <h2 class="h-list">Results ladder</h2>
+        <span class="muted small">Held-out test, 900 accounts. Every number is read from a results file or computed from one.</span>
+        <div class="spacer"></div>
+        <button class="btn btn-ghost" id="pipeline-btn">Rebuild models</button>
+      </div>
+      <div class="card card-flush">
+        <table class="table" id="r-ladder">
+          <thead><tr><th>Stage</th><th>Teens caught</th><th>Adults flagged</th><th>Precision</th><th>F1</th><th>AUC</th><th>Source</th></tr></thead>
+          <tbody><tr><td colspan="7" class="muted">Loading (the first load scores the keyword baseline and tabular LR)…</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="list-head"><h2 class="h-list">Agent time per call</h2><span class="muted small">tier3_latency.csv, measured, p50 / p95</span></div>
+      <div class="card card-flush">
+        <table class="table" id="r-latency">
+          <thead><tr><th>Row</th><th>Calls</th><th>p50</th><th>p95</th><th>Tokens in / out</th><th>Fell back</th><th>Note</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">Text: 2004 public blogs (self-reported ages, label noise possible). Activity: synthetic_calibrated_demo,
+    ~12% contrarians. Verification: simulated from the answer key. Likelihood, not legal age.</footer>
+
+  <div class="toast" id="toast" hidden>
+    <div class="toast-head"><b id="toast-title"></b><button class="x" id="toast-close" aria-label="Close">×</button></div>
+    <div class="toast-step" id="toast-step"></div>
+    <pre class="toast-log" id="toast-log"></pre>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

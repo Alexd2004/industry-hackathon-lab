@@ -1,0 +1,9 @@
+row,n,p50_ms,p95_ms,tokens_in,tokens_out,n_model_fallback,runs,note
+A1,6,1770.1,2438.9,9356,785,0,20261004T062330.117689Z-9b5a8a,
+A2,5,2218.8,3041.4,7249,693,2,20261004T062330.117689Z-9b5a8a,
+A3,0,,,,,1,20261004T062330.117689Z-9b5a8a,"no LIVE model call, every model call fell back"
+A4,0,,,,,0,20261004T062330.117689Z-9b5a8a,no model call in these runs (A4 is not run in the crew)
+A5,5,2399.4,2694.4,15905,770,2,20261004T062330.117689Z-9b5a8a,
+run_round_tool,7,31.5,6751.3,,,,20261004T062330.117689Z-9b5a8a,no model: refit and scoring
+round_time,7,6727.1,15717.9,,,,20261004T062330.117689Z-9b5a8a,"max(A1, A3) + A2 + tool + max(A4, A5)"
+round_span,7,6744.0,15733.0,,,,20261004T062330.117689Z-9b5a8a,"measured wall time, first call start to last call end"
