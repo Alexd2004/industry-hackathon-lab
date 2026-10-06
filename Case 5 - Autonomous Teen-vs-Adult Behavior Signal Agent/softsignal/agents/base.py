@@ -146,17 +146,18 @@ class AgentResult:
 
 
 def trim_text(text: str, limit: int) -> str:
-    """text cut to at most limit characters: at the last sentence end that fits, else at the last word boundary,
-    so a number is never cut in half. Unchanged when it already fits. The result is a prefix of text, so it says
-    nothing the full text did not, and the agent's number checks still run on it."""
+    """text cut to at most limit characters at the last sentence end that fits, keeping at least a third of the
+    limit. Only whole sentences are kept, so a qualifier or a negation later in a sentence is never cut off and a
+    number is never cut in half. With no such sentence end the text comes back unchanged (too long: the schema then
+    rejects it, as before). The result is a prefix of text, so it says nothing the full text did not, and the
+    agent's checks still run on it."""
     if len(text) <= limit:
         return text
     # sentence ends judged on the full text, so "3.5" cut after "3." is never taken for one
     ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text) if m.end() <= limit]
-    if ends and ends[-1] >= limit // 3:  # a sentence end that keeps a useful part of the text
+    if ends and ends[-1] >= limit // 3:
         return text[:ends[-1]].rstrip()
-    head = text[:limit + 1]  # one more character, so a word that ends exactly at the limit is kept whole
-    return head.rsplit(" ", 1)[0].rstrip(",;: ") if " " in head else text[:limit]
+    return text
 
 
 def outcome(block: dict | None) -> str:
@@ -211,13 +212,18 @@ def numbers_in(text: str) -> list[float]:
 
 
 def _percent_of(token: str, inputs: list[float]) -> bool:
-    """A percent ("35.56%", "36%") that is an input number x 100 rounded to the decimals it is written with."""
+    """A percent written with at least one decimal ("35.56%", "35.6%") that is an input fraction (strictly between
+    0 and 1) x 100 rounded to those decimals. A whole percent ("36%") is not accepted this way: with many fractions in
+    an input, almost any whole percent lies within half a point of one of them, so it would let a computed share
+    through; 0 and 1 are left out for the same reason (any zero or any count of 1)."""
     if not token.endswith("%"):
         return False
     text = token.rstrip("%").lstrip("+-")
-    decimals = len(text.split(".")[1]) if "." in text else 0
+    if "." not in text:
+        return False
+    decimals = len(text.split(".")[1])
     v = abs(float(text))
-    return any(round(x * 100, decimals) == v for x in inputs if x <= 1)
+    return any(round(x * 100, decimals) == v for x in inputs if 0 < x < 1)
 
 
 def numbers_not_in_input(output_text: str, allowed_from: Any) -> list[str]:
@@ -225,8 +231,9 @@ def numbers_not_in_input(output_text: str, allowed_from: Any) -> list[str]:
 
     Pass the part of the input the agent may cite, not every number it saw. Compared by absolute value: a
     sign flip is not caught here (A5 and the logs exist for wrong reasoning with real numbers). Numbers are
-    compared as written, so 3.2 is not accepted for an input 3.21. A percent may also be an input fraction x 100
-    at the precision it is written with ("35.56%" or "36%" for 0.355555...): a rounding, never new arithmetic.
+    compared as written, so 3.2 is not accepted for an input 3.21. A percent with decimals may also be an input
+    fraction x 100 at the precision it is written with ("35.56%" or "35.6%" for 0.355555...): a rounding, never new
+    arithmetic (see _percent_of for why a whole percent is not).
     """
     inputs = [abs(x) for x in numbers_in(json.dumps(allowed_from, default=str))]
     allowed = set(inputs)

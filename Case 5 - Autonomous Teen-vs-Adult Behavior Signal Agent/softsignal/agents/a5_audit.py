@@ -94,14 +94,15 @@ the claim has no number at all.
 _ANY = r"(?:[^.;]|\.(?=\d))*?"  # inside a clause; a decimal point ("88.7%") does not end it
 METRICS = {
     "rec": rf"\brecall\b|\bcatch(?:es)?\b{_ANY}\bteens?\b|\bcaught\b{_ANY}\bteens?\b",
-    "ft": rf"\bfalse[- ]teen\b(?!\s+cap)|\badults?\b{_ANY}\bflagged\b|\bflagged\b{_ANY}\badults?\b",
-    "prec": r"\bprecision\b", "mt": r"\bmissed[- ]teen\b", "f1": r"\bf1\b", "auc": r"\bauc\b", "cap": r"\bcap\b",
+    "ft": rf"\bfalse[- ]teens?\b(?!\s+cap)|\badults?\b{_ANY}\bflagged\b|\bflagged\b{_ANY}\badults?\b",
+    "prec": r"\bprecision\b", "mt": r"\bmissed[- ]teens?\b", "f1": r"\bf1\b", "auc": r"\bauc\b", "cap": r"\bcap\b",
     "psi": r"\bpsi\b", "audit_adults": r"\baudit[ _]adults?\b", "round": r"\bround\b", "accounts": r"\baccounts?\b",
     # A2's vocabulary (its reason is checked per round against decisions.jsonl's evidence row)
     "floor": r"\bfloor\b|\bminimum\b|\bmin_audit_adults\b", "adults": r"\badults?\b",
     "cutoff": r"\bcutoff\b|\bt_verify\b|\bthreshold\b", "streak": r"\bstreak\b",
-    "teens": r"(?<![-\w])teens\b",  # plural on its own: never the "teen" of false-teen / missed-teen
-    "total": r"\btotal\b", "margin": r"\bmargin\b|\bcap_margin\b",
+    # "teens" on its own (or audit_teens): never the teen of false-teen, false teens, missed teens
+    "teens": r"\baudit[ _]teens\b|(?<![-\w])(?<!false )(?<!missed )teens\b",
+    "total": r"\baudit[ _]total\b|\btotal\b", "margin": r"\bmargin\b|\bcap_margin\b",
     "window": r"\bwindow\b|\brefit_window\b",
 }
 # Metric -> qualifier ("" = always) -> the columns it may be checked against. Headline columns by default; the
@@ -173,9 +174,16 @@ def _allowed(metric: str, qualifiers: set) -> set:
     return {c for q, cols in spec.items() if q == "" or q in qualifiers for c in cols}
 
 
+# Columns of the evidence row a number may only match when its metric is named beside it: counts and lever limits
+# (a bare "2" must not be supported by window_min = 2).
+NAMED_ONLY = {"audit_teens", "audit_total", "window_min", "refit_window", "margin_max", "rule_cap_margin",
+              "policy_margin", "refit_margin"}
+
+
 def _is_count(column: str) -> bool:
     c = column.lower()
-    return c in ("n", "round", "rank", "streak") or c.startswith("n_") or c.endswith("_adults")
+    return (c in ("n", "round", "rank", "streak") or c.startswith("n_") or c.endswith("_adults")
+            or c in NAMED_ONLY)
 
 
 def token_error(token: str, value: float, column: str | None = None) -> float:

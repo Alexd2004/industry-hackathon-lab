@@ -21,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from softsignal import crew, replay
-from softsignal.agents.base import is_real_fallback
+from softsignal.agents.base import UNAVAILABLE, is_real_fallback, outcome
 from softsignal.agents.contracts import TEST_METRIC_KEYS
 from softsignal.explain import FEATURE_NAMES
 from softsignal.metrics import DEFAULT_CAP, ROUNDS_COLS
@@ -567,6 +567,9 @@ def _loop_fragment() -> None:
     t4.metric("Fallbacks this run", str(sum(real_fallback(d.get(a)) for d in decisions for a in AGENTS)),
               help="Real fallbacks only: a reply a check refused, or no usable reply (timeout, API error). "
                    "Insufficient data, script-only checks and offline runs needed or had no model call.")
+    unavailable = sum(outcome(d.get(a)) == UNAVAILABLE for d in decisions for a in AGENTS)
+    if unavailable:  # 0 fallbacks must not read as a clean live run when no model was there to call
+        st.caption(f"{unavailable} agent calls had no model to call (offline, or the recording no longer fits).")
     t5.metric(f"PSI{tag}", "n/a" if latest is None else _num(latest["psi"], "{:.2f}"))
 
     cap = DEFAULT_CAP if latest is None else float(latest["cap"])

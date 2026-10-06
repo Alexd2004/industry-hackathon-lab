@@ -71,8 +71,10 @@ def test_a_percent_may_round_an_input_fraction_at_its_own_precision():
     from softsignal.agents.base import numbers_not_in_input
 
     inputs = {"ft": 0.35555555, "rec": 0.7977}
-    assert numbers_not_in_input("false-teen 35.56% and 36%, recall 79.8%", inputs) == []
+    assert numbers_not_in_input("false-teen 35.56% or 35.6%, recall 79.8%", inputs) == []
     assert numbers_not_in_input("false-teen 35.5%", inputs) == ["35.5%"]  # a wrong rounding is still caught
+    assert numbers_not_in_input("about 36%", inputs) == ["36%"]  # a whole percent must be exact, as before
+    assert numbers_not_in_input("100.0% of them", {"streak": 1}) == ["100.0%"]  # a count of 1 is not a rate
     assert numbers_not_in_input("0.36 of adults", inputs) == ["0.36"]  # only percents are rounded, as before
     assert numbers_not_in_input("420 adults", {"a": 213, "b": 207}) == ["420"]  # arithmetic is still refused
 
@@ -82,8 +84,8 @@ def test_trim_text_cuts_at_a_sentence_end_or_a_word():
 
     assert trim_text("Short.", 10) == "Short."
     assert trim_text("First sentence here. Second one is long.", 30) == "First sentence here."
-    assert trim_text("one two three four five", 12) == "one two"
-    assert trim_text("Rate is 3.5 now and more words follow here.", 11) == "Rate is 3.5"  # never "Rate is 3."
+    assert trim_text("one two three four five", 12) == "one two three four five"  # no sentence end: unchanged
+    assert trim_text("Rate is 3.5 now. More words follow here.", 20) == "Rate is 3.5 now."  # never "Rate is 3."
 
 
 def test_a5_repair_cuts_long_notes_only():

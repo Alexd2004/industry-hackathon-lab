@@ -56,8 +56,9 @@ import pandas as pd
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
 from softsignal.agents import a1_drift, a2_controller, a3_errors, a5_audit
 from softsignal.agents.a2_controller import run_a2
-from softsignal.agents.base import (FALLBACK, OFFLINE, REPLAY_MISMATCH, AgentResult, input_hash, is_real_fallback,
-                                    make_client, merge_block)
+from softsignal.agents.base import (FALLBACK, INVALID, OFFLINE, REPLAY_MISMATCH, AgentResult, input_hash,
+                                    is_real_fallback, make_client, merge_block)
+from softsignal.agents.schemas import A1Output, A2Output, A3Output
 from softsignal.agents.contracts import (
     A3_COLS, INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a3_input, a5_input, a5_sources, evidence_source,
     load_checklist, round_claims,
@@ -69,6 +70,18 @@ from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, Dec
                              check_rounds_header, make_env, run_loop, write_run)
 from softsignal.metrics import ROUNDS_COLS
 from softsignal.replay import Replayer, read_records, serve
+
+def with_schema(schema: type, validate):
+    """validate, after today's output schema: a recording made under looser limits (A3 had 4 patterns, now 2) is
+    not served, because replay.serve only runs the agent's own check, which does not re-check list lengths."""
+    def check(output, payload):
+        try:
+            schema.model_validate(output)
+        except Exception as e:  # noqa: BLE001 - any mismatch means "do not serve"
+            return INVALID, [f"recording fails today's schema: {type(e).__name__}"]
+        return validate(output, payload)
+    return check
+
 
 A5_ERROR = "agent_error"  # A5 raised: the round keeps going with an empty, FALLBACK A5 block
 A3_ERROR = "agent_error"  # A3's input or run raised: the round keeps going with a FALLBACK, no-analysis A3 block
@@ -154,7 +167,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         rows = prior.iloc[0:0] if batch is None else batch.rows
         score_psi = psi_val if state.mode == SHADOW else None  # the live model changes every refit once ACTIVE
         payload = a1_input(prior, rows, score_psi, env.oracle.audit_counts(), history, rnd, psi_drift)
-        a1 = replay_or_run("a1", rnd, payload, a1_drift.validate_output,
+        a1 = replay_or_run("a1", rnd, payload, with_schema(A1Output, a1_drift.validate_output),
                            lambda: a1_drift.run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
@@ -164,7 +177,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         """A3 on this round's earlier-round errors. Never raises: an A3 error must not take A1 or the round down."""
         try:
             payload = a3_payload(env, state, batch, prior)
-            return replay_or_run("a3", rnd, payload, a3_errors.validate_output,
+            return replay_or_run("a3", rnd, payload, with_schema(A3Output, a3_errors.validate_output),
                                  lambda: a3_errors.run_a3(payload, client, env.timer, rnd))
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A3", FALLBACK, a3_errors.fallback_output(), A3_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
@@ -195,7 +208,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
                            a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT,
                            a3=a3 if a3_ok else INSUFFICIENT_INPUT, policy=env.policy)
-        a2 = replay_or_run("a2", ctx.round, payload, a2_controller.validate_output,
+        a2 = replay_or_run("a2", ctx.round, payload, with_schema(A2Output, a2_controller.validate_output),
                            lambda: run_a2(payload, client, env.timer, ctx.round))
         return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
 

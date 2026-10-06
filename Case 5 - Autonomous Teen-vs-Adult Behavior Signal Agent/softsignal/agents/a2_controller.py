@@ -172,39 +172,37 @@ def percent_forms(payload: dict) -> list:
 def clamp_output(output: dict, payload: dict) -> tuple[dict, list[str]]:
     """The cap inside bounds.cap_min..cap_max and the cap_margin inside 0..margin_limit() and the refit_window at least
     window_min(); on hold or promote the cap_margin and refit_window are dropped (only a re-tune refits with them, and
-    a promote keeps what its model was tested with), so the record never shows a lever that was not used. The
-    second value says what was changed (empty if nothing)."""
-    if output["action"] != "re-tune":
-        unused = [k for k in ("cap_margin", "refit_window") if output.get(k) is not None]
-        if unused:
-            note = f" ({' and '.join(unused)} not used: they act on re-tune only)"
-            room = A2_MAX_REASON_CHARS - len(note)
-            text = output["reason"] if len(output["reason"]) <= room else trim_text(output["reason"], room)
-            output = {**output, **{k: None for k in unused}, "reason": text + note}
-            out, changes = clamp_output(output, payload)
-            return out, [f"IGNORED {k} on {output['action']}" for k in unused] + changes
+    a promote keeps what its model was tested with), so the record never shows a lever that was not used. Every
+    change gets one note at the end of the reason, all notes together, so a cut never splits one. The second value
+    says what was changed (empty if nothing)."""
+    unused = [] if output["action"] == "re-tune" else [k for k in ("cap_margin", "refit_window")
+                                                        if output.get(k) is not None]
     lo_code, hi_code = cap_limits()
     lo, hi = max(payload["bounds"]["cap_min"], lo_code), min(payload["bounds"]["cap_max"], hi_code)
     cap = float(min(hi, max(lo, output["cap"])))
-    margin = output.get("cap_margin")
+    margin = None if "cap_margin" in unused else output.get("cap_margin")
     new_margin = None if margin is None else float(min(margin_limit(), cap, max(0.0, margin)))
-    window = output.get("refit_window")
+    window = None if "refit_window" in unused else output.get("refit_window")
     new_window = None if window is None else max(window_min(), window)
-    if cap == output["cap"] and new_margin == margin and new_window == window:
+    if not unused and cap == output["cap"] and new_margin == margin and new_window == window:
         return output, []
-    changes = ([f"CLAMPED cap {output['cap']} -> {cap}"] if cap != output["cap"] else []) + (
+    changes = [f"IGNORED {k} on {output['action']}" for k in unused] + (
+        [f"CLAMPED cap {output['cap']} -> {cap}"] if cap != output["cap"] else []) + (
         [f"CLAMPED cap_margin {margin} -> {new_margin}"] if new_margin != margin else []) + (
         [f"CLAMPED refit_window {window} -> {new_window}"] if new_window != window else [])
-    note = "".join([f" (cap clamped from {output['cap']} to {cap})" if cap != output["cap"] else "",
+    note = "".join([f" ({' and '.join(unused)} not used: they act on re-tune only)" if unused else "",
+                    f" (cap clamped from {output['cap']} to {cap})" if cap != output["cap"] else "",
                     f" (cap_margin clamped from {margin} to {new_margin})" if new_margin != margin else "",
                     f" (refit_window clamped from {window} to {new_window})" if new_window != window else ""])
     room = A2_MAX_REASON_CHARS - len(note)
     text = output["reason"]
     if len(text) > room:  # cut at a word boundary, so a number is never cut in half
         text = text[:room].rsplit(" ", 1)[0].rstrip(",;:")
-    reason = text + note  # the text must match the applied cap
-    return {**output, "cap": cap, **({} if margin is None else {"cap_margin": new_margin}),
-            **({} if window is None else {"refit_window": new_window}), "reason": reason}, changes
+    reason = text + note  # the text must match the applied decision
+    levers = {k: None for k in unused}
+    levers |= {} if margin is None else {"cap_margin": new_margin}
+    levers |= {} if window is None else {"refit_window": new_window}
+    return {**output, "cap": cap, **levers, "reason": reason}, changes
 
 
 def _rule_output(payload: dict) -> tuple[dict, list[str]]:
