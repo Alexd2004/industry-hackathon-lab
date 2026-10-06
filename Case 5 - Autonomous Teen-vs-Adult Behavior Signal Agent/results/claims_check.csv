@@ -3,7 +3,9 @@ SoftSignal catches 92% of teens at a 15% false-teen cap on the 900 held-out acco
 "At a 15% cap, 17.1% of held-out adults are flagged, and 15.0% on training data.",supported,policy_grid.csv:cap=0.15,over_cap,Every number matches this row.,FALLBACK,offline
 "At a 15% cap, 225 accounts are sent to verification now, at 99.1% precision.",supported,policy_grid.csv:cap=0.15,over_cap,Every number matches this row.,FALLBACK,offline
 The keyword baseline catches 50% of teens at 32% false-teen.,projected,eval_placeholder.csv:1,,"The closest row holding these numbers is projected, not measured.",FALLBACK,offline
-The loop promotes the stack at round 7 and reaches 88.7% recall at 16.9% false-teen.,supported,rounds_recorded.csv:R7,loop_below_static,Every number matches this row.,FALLBACK,offline
+The loop promotes the stack at round 7 and reaches 88.4% recall at 16.7% false-teen.,supported,rounds_recorded.csv:R7,loop_below_static,Every number matches this row.,FALLBACK,offline
 The stack's AUC is 0.955.,projected,eval_placeholder.csv:6,,"The closest row holding these numbers is projected, not measured.",FALLBACK,offline
 The five-agent crew makes the model more accurate.,cannot_check,,agents_accuracy,No number to check against a results file.,FALLBACK,offline
+"Over 5 seeds the crew run ends at 86.3% recall and 20.0% false-teen, against 87.1% and 20.6% for the rule run.",cannot_check,"files: eval.csv, sanity.txt, ablations.csv",,"No present row holds it, and these results files are missing.",FALLBACK,offline
+"Under drift the rule loop ends at 43.5% false-teen with 2 of 5 seeds promoted, and a 2-round refit window gives 25.4% false-teen with 4 of 5 promoted.",unsupported,rounds_recorded.csv:R2,loop_below_static,The row this claim names holds a different value for one of its metrics.,FALLBACK,offline
 The top 100 accounts in the ranked list are all teens.,cannot_check,"files: eval.csv, sanity.txt, ablations.csv",,"No present row holds it, and these results files are missing.",FALLBACK,offline

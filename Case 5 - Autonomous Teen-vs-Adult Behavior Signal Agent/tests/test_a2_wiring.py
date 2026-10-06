@@ -65,9 +65,9 @@ def applied_run(split_and_tm, tmp_path_factory):
     caps, seen = [], []
     real = loop.refit
 
-    def spy(env_, state, cap):
+    def spy(env_, state, cap, margin=None, window=None):
         caps.append(cap)
-        return real(env_, state, cap)
+        return real(env_, state, cap, margin, window)
 
     with mock.patch.object(loop, "refit", spy):
         rounds, records = loop.run_loop(env, N_ROUNDS, decide=scripted(SCRIPT, seen), apply_a2=True)
@@ -256,9 +256,9 @@ def promote_run(split_and_tm, tmp_path_factory):
     caps = []
     real = loop.refit
 
-    def spy(env_, state, cap):
+    def spy(env_, state, cap, margin=None, window=None):
         caps.append((state.round, cap))
-        return real(env_, state, cap)
+        return real(env_, state, cap, margin, window)
 
     def decide(ctx, blocks):
         if ctx.guards["hold_required"]:

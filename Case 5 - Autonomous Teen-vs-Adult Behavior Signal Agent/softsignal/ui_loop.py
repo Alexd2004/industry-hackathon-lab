@@ -45,7 +45,7 @@ NUMERIC = [c for c in ROUNDS_COLS if c not in ("run", "mode", "action", "applied
 BLANK_OK = {"t_soft", "audit_ft", "psi", "refit_s"}
 INTS = {"round", "diff_count", "n_flagged", "n_verify", "n_labels", "n_audit_adults"}
 RATES = {"cap", "audit_ft", "prec", "rec", "ft", "mt", "auc"}
-DIFF_ROWS = ("blend_w", "cutoff", "cap", "action")
+DIFF_ROWS = ("blend_w", "cutoff", "cap", "cap_margin", "action")
 LAST_ROUND = 7
 INSUFFICIENT_TEXT = {"default": "insufficient_data: not enough labels yet (normal early on, not an error).",
                      "a1": "insufficient_data: no earlier batch to compare with yet (normal in rounds 0 and 1).",
