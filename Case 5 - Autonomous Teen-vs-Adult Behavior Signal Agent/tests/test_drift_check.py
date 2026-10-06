@@ -2,9 +2,9 @@
 import numpy as np
 import pandas as pd
 
-from softsignal.drift_check import teen_columns
+from softsignal.drift_check import summary, teen_columns, window_decider
 from softsignal.features import FEATURE_COLS, ID_COL, TARGET
-from softsignal.loop import make_env
+from softsignal.loop import DecisionContext, make_env
 from softsignal.oracle import Drift
 from tests.test_oracle import make_frame
 
@@ -34,3 +34,24 @@ def test_a_drifted_env_reports_on_drifted_test_rows(tmp_path):
     assert clean.test["sessions_per_day"].equals(test["sessions_per_day"])
     assert not drifted.test["sessions_per_day"].equals(test["sessions_per_day"])
     assert drifted.test[TARGET].equals(test[TARGET]) and drifted.test[ID_COL].equals(test[ID_COL])
+
+
+def ctx():
+    return DecisionContext(round=5, thresholds={}, audit={}, bounds={}, guards={},
+                           rule={"action": "retune", "cap": 0.15})
+
+
+def test_window_decider_copies_the_rule_and_asks_for_the_window_once_a1_says_real():
+    decide = window_decider(2)
+    not_real = decide(ctx(), {"a1": {"output": {"drift": "not_real"}}})["a2"]["output"]
+    real = decide(ctx(), {"a1": {"output": {"drift": "real"}}})["a2"]["output"]
+    after = decide(ctx(), {"a1": {"output": {"drift": "insufficient_data"}}})["a2"]["output"]
+    assert not_real == {"action": "retune", "cap": 0.15}
+    assert real == after == {"action": "retune", "cap": 0.15, "refit_window": 2}  # sticky once seen
+    assert decide(ctx(), {})["a2"]["status"] == "LIVE"
+
+
+def test_summary_counts_the_share_promoted_at_the_last_round():
+    rows = [dict(seed=s, run="x", round=r, mode=m, a1_drift="real", rec=1.0, prec=1.0, ft=0.1, auc=0.9)
+            for s, m in ((1, "ACTIVE"), (2, "SHADOW")) for r in (0, 1) for m in [m]]
+    assert summary(pd.DataFrame(rows)).loc["x", "promoted"] == 0.5

@@ -64,7 +64,7 @@ from softsignal.agents.contracts import (
 from softsignal.data import load_data
 from softsignal.explain import explain_frame
 from softsignal.features import ID_COL, TARGET
-from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, DecisionContext, Env, State,
+from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, Decide, DecisionContext, Env, State,
                              check_rounds_header, make_env, run_loop, write_run)
 from softsignal.metrics import ROUNDS_COLS
 from softsignal.replay import Replayer, read_records, serve
@@ -112,12 +112,14 @@ DECISIONS_RECORDED = DECISIONS_JSONL.with_name("decisions_recorded.jsonl")
 def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = False,
              rounds_path: Path = ROUNDS_CSV, decisions_path: Path = DECISIONS_JSONL,
              state: State | None = None, replayer: Replayer | None = None,
-             checklist: list[dict] | None = None, apply_a2: bool = True) -> tuple[pd.DataFrame, list[dict]]:
+             checklist: list[dict] | None = None, apply_a2: bool = True,
+             decider: Decide | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """R0 then each oracle batch (at most n_rounds) with A1 and A5 on every round and A2 from R1. Returns
     (rounds, records) like loop.run_loop. write=True appends each round to rounds_path / decisions_path when it ends.
     client: base.make_client() (None = offline). replayer: recorded outputs to serve while offline (None = none;
     A1 and A5 only). checklist: A5's risk list (default claims/risks.yaml; [] if that file is missing).
-    A2's decision is logged next to the rule's; apply_a2 (crew mode) applies A2's own decision, False logs it only."""
+    A2's decision is logged next to the rule's; apply_a2 (crew mode) applies A2's own decision, False logs it only.
+    decider: a scripted stand-in for A2, (context, blocks) -> {"a2": block}; replaces the agent call (drift_check)."""
     psi_drift = env.policy.get("psi_drift")
     history: list[dict] = []
     rows_so_far: list[dict] = []
@@ -202,7 +204,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         if write:  # the same round again with A5 in it: the last line of a (run, round) wins
             write_run(pd.DataFrame(columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
 
-    return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round, decide=decide,
+    return run_loop(env, n_rounds, state, before_decision=before_decision, on_round=on_round,
+                    decide=decider or decide,
                     apply_a2=apply_a2)
 
 
