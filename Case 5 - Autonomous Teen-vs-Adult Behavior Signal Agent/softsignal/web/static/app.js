@@ -214,9 +214,16 @@ function renderTraining() {
   renderTestTable(rs, row);
 }
 
-function statusChip(st) {
-  if (!st) return "";
-  return `<span class="status status-${esc(st)}">${esc(st)}</span>`;
+// what an agent block came to (payload.outcome): only REJECTED and FAILED are the agent failing
+const OUTCOME_TITLE = {
+  LIVE: "the model's answer was used", REPLAY: "a recorded answer was served",
+  SCRIPTED: "no model call needed (not enough data yet, or a script check)", UNAVAILABLE: "no model to call (offline)",
+  REJECTED: "a check refused the model's reply; the fallback was used", FAILED: "no usable reply (timeout or API error)",
+};
+function statusChip(block) {
+  const o = block?.outcome || block?.status;
+  if (!o || o === "NOT_RUN") return "";
+  return `<span class="status status-${esc(o)}" title="${esc(OUTCOME_TITLE[o] || "")}">${esc(o)}</span>`;
 }
 
 function renderBanner(row) {
@@ -241,7 +248,7 @@ function renderBanner(row) {
   }[gate.key] || "";
   const gateLabel = gate.key === "starter" || gate.key === "rule" ? gate.short : `Code gate: ${gate.short.toLowerCase()}`;
   $("t-banner").innerHTML = `
-    <div class="banner-box banner-a2"><div class="banner-label">A2 Loop Controller proposed ${statusChip(a2?.status)}</div>
+    <div class="banner-box banner-a2"><div class="banner-label">A2 Loop Controller proposed ${statusChip(a2)}</div>
       <div class="banner-value" title="${esc(a2?.output?.reason || "")}">${esc(proposed)}</div></div>
     <div class="banner-box banner-rule"><div class="banner-label">Plain rule would do</div>
       <div class="banner-value">${esc(ruleText)}</div></div>
@@ -285,7 +292,8 @@ const NODES = [
   { key: "a4", tag: "A4", name: "Verify-band Triager", deg: 255 },
   { key: "a5", tag: "A5", name: "Honesty Auditor", deg: 300 },
 ];
-const DOT = { LIVE: "#1f8a4c", REPLAY: "#5b6b9a", FALLBACK: "#c98a12", passed: "#1f8a4c", blocked: "#b85c1e", fallback: "#c98a12", starter: "#9aa1ad", rule: "#9aa1ad" };
+const DOT = { LIVE: "#1f8a4c", REPLAY: "#5b6b9a", SCRIPTED: "#9aa1ad", UNAVAILABLE: "#9aa1ad", REJECTED: "#c98a12", FAILED: "#b42318",
+  passed: "#1f8a4c", blocked: "#b85c1e", fallback: "#c98a12", starter: "#9aa1ad", rule: "#9aa1ad" };
 
 function nodeState(key, row) {
   if (!row) return { status: null, sub: "waiting" };
@@ -295,7 +303,8 @@ function nodeState(key, row) {
     return { status: row.action === "hold" || row.action === "starter" ? null : "LIVE", sub };
   }
   const b = row.agents?.[key];
-  return { status: b?.status || null, sub: b?.status || "not run" };
+  const o = b?.outcome && b.outcome !== "NOT_RUN" ? b.outcome : null;
+  return { status: o, sub: o ? `${o.toLowerCase()}${b.fallback_reason ? ` (${b.fallback_reason})` : ""}` : "not run" };
 }
 
 function renderLoop(row) {
@@ -379,9 +388,9 @@ function renderAgent(row) {
     return;
   }
   const b = row.agents?.[n.key];
-  const kind = n.key.startsWith("a") ? (b?.status === "LIVE" || b?.status === "REPLAY" ? "LLM" : b?.status || "") : "code";
+  const kind = n.key.startsWith("a") ? (b?.status === "LIVE" || b?.status === "REPLAY" ? "LLM" : "") : "code";
   $("t-agent").innerHTML = `<div class="agent-badge">${esc(n.tag.slice(0, 5))}</div>
-    <div><div class="agent-title">${esc(n.name)} ${kind ? `<span class="tag">${esc(kind)}</span>` : ""} ${statusChip(b?.status)}</div>
+    <div><div class="agent-title">${esc(n.name)} ${kind ? `<span class="tag">${esc(kind)}</span>` : ""} ${statusChip(b)}</div>
     <div class="agent-text">${esc(agentSummary(n.key, row))}</div></div>`;
 }
 

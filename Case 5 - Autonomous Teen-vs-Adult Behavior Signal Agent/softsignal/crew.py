@@ -56,7 +56,8 @@ import pandas as pd
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
 from softsignal.agents import a1_drift, a2_controller, a3_errors, a5_audit
 from softsignal.agents.a2_controller import run_a2
-from softsignal.agents.base import FALLBACK, AgentResult, input_hash, make_client, merge_block
+from softsignal.agents.base import (FALLBACK, OFFLINE, REPLAY_MISMATCH, AgentResult, input_hash, is_real_fallback,
+                                    make_client, merge_block)
 from softsignal.agents.contracts import (
     A3_COLS, INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a3_input, a5_input, a5_sources, evidence_source,
     load_checklist, round_claims,
@@ -132,7 +133,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
 
     def replay_or_run(key: str, rnd: int, payload: dict, validate, run) -> AgentResult:
         """The recorded output when offline and the input matches (REPLAY), else run() as usual. If this round and
-        agent were recorded from a different input, the result's errors say so (replay_hash_mismatch)."""
+        agent were recorded from a different input, the result's errors say so, and an offline fallback is reported
+        as replay_hash_mismatch: the recording exists but no longer fits (an input contract changed)."""
         got = serve(offline, key, rnd, payload, validate, env.timer)
         if got is not None:
             return got
@@ -140,6 +142,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         note = offline.mismatch_note(rnd, key, input_hash(payload)) if offline is not None else None
         if note:
             result.errors.append(note)
+            if result.fallback_reason == OFFLINE:
+                result.fallback_reason = REPLAY_MISMATCH
         return result
 
     def block(result, rnd: int) -> dict:
@@ -220,15 +224,15 @@ AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
 
 
 def run_fallbacks(records: list[dict]) -> int:
-    """FALLBACK blocks in one run that are not the expected "insufficient_data" (no model call was needed)."""
-    return sum(1 for r in records for k in AGENT_KEYS
-               if (r.get(k) or {}).get("status") == FALLBACK and (r[k].get("fallback_reason") != "insufficient_data"))
+    """Real fallbacks in one run (base.is_real_fallback: a reply refused by a check, or no usable reply). The
+    scripted ones (insufficient_data, script_only) needed no model call and offline ones had none to make."""
+    return sum(1 for r in records for k in AGENT_KEYS if is_real_fallback(r.get(k)))
 
 
 def pick_canonical(records: list[dict], n_rounds: int) -> str | None:
     """The run id to commit as the recording, or None if no run has all n_rounds rounds.
 
-    Rule, fixed before any run is looked at: among complete runs, the fewest unexpected FALLBACK blocks, ties to
+    Rule, fixed before any run is looked at: among complete runs, the fewest real fallbacks (run_fallbacks), ties to
     the earliest run id. It never looks at recall, false-teen or any metric, so picking the recording cannot
     be picking the best-looking numbers.
     """
@@ -338,7 +342,7 @@ def main() -> None:
             all_rounds.append(rounds)
             all_records.append(records)
             if args.runs > 1:
-                print(f"run {env.timer.run}: {run_fallbacks(records)} unexpected FALLBACK blocks")
+                print(f"run {env.timer.run}: {run_fallbacks(records)} real fallbacks")
     except BaseException:
         for p in paths if args.record else ():
             p.unlink(missing_ok=True)
@@ -352,7 +356,7 @@ def main() -> None:
             keep_run(paths, canon)
             rounds = next(r for r in all_rounds if (r["run"] == canon).all())
             records = [r for rs in all_records for r in rs if r["run"] == canon]
-            print(f"canonical run: {canon} (fewest unexpected FALLBACKs, ties to the earliest; metrics not used)")
+            print(f"canonical run: {canon} (fewest real fallbacks, ties to the earliest; metrics not used)")
         from softsignal.recorded_check import scan_recorded  # lazy: recorded_check imports this module
 
         problems = scan_recorded(*paths)  # the repo is public: nothing is swapped in if the new run is not clean

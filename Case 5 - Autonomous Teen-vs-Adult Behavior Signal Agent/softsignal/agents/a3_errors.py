@@ -147,7 +147,7 @@ def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: Agen
     if timer is None:
         output = fallback_output(payload)
     else:
-        with timer.call(AGENT, "fallback", "tool", status=FALLBACK, **rnd):
+        with timer.call(AGENT, "fallback", "tool", status=FALLBACK, reason=reason, **rnd):
             output = fallback_output(payload)
     return AgentResult(AGENT, FALLBACK, output, reason, h, errors, rejected)
 
@@ -155,8 +155,9 @@ def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: Agen
 def run_a3(payload: dict, client=None, timer: AgentTimer | None = None, round_id=None) -> AgentResult:
     """A3 on one round's input. client: base.make_client() (None = offline: no analysis, FALLBACK)."""
     h = input_hash(payload)
-    if insufficient_reason(payload) is not None:  # nothing to analyse: no model call
-        return _fallback(payload, h, INSUFFICIENT, [], timer, round_id)
+    why = insufficient_reason(payload)
+    if why is not None:  # nothing to analyse: no model call; the sub-reason goes in the errors, so it is counted
+        return _fallback(payload, h, INSUFFICIENT, [why], timer, round_id)
     if client is None:
         return _fallback(payload, h, OFFLINE, [], timer, round_id)
     reply = call_model(client, agent=AGENT, step="errors", system=SYSTEM, user=user_message(payload),

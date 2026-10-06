@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from softsignal.agents.base import outcome
 from softsignal.data import ROOT
 from softsignal.explain import ACTIONS, FEATURE_NAMES
 from softsignal.features import ID_COL, TARGET
@@ -111,8 +112,10 @@ def _agent_view(block: dict | None) -> dict | None:
     """The fields the page shows for one agent block (no hashes, no raw prompts)."""
     if not block:
         return None
-    return {k: block.get(k) for k in ("status", "output", "fallback_reason", "ms", "tokens_in", "tokens_out",
+    view = {k: block.get(k) for k in ("status", "output", "fallback_reason", "ms", "tokens_in", "tokens_out",
                                       "errors", "rejected")}
+    view["outcome"] = outcome(block)  # LIVE, REPLAY, NOT_RUN or a fallback's kind (SCRIPTED ... FAILED)
+    return view
 
 
 def _round_view(row: dict, rec: dict | None) -> dict:

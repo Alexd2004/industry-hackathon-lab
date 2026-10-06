@@ -188,7 +188,7 @@ def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: Agen
     if timer is None:
         output, notes = _rule_output(payload)
     else:
-        with timer.call(AGENT, "fallback", "tool", status=FALLBACK, **rnd):
+        with timer.call(AGENT, "fallback", "tool", status=FALLBACK, reason=reason, **rnd):
             output, notes = _rule_output(payload)
     return AgentResult(AGENT, FALLBACK, output, reason, h, errors + notes, rejected)
 

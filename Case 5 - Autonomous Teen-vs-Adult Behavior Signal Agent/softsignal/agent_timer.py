@@ -15,6 +15,8 @@ Every timed call appends one JSON line to a per-call log:
   tokens_in includes prompt-cache reads and writes.
 - error: null, or "ExcType: message" (cut to 500 chars) if the block raised
   (it is re-raised).
+- reason (optional, only when set): a FALLBACK's fallback_reason (agents/base.py),
+  so the log says why without decisions.jsonl. Older lines have no reason key.
 
 One timer per process: every agent must use get_timer() (or one timer the
 orchestrator creates and hands to each agent). Separate AgentTimer objects get
@@ -72,6 +74,7 @@ class Call:
     tokens_in: int | None = None
     tokens_out: int | None = None
     status: str | None = None
+    reason: str | None = None  # a FALLBACK's fallback_reason; written only when set
 
     def usage(self, response: Any) -> Any:
         """Read tokens from any object with .usage.input_tokens/.output_tokens.
@@ -137,7 +140,7 @@ class AgentTimer:
     @contextmanager
     def call(
         self, agent: str, step: str, kind: str = "model", status: str | None = None,
-        round_id: Any = _UNSET,
+        round_id: Any = _UNSET, reason: str | None = None,
     ) -> Iterator[Call]:
         """Time a block. Logs even if the block raises, then re-raises.
 
@@ -147,7 +150,7 @@ class AgentTimer:
             raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
         _check_status(status)
         rnd = self.round if round_id is _UNSET else round_id
-        c = Call(status=status)
+        c = Call(status=status, reason=reason)
         error = None
         bad_status = False
         start_wall, t0 = time.time(), time.perf_counter()
@@ -170,6 +173,7 @@ class AgentTimer:
                 "start": _iso(start_wall), "end": _iso(start_wall + ms / 1000.0),
                 "ms": round(ms, 3), "tokens_in": c.tokens_in, "tokens_out": c.tokens_out,
                 "error": error,
+                **({"reason": c.reason} if c.reason else {}),
             })
         if bad_status:  # only reached when the block did not raise
             _check_status(c.status)

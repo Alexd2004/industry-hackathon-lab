@@ -14,6 +14,10 @@ so an agent never breaks the round:
     number_not_in_input / cites_unknown_field / age_claim / unsupported_verdict / guardrail   the agents' checks
     insufficient_data   the input lacks what the agent needs; no model call is made
 
+Each reason has a kind (FALLBACK_KINDS, outcome()): SCRIPTED (no call needed), UNAVAILABLE (offline, replay
+mismatch), REJECTED (a check refused the reply) or FAILED (no usable reply). Only REJECTED and FAILED count as
+fallbacks on screen and in crew.run_fallbacks; the stored status stays FALLBACK for all of them.
+
 Model: claude-haiku-4-5-20251001 for all five agents (cheap and fast; Crew Plan section 9: one setup to measure).
 No effort setting is sent by default (not verified for Haiku 4.5); set SOFTSIGNAL_AGENT_EFFORT to send one.
 Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A4, off the decision
@@ -83,6 +87,22 @@ NUMBER_NOT_IN_INPUT, UNKNOWN_FIELD, AGE_CLAIM = "number_not_in_input", "cites_un
 UNSUPPORTED = "unsupported_verdict"  # e.g. A1 says drift is real without citing any PSI
 FORBIDDEN_COLUMN = "forbidden_column"  # A3: the text names a column the model never uses (age, job, ...)
 GUARDRAIL = "guardrail"  # A2: an action the hold rule or the promote guard forbids
+SCRIPT_ONLY = "script_only"  # A5: only the round's own headline to check, so the script checks it; no model call
+REPLAY_MISMATCH = "replay_hash_mismatch"  # offline, and the recording of this round was made from another input
+AGENT_ERROR = "agent_error"  # the agent's input or run raised; the round went on without it
+
+# What a FALLBACK came to. The files keep the status LIVE / FALLBACK / REPLAY; the kind is read from the
+# fallback_reason. Only REJECTED (a check refused the reply) and FAILED (no usable reply) are the agent failing:
+# SCRIPTED needed no model call by design, UNAVAILABLE had no model to call. NOT_RUN: no block or no status.
+SCRIPTED, UNAVAILABLE, REJECTED, FAILED, NOT_RUN = "SCRIPTED", "UNAVAILABLE", "REJECTED", "FAILED", "NOT_RUN"
+FALLBACK_KINDS = {
+    INSUFFICIENT: SCRIPTED, SCRIPT_ONLY: SCRIPTED,
+    OFFLINE: UNAVAILABLE, REPLAY_MISMATCH: UNAVAILABLE,
+    TIMEOUT: FAILED, CONNECTION: FAILED, API_ERROR: FAILED, REFUSAL: FAILED, AGENT_ERROR: FAILED,
+    INVALID: REJECTED, NUMBER_NOT_IN_INPUT: REJECTED, UNKNOWN_FIELD: REJECTED, AGE_CLAIM: REJECTED,
+    UNSUPPORTED: REJECTED, FORBIDDEN_COLUMN: REJECTED, GUARDRAIL: REJECTED,
+}
+REAL_FALLBACKS = (REJECTED, FAILED)
 CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID")
 
 # A number: optional sign, digits with an optional decimal part (or a bare decimal), optional %. It must not
@@ -113,6 +133,21 @@ class AgentResult:
     def block(self) -> dict:
         return {"status": self.status, "output": self.output, "fallback_reason": self.fallback_reason,
                 "input_hash": self.input_hash, "errors": list(self.errors), "rejected": self.rejected}
+
+
+def outcome(block: dict | None) -> str:
+    """What an agent block came to: LIVE, REPLAY, NOT_RUN (no block or no status), or for a FALLBACK its kind from
+    FALLBACK_KINDS. An unknown fallback reason counts as FAILED, so a new failure is never hidden."""
+    if not isinstance(block, dict) or not block.get("status"):
+        return NOT_RUN
+    if block["status"] != FALLBACK:
+        return block["status"]
+    return FALLBACK_KINDS.get(block.get("fallback_reason"), FAILED)
+
+
+def is_real_fallback(block: dict | None) -> bool:
+    """The agent itself failed: its reply was refused by a check, or no usable reply came back."""
+    return outcome(block) in REAL_FALLBACKS
 
 
 def merge_block(result: AgentResult, rollup: dict | None = None) -> dict:
@@ -277,6 +312,7 @@ def call_model(client, *, agent: str, step: str, system: str, user: str, schema:
     with timer.call(agent, step, "model", **rnd) as c:
         reply = _call(c)
         c.status = LIVE if reply.fallback_reason is None else FALLBACK
+        c.reason = reply.fallback_reason
     return reply
 
 
