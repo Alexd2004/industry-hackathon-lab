@@ -14,7 +14,9 @@ The claims below are a starting set taken from the handovers; replace them with 
 - At a 15% cap, 17.1% of held-out adults are flagged, and 15.0% on training data.
 - At a 15% cap, 225 accounts are sent to verification now, at 99.1% precision.
 - The keyword baseline catches 50% of teens at 32% false-teen.
-- The loop promotes the stack at round 7 and reaches 88.7% recall at 16.9% false-teen.
+- The loop promotes the stack at round 7 and reaches 88.4% recall at 16.7% false-teen.
 - The stack's AUC is 0.955.
 - The five-agent crew makes the model more accurate.
+- Over 5 seeds the crew run ends at 86.3% recall and 20.0% false-teen, against 87.1% and 20.6% for the rule run.
+- Under drift the rule loop ends at 43.5% false-teen with 2 of 5 seeds promoted, and a 2-round refit window gives 25.4% false-teen with 4 of 5 promoted.
 - The top 100 accounts in the ranked list are all teens.
