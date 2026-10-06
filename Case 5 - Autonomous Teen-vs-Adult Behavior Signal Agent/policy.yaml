@@ -2,7 +2,9 @@
 cap_false_teen: 0.15    # max share of adults sent to verification
 review_budget: 0.25     # max share of a batch in the verify band (reported, not enforced: the cap wins)
 soft_recall: 0.90       # share of teens the soft band and above must reach
-min_audit_adults: 120   # hold rule floor: no re-tune before this many audit adults (enforced by loop.py)
+min_audit_adults: 50    # hold rule floor: no re-tune before this many audit adults (enforced by loop.py). Was 120
+                        # (first refit at round 5); 50 is reached at round 2 (57 audit adults), so the loop learns from
+                        # round 2 on. Fewer labels behind the first thresholds: the challenger below guards the promote.
 audit_per_batch: 60     # random audit accounts revealed per batch (read by oracle.py)
 cap_margin: 0.0        # verify cutoff aims at cap - margin. 0.0 = no margin; not yet measured, pick from train folds or audit labels, never test
 psi_drift: 0.25       # A1 fallback: drift is real when a feature-group or score PSI reaches this. 0.25 = the usual
@@ -16,3 +18,8 @@ min_a3_errors: 30     # A3 floor: fewer false + missed teens than this among ear
                       # stack to explain them from round 5 or 6), so no floor up to 45 changes rounds 5-7 before a promote.
                       # One round adds 11-21 errors, so after a promote (the scores restart) 30 waits about two rounds.
                       # The value itself is a judgement, not a measured optimum.
+promote_rule: challenger  # how the model in training goes live (loop.py). challenger: each round, the model refit last
+                          # round and the live one are scored on this round's audit accounts (unseen by both); the
+                          # newest refit goes live when the challenger stays within the cap (+ PROMOTE_SLACK) and
+                          # catches at least as many audit teens, or the live one is over the cap and it is not.
+                          # pooled: the original rule (two rounds pooled, then stay ACTIVE and replace every refit).

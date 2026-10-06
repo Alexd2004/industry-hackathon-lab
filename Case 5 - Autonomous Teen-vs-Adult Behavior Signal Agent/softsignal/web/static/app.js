@@ -387,7 +387,12 @@ function agentSummary(key, row) {
     }
     case "model": {
       const refit = isNum(row.refit_s) ? ` Refit took ${row.refit_s.toFixed(1)} s.` : "";
-      return `${actionText(row.action)}. Mode ${row.mode}, verify cutoff ${isNum(row.t_verify) ? row.t_verify.toFixed(3) : "–"}. ${row.n_labels} labels revealed so far (${row.n_audit_adults} audit adults).${refit}`;
+      const ev = row.evidence || {};
+      const duel = typeof ev.challenger_wins === "boolean" && isNum(ev.cand_audit_rec)
+        ? ` Challenger vs live on this round's audit accounts: ${pct(ev.cand_audit_rec)} vs ${pct(ev.live_audit_rec)} teens caught, ` +
+          `${pct(ev.cand_ft, 1)} vs ${pct(ev.live_audit_ft, 1)} adults flagged: ${ev.challenger_wins ? "the challenger won" : "the live model stays"}.`
+        : "";
+      return `${actionText(row.action)}. Mode ${row.mode}, verify cutoff ${isNum(row.t_verify) ? row.t_verify.toFixed(3) : "–"}. ${row.n_labels} labels revealed so far (${row.n_audit_adults} audit adults).${refit}${duel}`;
     }
   }
   return "";

@@ -70,8 +70,8 @@ cap_margin) and window_min (the smallest refit_window).
 promote).
 - rule: the rule-based decision (action, cap, and the cap_margin it refits with). Follow it unless the input \
 gives a reason not to.
-- When guards.promote_allowed is true, the model in training has passed its audit test (pooled audit false-teen \
-within the cap) and only goes live if you promote: until then the starter rule keeps scoring every account. \
+- When guards.promote_allowed is true, the model in training has passed its audit test on accounts it never saw \
+(within the cap, and at least as good as the live rule) and only goes live if you promote: until then the starter rule keeps scoring every account. \
 Promote unless the input shows a concrete problem with the new model (for example a1 reports real drift, or \
 candidate_false_teen is above the cap), and name that problem in the reason if you do not promote.
 
