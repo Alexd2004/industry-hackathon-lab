@@ -274,8 +274,9 @@ def test_a_refusal_with_partial_text_falls_back(slides, tmp_path):
     assert (result.status, result.fallback_reason) == (FALLBACK, "refusal")
 
 
-def test_the_per_round_timeout_is_the_live_one():
-    assert base.TIMEOUTS["A5"] == base.TIMEOUT_S == 4.0 and SLIDE_TIMEOUT_S == 60.0
+def test_the_per_round_timeout_is_longer_than_the_decision_path():
+    # A5 runs after the round is written, so it is not held to the decision-path 4 s (its p95 was 3.8 s)
+    assert base.TIMEOUTS["A5"] == 8.0 and base.TIMEOUT_S == 4.0 and SLIDE_TIMEOUT_S == 60.0
 
 
 # --- review round 2: the pitch's wording, percents, contradictions ------------------------------------------------
