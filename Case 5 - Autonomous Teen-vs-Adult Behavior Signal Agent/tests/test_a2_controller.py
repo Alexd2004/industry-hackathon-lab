@@ -645,7 +645,7 @@ def test_loop_floats_are_rounded_in_the_input_and_the_model_can_quote_them():
 def test_rounding_leaves_counts_none_and_bools_alone():
     p = make_payload(audit=AUDIT | {"candidate_false_teen": None, "pooled_false_teen_rate": None})
     assert p["audit"]["candidate_false_teen"] is None and p["audit"]["audit_adults"] == 150
-    assert p["thresholds"]["cap"] == 0.15 and p["rule"]["cap"] == 0.15 and p["bounds"] == BOUNDS
+    assert p["thresholds"]["cap"] == 0.15 and p["rule"]["cap"] == 0.15 and BOUNDS.items() <= p["bounds"].items()
 
 
 def test_the_floor_is_the_loops_policy_when_it_is_passed():
@@ -699,3 +699,76 @@ def test_schema_rejects_a_non_integer_window(bad):
 def test_fallback_never_sets_a_window(payload):
     assert fallback_output(payload).get("refit_window") is None
     assert run_a2(payload, client=None).output.get("refit_window") is None
+
+
+# --- fewer fallbacks: repair, citable paths, the added input fields ------------------------------------------
+
+def test_the_input_adds_the_total_the_lever_limits_and_the_rule_margin(payload):
+    from softsignal.loop import MARGIN_MAX, WINDOW_MIN
+
+    assert payload["audit"]["audit_total"] == AUDIT["audit_adults"] + AUDIT["audit_teens"]
+    assert payload["bounds"]["margin_max"] == MARGIN_MAX and payload["bounds"]["window_min"] == WINDOW_MIN
+    assert isinstance(payload["rule"]["cap_margin"], float)
+
+
+def test_dotted_paths_index_lists():
+    paths = dotted_paths({"a1": {"evidence": [{"field": "psi.score", "value": 0.07}]}})
+    assert {"a1.evidence", "a1.evidence[0]", "a1.evidence[0].field", "a1.evidence[0].value"} <= paths
+
+
+def test_a1_evidence_items_can_be_cited():
+    p = make_payload(a1={"drift": "not_real", "evidence": [{"field": "psi.score", "value": 0.07}], "reason": "Low."})
+    assert validate_output(good(cites=["a1.evidence[0]", "audit.audit_adults"]), p) == (None, [])
+
+
+def test_the_prompt_lists_every_citable_path(payload):
+    citable = user_message(payload).split("<citable>", 1)[1].split("</citable>", 1)[0]
+    assert "audit.audit_adults" in citable and "bounds.margin_max" in citable and "agent" not in citable.split(", ")
+
+
+def test_too_many_cites_are_cut_to_five_not_rejected(payload):
+    cites = ["audit.audit_adults", "bounds.min_audit_adults", "rule.action", "rule.cap", "audit.mode",
+             "audit.streak", "audit.audit_teens"]
+    r = run_a2(payload, client=FakeClient(reply(good(cites=cites))))
+    assert r.status == LIVE and r.output["cites"] == cites[:5]
+    assert "TRUNCATED cites 7 -> 5" in r.errors
+
+
+def test_duplicate_cites_are_dropped(payload):
+    r = run_a2(payload, client=FakeClient(reply(good(cites=["audit.audit_adults", "audit.audit_adults"]))))
+    assert r.status == LIVE and r.output["cites"] == ["audit.audit_adults"]
+
+
+def test_cut_cites_are_still_checked(payload):
+    r = run_a2(payload, client=FakeClient(reply(good(cites=["made.up"] + ["audit.audit_adults"] * 6))))
+    assert r.status == FALLBACK and r.fallback_reason == UNKNOWN_FIELD
+
+
+def test_a_long_reason_is_cut_at_a_sentence_end(payload):
+    long = "150 audit adults, above the floor of 120: re-tune. " + "The rule agrees with this choice. " * 20
+    r = run_a2(payload, client=FakeClient(reply(good(reason=long))))
+    assert r.status == LIVE and len(r.output["reason"]) <= 400 and r.output["reason"].endswith(".")
+    assert any(e.startswith("TRUNCATED reason") for e in r.errors)
+
+
+def test_numbers_left_after_a_cut_are_still_checked(payload):
+    long = "237 audit adults. " + "Fine. " * 80
+    r = run_a2(payload, client=FakeClient(reply(good(reason=long))))
+    assert r.status == FALLBACK and r.fallback_reason == NUMBER_NOT_IN_INPUT
+
+
+@pytest.mark.parametrize("action", ["hold"])
+def test_levers_are_dropped_when_not_re_tuning(action):
+    p = make_payload(audit=AUDIT | {"audit_adults": 100}, guards={"hold_required": True, "promote_allowed": False},
+                     rule={"action": "hold", "cap": 0.15})
+    out, notes = clamp_output(good(action=action, cap_margin=0.02, refit_window=3, reason="Hold.",
+                                   cites=["guards.hold_required"]), p)
+    assert out["cap_margin"] is None and out["refit_window"] is None
+    assert notes[:2] == ["IGNORED cap_margin on hold", "IGNORED refit_window on hold"]
+    assert out["reason"].endswith("(cap_margin and refit_window not used: they act on re-tune only)")
+
+
+def test_a2_gets_more_time_than_the_other_decision_agents():
+    from softsignal.agents.base import TIMEOUT_S, timeout_for
+
+    assert timeout_for("A2") > TIMEOUT_S

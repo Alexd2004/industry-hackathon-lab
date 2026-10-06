@@ -371,6 +371,15 @@ def _round(value):
     return round(float(value), ROUND_DIGITS) if isinstance(value, float) else value
 
 
+def _policy_margin(policy: dict | None) -> float:
+    """The cap_margin the rule refits with: the loop's policy when passed, else policy.yaml."""
+    if policy is None:
+        from softsignal.policy import load_policy
+
+        policy = load_policy()
+    return float(policy.get("cap_margin", 0.0))
+
+
 def _pick(src: dict, keys, where: str) -> dict:
     missing = [k for k in keys if k not in src]
     if missing:
@@ -379,11 +388,17 @@ def _pick(src: dict, keys, where: str) -> dict:
 
 
 def dotted_paths(payload, prefix: str = "") -> set:
-    """Every dotted path to a dict node or leaf in the payload ("audit", "audit.audit_adults"): what A2 may cite."""
+    """Every dotted path to a dict node or leaf in the payload ("audit", "audit.audit_adults"), list items by index
+    ("a1.evidence[0]", "a1.evidence[0].value"): what A2 may cite."""
     out = set()
     if isinstance(payload, dict):
         for k, v in payload.items():
             path = f"{prefix}.{k}" if prefix else str(k)
+            out.add(path)
+            out |= dotted_paths(v, path)
+    elif isinstance(payload, list):
+        for i, v in enumerate(payload):
+            path = f"{prefix}[{i}]"
             out.add(path)
             out |= dotted_paths(v, path)
     return out
@@ -405,6 +420,10 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
     to ROUND_DIGITS decimals, so the model can copy them and the numbers-in-input check can accept them.
     rule: {action, cap}, loop.rule_decision(). a1 / a3: the agent's output dict, or "insufficient_data" (round 0,
     or an agent not built yet); never a guess.
+
+    Added in code, so A2 never has to compute or guess them: audit.audit_total (adults + teens, so a reason can
+    state the total without adding), bounds.margin_max and bounds.window_min (the code limits on its two levers,
+    loop.MARGIN_MAX / WINDOW_MIN) and rule.cap_margin (the policy margin the rule refits with, what a null keeps).
     """
     rule = _pick(rule, ("action", "cap"), "rule")
     if rule["action"] not in A2_ACTIONS:
@@ -437,11 +456,12 @@ def a2_input(round_id: int, thresholds: dict, audit: dict, bounds: dict, guards:
         "a3": a3,
         "thresholds": {k: _round(v) if k in ("t_verify", "t_soft") else v
                        for k, v in _pick(thresholds, A2_THRESHOLD_KEYS, "thresholds").items()},
-        "audit": {k: _round(v) if k in ("pooled_false_teen_rate", "candidate_false_teen") else v
-                  for k, v in audit.items()},
-        "bounds": bounds,
+        "audit": {**{k: _round(v) if k in ("pooled_false_teen_rate", "candidate_false_teen") else v
+                     for k, v in audit.items()},
+                  "audit_total": audit["audit_adults"] + audit["audit_teens"]},
+        "bounds": {**bounds, "margin_max": margin_limit(), "window_min": window_min()},
         "guards": guards,
-        "rule": rule,
+        "rule": {**rule, "cap_margin": _policy_margin(policy)},
     }
     check_barrier(payload)
     json.dumps(payload)  # must be plain JSON: fail here, not inside the prompt

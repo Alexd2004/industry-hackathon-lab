@@ -20,9 +20,11 @@ fallbacks on screen and in crew.run_fallbacks; the stored status stays FALLBACK 
 
 Model: claude-haiku-4-5-20251001 for all five agents (cheap and fast; Crew Plan section 9: one setup to measure).
 No effort setting is sent by default (not verified for Haiku 4.5); set SOFTSIGNAL_AGENT_EFFORT to send one.
-Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A4, off the decision
-path, gets longer (TIMEOUTS; not measured yet, set after measuring); A5's one-off slide pass gets 60 s. Overrides:
-SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A4_TIMEOUT_S /
+Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A2 gets 6 s (its
+measured p95 was 3.4 s and its slowest call 3.6 s, too close to 4 s); A4, off the decision path, gets longer
+(TIMEOUTS; not measured yet, set after measuring); A5's one-off slide pass gets 60 s. Overrides:
+SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A2_TIMEOUT_S /
+SOFTSIGNAL_A4_TIMEOUT_S /
 SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
 forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
 The API key lives in the environment only (ANTHROPIC_API_KEY); the repo is public. For local use it can sit in a
@@ -72,7 +74,8 @@ load_env_file()  # before the settings below, so SOFTSIGNAL_* in .env applies to
 MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-haiku-4-5-20251001")
 EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "")  # empty: no effort sent
 TIMEOUT_S = float(os.environ.get("SOFTSIGNAL_AGENT_TIMEOUT_S", "4.0"))  # decision-path agents (A1-A3)
-TIMEOUTS = {"A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
+TIMEOUTS = {"A2": float(os.environ.get("SOFTSIGNAL_A2_TIMEOUT_S", "6.0")),  # measured p95 3.4 s, max 3.6 s: 4 s was tight
+            "A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
             # A5 per round is a live call (Crew Plan section 9: 4 s); its one-off slide pass uses 60 s
             "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}
 MAX_RETRIES = 0  # the SDK retries twice by default, which turns a 4 s timeout into about 12 s
@@ -133,6 +136,20 @@ class AgentResult:
     def block(self) -> dict:
         return {"status": self.status, "output": self.output, "fallback_reason": self.fallback_reason,
                 "input_hash": self.input_hash, "errors": list(self.errors), "rejected": self.rejected}
+
+
+def trim_text(text: str, limit: int) -> str:
+    """text cut to at most limit characters: at the last sentence end that fits, else at the last word boundary,
+    so a number is never cut in half. Unchanged when it already fits. The result is a prefix of text, so it says
+    nothing the full text did not, and the agent's number checks still run on it."""
+    if len(text) <= limit:
+        return text
+    # sentence ends judged on the full text, so "3.5" cut after "3." is never taken for one
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text) if m.end() <= limit]
+    if ends and ends[-1] >= limit // 3:  # a sentence end that keeps a useful part of the text
+        return text[:ends[-1]].rstrip()
+    head = text[:limit + 1]  # one more character, so a word that ends exactly at the limit is kept whole
+    return head.rsplit(" ", 1)[0].rstrip(",;: ") if " " in head else text[:limit]
 
 
 def outcome(block: dict | None) -> str:
@@ -244,17 +261,22 @@ class ModelReply:
     fallback_reason: str | None = None
     errors: list[str] = field(default_factory=list)
     raw: str | None = None  # the reply text when it was not used
+    notes: list[str] = field(default_factory=list)  # what repair() changed in an accepted reply ("TRUNCATED ...")
 
 
 Check = Callable[[dict], "tuple[str | None, list[str]]"]  # output -> (fallback reason or None, errors)
+# The parsed reply -> (reply, notes): applied before the schema. Only for limits the API does not enforce (it passes
+# maxItems above 1 and maxLength to the model as hints only), and only by cutting: a repair never adds anything,
+# and the schema and the agent's checks still run on what it returns.
+Repair = Callable[[dict], "tuple[dict, list[str]]"]
 
 
 def _error(e: BaseException) -> str:
     return f"{type(e).__name__}: {e}"[:300]
 
 
-def _read_reply(resp, schema: type, check: Check | None) -> ModelReply:
-    """stop_reason first (a refusal can carry partial text that is not valid JSON), then the schema, then check."""
+def _read_reply(resp, schema: type, check: Check | None, repair: Repair | None = None) -> ModelReply:
+    """stop_reason first (a refusal can carry partial text that is not valid JSON), then repair, the schema, check."""
     from pydantic import ValidationError
 
     text = "".join(getattr(b, "text", "") for b in (resp.content or []) if getattr(b, "type", None) == "text")
@@ -265,6 +287,15 @@ def _read_reply(resp, schema: type, check: Check | None) -> ModelReply:
         return ModelReply(fallback_reason=INVALID, errors=[f"stop_reason {resp.stop_reason}"], raw=raw)
     if not text:
         return ModelReply(fallback_reason=INVALID, errors=["no text in the reply"])
+    notes: list[str] = []
+    if repair is not None:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None  # the schema below reports it
+        if isinstance(data, dict):
+            data, notes = repair(data)
+            text = json.dumps(data)  # validated as JSON, exactly as the reply would have been
     try:
         output = schema.model_validate_json(text).model_dump()
     except ValidationError as e:
@@ -272,8 +303,8 @@ def _read_reply(resp, schema: type, check: Check | None) -> ModelReply:
     if check is not None:
         reason, errors = check(output)
         if reason is not None:
-            return ModelReply(fallback_reason=reason, errors=errors, raw=raw)
-    return ModelReply(output=output)
+            return ModelReply(fallback_reason=reason, errors=errors + notes, raw=raw)
+    return ModelReply(output=output, notes=notes)
 
 
 def output_config(schema: type) -> dict:
@@ -285,7 +316,8 @@ def output_config(schema: type) -> dict:
 
 
 def call_model(client, *, agent: str, step: str, system: str, user: str, schema: type, check: Check | None = None,
-               timer: AgentTimer | None = None, round_id: Any = None, timeout: float | None = None) -> ModelReply:
+               timer: AgentTimer | None = None, round_id: Any = None, timeout: float | None = None,
+               repair: Repair | None = None) -> ModelReply:
     """One structured-output call (messages.create with output_config.format = the schema), timed if a timer
     is given. Never raises. check (the agent's own rules, e.g. numbers in input) runs inside the timed block,
     so the call's record reads LIVE only when the output was accepted and FALLBACK otherwise.
@@ -302,7 +334,7 @@ def call_model(client, *, agent: str, step: str, system: str, user: str, schema:
         try:
             if c is not None:
                 c.usage(resp)
-            return _read_reply(resp, schema, check)
+            return _read_reply(resp, schema, check, repair)
         except Exception as e:  # noqa: BLE001 - a malformed reply object or a failing check: fall back
             return ModelReply(fallback_reason=INVALID, errors=[f"unexpected {_error(e)}"])
 
