@@ -223,7 +223,7 @@ def test_diff_table_marks_a2_vs_rule_changes():
     d["a2"]["output"]["cutoff"] = 0.58
     d["applied"]["decision"]["cutoff"] = 0.58
     t = diff_table(d).set_index("field")
-    assert list(t.index) == ["blend_w", "cutoff", "cap", "action"]
+    assert list(t.index) == ["blend_w", "cutoff", "cap", "cap_margin", "action"]
     assert list(t.columns) == ["rule", "A2", "applied", "changed"]
     assert t.loc["cutoff"].tolist() == ["0.50", "0.58", "0.58", "YES"] and t.loc["cap", "changed"] == ""
 

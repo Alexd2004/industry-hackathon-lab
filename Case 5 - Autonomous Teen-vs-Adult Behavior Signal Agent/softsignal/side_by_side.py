@@ -13,7 +13,7 @@ import math
 
 from softsignal.agents.base import FALLBACK, LIVE, REPLAY
 
-DIFF_FIELDS = ("blend_w", "cutoff", "cap", "action")  # the Loop tab's rows (ui_loop.DIFF_ROWS)
+DIFF_FIELDS = ("blend_w", "cutoff", "cap", "cap_margin", "action")  # the Loop tab's rows (ui_loop.DIFF_ROWS)
 COMPARED = (LIVE, REPLAY)
 TOLERANCE = 1e-9  # floats within this are the same decision (0.15 against 0.15000000000000002)
 
@@ -53,11 +53,13 @@ def diff_count(a2_block: dict | None, rule_decision: dict) -> int:
 def _fmt(k: str, v) -> str:
     if k == "cap" and _is_number(v):
         return f"cap {v:.0%}"
+    if k == "cap_margin" and _is_number(v):
+        return f"margin {v:.1%}"
     return f"{k} {v:.2f}" if isinstance(v, float) else f"{k} {v}"
 
 
 def _decision_text(d: dict) -> str:
-    return ", ".join(_fmt(k, d[k]) for k in ("action", "cap", "cutoff") if d.get(k) is not None) or "no decision"
+    return ", ".join(_fmt(k, d[k]) for k in ("action", "cap", "cap_margin", "cutoff") if d.get(k) is not None) or "no decision"
 
 
 def format_diff(record: dict) -> str:

@@ -343,6 +343,13 @@ def window_min() -> int:
     return WINDOW_MIN
 
 
+def margin_limit() -> float:
+    """loop.MARGIN_MAX: the most a cap_margin may be, whatever A2 proposes. Lazy import, as cap_limits."""
+    from softsignal.loop import MARGIN_MAX
+
+    return MARGIN_MAX
+
+
 def hard_limits(policy: dict | None = None) -> tuple[float, float, int]:
     """(cap_min, cap_max, min_audit_adults). The audit floor is the policy the loop runs with when it is passed
     (loop.rule_decision reads env.policy), else policy.yaml, read once per modification time."""
