@@ -20,7 +20,8 @@ fallbacks on screen and in crew.run_fallbacks; the stored status stays FALLBACK 
 
 Model: claude-haiku-4-5-20251001 for all five agents (cheap and fast; Crew Plan section 9: one setup to measure).
 No effort setting is sent by default (not verified for Haiku 4.5); set SOFTSIGNAL_AGENT_EFFORT to send one.
-Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A2 gets 6 s (its
+Timeouts: 4 s for live calls (Crew Plan sections 6 and 9); A5's per-round check gets 8 s (it runs after the
+round is written, and its p95 was 3.8 s); A2 gets 6 s (its
 measured p95 was 3.4 s and its slowest call 3.6 s, too close to 4 s); A4, off the decision path, gets longer
 (TIMEOUTS; not measured yet, set after measuring); A3 gets 12 s (every call timed out at 4 s; to be set from its
 measured p95); A5's one-off slide pass gets 60 s. Overrides:
@@ -81,8 +82,9 @@ TIMEOUTS = {"A2": float(os.environ.get("SOFTSIGNAL_A2_TIMEOUT_S", "6.0")),  # me
             # yet at this size: read its p95 from tier3_latency.csv after the next recorded run and set it from that
             "A3": float(os.environ.get("SOFTSIGNAL_A3_TIMEOUT_S", "12.0")),
             "A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
-            # A5 per round is a live call (Crew Plan section 9: 4 s); its one-off slide pass uses 60 s
-            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}
+            # A5 per round runs after the round is written, so 4 s bought nothing (its p95 was 3.8 s); its one-off
+            # slide pass uses 60 s
+            "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "8.0"))}
 MAX_RETRIES = 0  # the SDK retries twice by default, which turns a 4 s timeout into about 12 s
 MAX_TOKENS = 4096  # room for the short JSON answer (and any thinking, if an effort is set)
 MAX_REJECTED_CHARS = 2000  # a rejected reply is kept (truncated) for A5 and prompt tuning
@@ -208,16 +210,28 @@ def numbers_in(text: str) -> list[float]:
     return [float(m.group().rstrip("%")) for m in _NUMBER.finditer(_strip_thousands(text))]
 
 
+def _percent_of(token: str, inputs: list[float]) -> bool:
+    """A percent ("35.56%", "36%") that is an input number x 100 rounded to the decimals it is written with."""
+    if not token.endswith("%"):
+        return False
+    text = token.rstrip("%").lstrip("+-")
+    decimals = len(text.split(".")[1]) if "." in text else 0
+    v = abs(float(text))
+    return any(round(x * 100, decimals) == v for x in inputs if x <= 1)
+
+
 def numbers_not_in_input(output_text: str, allowed_from: Any) -> list[str]:
     """Numbers in an agent's output that do not appear in allowed_from (Combined Plan: checked in code).
 
     Pass the part of the input the agent may cite, not every number it saw. Compared by absolute value: a
     sign flip is not caught here (A5 and the logs exist for wrong reasoning with real numbers). Numbers are
-    compared as written, so 3.2 is not accepted for an input 3.21.
+    compared as written, so 3.2 is not accepted for an input 3.21. A percent may also be an input fraction x 100
+    at the precision it is written with ("35.56%" or "36%" for 0.355555...): a rounding, never new arithmetic.
     """
-    allowed = {abs(x) for x in numbers_in(json.dumps(allowed_from, default=str))}
+    inputs = [abs(x) for x in numbers_in(json.dumps(allowed_from, default=str))]
+    allowed = set(inputs)
     return sorted({m.group() for m in _NUMBER.finditer(_strip_thousands(output_text))
-                   if abs(float(m.group().rstrip("%"))) not in allowed})
+                   if abs(float(m.group().rstrip("%"))) not in allowed and not _percent_of(m.group(), inputs)})
 
 
 def age_claims(text: str) -> list[str]:

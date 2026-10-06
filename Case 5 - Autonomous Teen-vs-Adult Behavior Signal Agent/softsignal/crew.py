@@ -176,7 +176,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             # (rounds_recorded.csv) must hash like a normal one (rounds.csv) or offline replay of A5 never matches
             sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), ROUNDS_CSV.name,
                                  files=("rounds",))
-            sources.append(evidence_source(result.record, env.policy, rnd, result.row))  # what A2's reason may quote
+            sources.append(evidence_source(result.record, env.policy, rnd, result.row,  # what A2's reason may quote
+                                           audit=env.oracle.audit_counts()))
             claims = round_claims(result.row, result.record)
             payload = a5_input(claims, sources, checklist, "round", rnd)
             # the round's own headline only (no A2 reason yet): the script checks it, no model call needed

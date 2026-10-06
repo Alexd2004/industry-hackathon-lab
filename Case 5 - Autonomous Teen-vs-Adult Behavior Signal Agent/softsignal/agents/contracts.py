@@ -606,17 +606,30 @@ def round_claims(row: dict, record: dict) -> list[str]:
 EVIDENCE_ROW_COLS = ("n_audit_adults", "n_labels", "n_flagged", "n_verify", "cap", "t_verify", "t_soft", "audit_ft")
 
 
-def evidence_source(record: dict, policy: dict, round_id: int, row: dict | None = None) -> dict:
+def evidence_source(record: dict, policy: dict, round_id: int, row: dict | None = None,
+                    audit: dict | None = None) -> dict:
     """The round's decision inputs as one A5 source row, for A2's reason: the promote evidence, the hold floor,
-    the cap bounds, the rule's decision and the round's own loop state (row: its rounds.csv row; only
-    EVIDENCE_ROW_COLS, never a test metric). Not round-keyed, so a reason need not say "round N"."""
-    from softsignal.loop import CAP_MAX, CAP_MIN
+    the cap bounds and lever limits, the rule's decision, the round's own loop state (row: its rounds.csv row; only
+    EVIDENCE_ROW_COLS, never a test metric), the audit counts A2 saw (audit: oracle.audit_counts(), adults and
+    teens, plus their total) and the values A1 cited (its evidence, psi.score as psi_score). Everything A2's input
+    carries, so the script does not flag a reason as unsupported only because it could not see a number. Not
+    round-keyed, so a reason need not say "round N"."""
+    from softsignal.loop import CAP_MAX, CAP_MIN, MARGIN_MAX, WINDOW_MIN
 
     ev = record.get("evidence") or {}
     values = {k: _value(v) for k, v in ev.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
     values |= {k: _value((row or {}).get(k)) for k in EVIDENCE_ROW_COLS
                if isinstance((row or {}).get(k), (int, float)) and not isinstance((row or {}).get(k), bool)}
-    values |= {"min_audit_adults": int(policy["min_audit_adults"]), "cap_min": CAP_MIN, "cap_max": CAP_MAX}
+    values |= {"min_audit_adults": int(policy["min_audit_adults"]), "cap_min": CAP_MIN, "cap_max": CAP_MAX,
+               "margin_max": MARGIN_MAX, "window_min": WINDOW_MIN,
+               "rule_cap_margin": _value(float(policy.get("cap_margin", 0.0)))}
+    if audit:
+        values |= {"audit_adults": int(audit["adults"]), "audit_teens": int(audit["teens"]),
+                   "audit_total": int(audit["adults"]) + int(audit["teens"])}
+    a1 = (record.get("a1") or {}).get("output")
+    for ev in (a1.get("evidence") or []) if isinstance(a1, dict) else []:
+        if isinstance(ev, dict) and isinstance(ev.get("value"), (int, float)) and not isinstance(ev.get("value"), bool):
+            values[str(ev.get("field", "")).replace(".", "_")] = _value(ev["value"])
     rule = record.get("rule_decision") or {}
     values |= {f"rule_{k}": _value(v) for k, v in rule.items()
                if isinstance(v, (int, float)) and not isinstance(v, bool)}

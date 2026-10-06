@@ -63,3 +63,44 @@ def test_a3_keeps_why_it_had_nothing_to_analyse():
     assert got.fallback_reason == "insufficient_data"
     assert got.errors == ["no audit labels revealed in earlier rounds"]
     json.dumps(got.block())
+
+
+# --- the shared pieces behind fewer fallbacks ---------------------------------------------------------------
+
+def test_a_percent_may_round_an_input_fraction_at_its_own_precision():
+    from softsignal.agents.base import numbers_not_in_input
+
+    inputs = {"ft": 0.35555555, "rec": 0.7977}
+    assert numbers_not_in_input("false-teen 35.56% and 36%, recall 79.8%", inputs) == []
+    assert numbers_not_in_input("false-teen 35.5%", inputs) == ["35.5%"]  # a wrong rounding is still caught
+    assert numbers_not_in_input("0.36 of adults", inputs) == ["0.36"]  # only percents are rounded, as before
+    assert numbers_not_in_input("420 adults", {"a": 213, "b": 207}) == ["420"]  # arithmetic is still refused
+
+
+def test_trim_text_cuts_at_a_sentence_end_or_a_word():
+    from softsignal.agents.base import trim_text
+
+    assert trim_text("Short.", 10) == "Short."
+    assert trim_text("First sentence here. Second one is long.", 30) == "First sentence here."
+    assert trim_text("one two three four five", 12) == "one two"
+    assert trim_text("Rate is 3.5 now and more words follow here.", 11) == "Rate is 3.5"  # never "Rate is 3."
+
+
+def test_a5_repair_cuts_long_notes_only():
+    from softsignal.agents.a5_audit import repair
+    from softsignal.agents.schemas import A5_MAX_NOTE_CHARS
+
+    out, notes = repair({"verdicts": [{"claim_id": "c1", "note": "Fine. " * 60}, {"claim_id": "c2", "note": "Ok."}]})
+    assert len(out["verdicts"][0]["note"]) <= A5_MAX_NOTE_CHARS and out["verdicts"][1]["note"] == "Ok."
+    assert len(notes) == 1 and notes[0].startswith("TRUNCATED c1 note")
+
+
+def test_the_evidence_row_carries_what_a2_saw():
+    from softsignal.agents.contracts import evidence_source
+
+    record = {"a1": {"output": {"drift": "not_real", "evidence": [{"field": "psi.score", "value": 0.07}]}}}
+    src = evidence_source(record, {"min_audit_adults": 120, "cap_margin": 0.0}, 2, {}, audit={"adults": 27, "teens": 33})
+    values = src["rows"][0]["values"]
+    assert (values["audit_adults"], values["audit_teens"], values["audit_total"]) == (27, 33, 60)
+    assert values["psi_score"] == 0.07 and values["min_audit_adults"] == 120
+    assert {"margin_max", "window_min", "rule_cap_margin"} <= set(values)
