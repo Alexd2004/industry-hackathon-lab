@@ -97,9 +97,11 @@ class A2Output(BaseModel):
 
 A3_MAX_DESC_CHARS = 250
 A3_MAX_REASON_CHARS = 200
-A3_MAX_PATTERNS = 4
-A3_MAX_EVIDENCE = 4
-A3_MAX_CHANGES = 3
+# Kept small: every A3 call that reached the model timed out at 4 s, asked for up to 4 x 4 evidence items and 3
+# changes (about 700-1000 output tokens against A1's 125). Two of each still cover a count and a signal per pattern.
+A3_MAX_PATTERNS = 2
+A3_MAX_EVIDENCE = 2
+A3_MAX_CHANGES = 2
 A3_PARAMS = ("cap", "cutoff", "blend_w")  # the plan's enum; advisory only, A2 acts on action and cap alone
 
 

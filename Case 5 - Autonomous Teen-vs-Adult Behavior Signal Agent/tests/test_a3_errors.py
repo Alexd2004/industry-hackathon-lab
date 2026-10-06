@@ -360,6 +360,7 @@ def test_every_failure_is_no_analysis(payload, tmp_path, make, reason):
 
 def test_system_prompt_is_fully_rendered_and_states_the_signal_caveat():
     assert "{" not in SYSTEM and "}" not in SYSTEM  # an f-string placeholder must not reach the model unfilled
-    assert "up to 4 items" in SYSTEM  # A3_MAX_PATTERNS, the schema's own limit
+    assert "up to 2 items" in SYSTEM  # A3_MAX_PATTERNS, the schema's own limit
+    assert "13" not in SYSTEM and "23" not in SYSTEM  # an echoed age range would trip the number and age checks
     assert "fit on these same accounts" in SYSTEM and "do not show why" in SYSTEM.lower().replace("\n", " ")
     assert "caused" in SYSTEM  # no causal claims about a signal

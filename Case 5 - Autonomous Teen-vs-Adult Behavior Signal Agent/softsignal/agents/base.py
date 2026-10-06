@@ -22,8 +22,10 @@ Model: claude-haiku-4-5-20251001 for all five agents (cheap and fast; Crew Plan 
 No effort setting is sent by default (not verified for Haiku 4.5); set SOFTSIGNAL_AGENT_EFFORT to send one.
 Timeouts: 4 s for live calls (Crew Plan sections 6 and 9), A5's per-round check included; A2 gets 6 s (its
 measured p95 was 3.4 s and its slowest call 3.6 s, too close to 4 s); A4, off the decision path, gets longer
-(TIMEOUTS; not measured yet, set after measuring); A5's one-off slide pass gets 60 s. Overrides:
+(TIMEOUTS; not measured yet, set after measuring); A3 gets 12 s (every call timed out at 4 s; to be set from its
+measured p95); A5's one-off slide pass gets 60 s. Overrides:
 SOFTSIGNAL_AGENT_MODEL / SOFTSIGNAL_AGENT_EFFORT / SOFTSIGNAL_AGENT_TIMEOUT_S / SOFTSIGNAL_A2_TIMEOUT_S /
+SOFTSIGNAL_A3_TIMEOUT_S /
 SOFTSIGNAL_A4_TIMEOUT_S /
 SOFTSIGNAL_A5_TIMEOUT_S (A5's per-round check; its slide pass uses a5_audit.SLIDE_TIMEOUT_S). SOFTSIGNAL_OFFLINE=1
 forces offline (no client: recorded replay, else the fallbacks), e.g. for a Wi-Fi-off demo with a key set.
@@ -75,6 +77,9 @@ MODEL = os.environ.get("SOFTSIGNAL_AGENT_MODEL", "claude-haiku-4-5-20251001")
 EFFORT = os.environ.get("SOFTSIGNAL_AGENT_EFFORT", "")  # empty: no effort sent
 TIMEOUT_S = float(os.environ.get("SOFTSIGNAL_AGENT_TIMEOUT_S", "4.0"))  # decision-path agents (A1-A3)
 TIMEOUTS = {"A2": float(os.environ.get("SOFTSIGNAL_A2_TIMEOUT_S", "6.0")),  # measured p95 3.4 s, max 3.6 s: 4 s was tight
+            # A3 timed out at 4 s on every call that reached the model (its answer is the largest); not measured
+            # yet at this size: read its p95 from tier3_latency.csv after the next recorded run and set it from that
+            "A3": float(os.environ.get("SOFTSIGNAL_A3_TIMEOUT_S", "12.0")),
             "A4": float(os.environ.get("SOFTSIGNAL_A4_TIMEOUT_S", "15.0")),  # off the decision path
             # A5 per round is a live call (Crew Plan section 9: 4 s); its one-off slide pass uses 60 s
             "A5": float(os.environ.get("SOFTSIGNAL_A5_TIMEOUT_S", "4.0"))}
