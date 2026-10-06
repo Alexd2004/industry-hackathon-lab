@@ -67,7 +67,7 @@ from softsignal.data import load_data
 from softsignal.explain import explain_frame
 from softsignal.features import ID_COL, TARGET
 from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, Decide, DecisionContext, Env, State,
-                             check_rounds_header, make_env, run_loop, write_run)
+                             check_rounds_header, make_env, run_loop, shadow_path, write_run)
 from softsignal.metrics import ROUNDS_COLS
 from softsignal.replay import Replayer, read_records, serve
 
@@ -217,7 +217,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         rows_so_far.append(result.row)
         if write:  # the round shows now, A5's card reads "working..." (a5 null) until its line lands
             write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [{**result.record, "a5": None}],
-                      rounds_path, decisions_path)
+                      rounds_path, decisions_path, shadow=[result.shadow])
         result.record["a5"] = block(_a5_round(result, rnd), rnd)
         if write:  # the same round again with A5 in it: the last line of a (run, round) wins
             write_run(pd.DataFrame(columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
@@ -258,9 +258,14 @@ def pick_canonical(records: list[dict], n_rounds: int) -> str | None:
 
 
 def keep_run(paths: tuple[Path, Path], run: str) -> None:
-    """Rewrite the rounds csv and decisions jsonl at paths so they hold only this run."""
+    """Rewrite the rounds csv and decisions jsonl at paths (and the rounds file's shadow csv, if any) so they hold
+    only this run."""
     rounds = pd.read_csv(paths[0], dtype={"run": str})
     rounds[rounds["run"] == run].to_csv(paths[0], index=False, lineterminator="\n")
+    shadow = shadow_path(paths[0])
+    if shadow.exists():
+        rows = pd.read_csv(shadow, dtype={"run": str})
+        rows[rows["run"] == run].to_csv(shadow, index=False, lineterminator="\n")
     kept = [r for r in read_records(paths[1]) if r["run"] == run]
     paths[1].write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
 
@@ -343,7 +348,8 @@ def main() -> None:
     recorded = (ROUNDS_RECORDED, DECISIONS_RECORDED)
     # --record builds the new run next to the committed one and swaps it in only once the run has finished
     paths = tuple(p.with_name(p.name + ".new") for p in recorded) if args.record else (ROUNDS_CSV, DECISIONS_JSONL)
-    for p in paths if args.record else ():
+    temp = (*paths, shadow_path(paths[0])) if args.record else ()  # the shadow rows are swapped in with the run
+    for p in temp:
         p.unlink(missing_ok=True)
     try:
         replayer = None if args.record or args.no_replay else Replayer.from_file(DECISIONS_RECORDED)
@@ -358,7 +364,7 @@ def main() -> None:
             if args.runs > 1:
                 print(f"run {env.timer.run}: {run_fallbacks(records)} real fallbacks")
     except BaseException:
-        for p in paths if args.record else ():
+        for p in temp:
             p.unlink(missing_ok=True)
         raise
     if args.record:
@@ -375,11 +381,15 @@ def main() -> None:
 
         problems = scan_recorded(*paths)  # the repo is public: nothing is swapped in if the new run is not clean
         if problems:
-            for p in paths:
+            for p in temp:
                 p.unlink(missing_ok=True)
             raise SystemExit("recording not saved, safety scan found:\n  " + "\n  ".join(problems))
         for new, old in zip(paths, recorded):
             os.replace(new, old)
+        if temp[-1].exists():  # the new run's shadow rows; an old recording's never outlive it
+            os.replace(temp[-1], shadow_path(ROUNDS_RECORDED))
+        else:
+            shadow_path(ROUNDS_RECORDED).unlink(missing_ok=True)
         paths = recorded
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))

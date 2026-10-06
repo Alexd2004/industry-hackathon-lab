@@ -169,6 +169,7 @@ class Env:
 class RoundResult:
     row: dict  # ROUNDS_COLS
     record: dict  # decisions.jsonl shape
+    shadow: dict | None = None  # SHADOW_COLS: the model in training on the frozen test set (report only), or None
 
 
 def new_state(policy: dict) -> State:
@@ -602,7 +603,18 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     record.update(blocks)
     record.update(a2_blocks)
     record["diff"] = diff
-    return RoundResult(row, record)
+    return RoundResult(row, record, shadow_row(env, state, batch.round))
+
+
+def shadow_row(env: Env, state: State, rnd: int) -> dict | None:
+    """The model in training (the newest candidate, refit this round or earlier) on the frozen test set, at its own
+    t_verify, or None before the first refit. Report only: it goes to shadow.csv, never to state, a decision, an
+    agent or decisions.jsonl (which carries no test metric), so the screen can show the learning each round while
+    the starter is still live in SHADOW."""
+    if state.candidate is None:
+        return None
+    return {"run": env.timer.run, "round": rnd, "candidate_round": state.candidate_round,
+            "t_verify": float(state.candidate.th.t_verify), **report_metrics(state.candidate, env.test)}
 
 
 # ---- whole run ----
@@ -659,8 +671,16 @@ def check_rounds_header(rounds_path: Path, columns: list[str]) -> str:
     return first
 
 
+SHADOW_COLS = ["run", "round", "candidate_round", "t_verify", "prec", "rec", "ft", "mt", "auc"]
+
+
+def shadow_path(rounds_path: Path) -> Path:
+    """Where a rounds file's shadow rows go: rounds.csv -> shadow.csv, rounds_recorded.csv -> shadow_recorded.csv."""
+    return rounds_path.with_name(rounds_path.name.replace("rounds", "shadow", 1))
+
+
 def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROUNDS_CSV,
-              decisions_path: Path = DECISIONS_JSONL) -> None:
+              decisions_path: Path = DECISIONS_JSONL, shadow: list[dict | None] | None = None) -> None:
     """Append rows to rounds.csv and records to decisions.jsonl (rows carry their run id; header written once).
 
     Raises ValueError, writing nothing, if rounds.csv already has a different header. Both appends happen
@@ -668,6 +688,8 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
     round or race on a temp file. Appends are small; a reader that catches one mid-write sees a last line
     with no newline, which the readers skip. A torn last line (a writer killed mid-append) is cut off first,
     never completed into a malformed row. Nothing checks for a run id that is already present.
+
+    shadow: RoundResult.shadow rows (None entries skipped), appended to shadow_path(rounds_path) under the same lock.
     """
     with _write_lock(rounds_path.parent):
         for path in (rounds_path, decisions_path):
@@ -679,6 +701,13 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
         for path, text in ((rounds_path, buf.getvalue()), (decisions_path, new_dec)):
             with open(path, "a", encoding="utf-8", newline="") as f:
                 f.write(text)
+        rows = [r for r in shadow or [] if r is not None]
+        if rows:
+            path = shadow_path(rounds_path)
+            _drop_torn_tail(path)
+            new = not path.exists() or path.stat().st_size == 0
+            pd.DataFrame(rows, columns=SHADOW_COLS).to_csv(path, mode="a", header=new, index=False,
+                                                           lineterminator="\n")
 
 
 def _drop_torn_tail(path: Path, chunk: int = 4096) -> None:
@@ -721,10 +750,11 @@ def main() -> None:
         rounds, records = crew.run_crew(env, make_client(), args.rounds, write=not args.no_write)
         written = not args.no_write  # run_crew appended each round as it landed
     else:
-        rounds, records = run_loop(env, args.rounds)
+        shadows: list = []
+        rounds, records = run_loop(env, args.rounds, on_round=lambda r: shadows.append(r.shadow))
         written = False
         if not args.no_write:
-            write_run(rounds, records)
+            write_run(rounds, records, shadow=shadows)
             written = True
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))

@@ -137,7 +137,7 @@ def _loop_job(mode: str):
 
             def on_round(result) -> None:
                 write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [result.record], ROUNDS_CSV,
-                          DECISIONS_JSONL)
+                          DECISIONS_JSONL, shadow=[result.shadow])
                 landed(result.row)
 
             run_loop(env, state=state, on_round=on_round)

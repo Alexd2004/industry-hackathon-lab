@@ -127,15 +127,21 @@ function renderDashboard() {
   $("d-rec").innerHTML = `${Math.round(row.rec * 100)}<small>%</small>`;
   $("d-rec-of").textContent = `${Math.round(row.rec * c.teens)} of ${c.teens} teens in the held-out test`;
   const d = Math.round((row.rec - r0.rec) * 100);
-  $("d-rec-delta").textContent = row.round === 0 ? "Round 0: the organizers' starter rule"
-    : d > 0 ? `+${d} points since round 0` : d < 0 ? `${d} points since round 0` : "No change since round 0";
+  const sh = row.mode === "SHADOW" ? row.shadow : null;
+  $("d-rec-delta").textContent = (row.round === 0 ? "Round 0: the organizers' starter rule"
+    : d > 0 ? `+${d} points since round 0` : d < 0 ? `${d} points since round 0` : "No change since round 0") +
+    (sh ? ` · model in training: ${pct(sh.rec)} (not live yet)` : "");
   $("d-ft").innerHTML = `${(row.ft * 100).toFixed(1)}<small>%</small>`;
   $("d-ft-of").textContent = `${Math.round(row.ft * c.adults)} of ${c.adults} adults in the held-out test`;
-  $("d-ft-cap").textContent = overCap(row.ft, cap) ? `Over the ${pct(cap)} cap` : `Within the ${pct(cap)} cap`;
+  $("d-ft-cap").textContent = (overCap(row.ft, cap) ? `Over the ${pct(cap)} cap` : `Within the ${pct(cap)} cap`) +
+    (sh ? ` · in training: ${pct(sh.ft, 1)}` : "");
   $("d-chart-tag").textContent = run().source === "live" ? "rounds.csv" : run().source === "rule" ? "rounds_rule.csv" : "rounds_recorded.csv";
   $("d-chart").replaceChildren(roundChart(rs, row.round, cap));
+  const anyShadow = rs.some((r) => r.shadow);
   $("d-chart-caption").textContent = `Held-out test (${c.n} accounts) after each round, at the loop's ${pct(cap)} cap. ` +
-    `While the loop is in SHADOW the starter rule stays live, so the lines move only after a promote.`;
+    `Solid: the live model, which only changes on a promote. ` +
+    (anyShadow ? "Dashed: the model in training, scored on the same accounts each round (report only, not live until promoted)."
+      : "The model in training appears from the first refit (this run has no shadow scores).");
   renderCapPanel();
 }
 
@@ -170,6 +176,13 @@ function roundChart(rs, current, cap, msg) {
   }
   if (msg) text(s, (L + W - R) / 2, y(0.6), msg, { "text-anchor": "middle", "font-size": 18, "font-weight": 600, fill: "#6b7280" });
   const upto = rs.filter((r) => r.round <= current);
+  for (const [k, color] of [["rec", "#2742d6"], ["ft", "#b85c1e"]]) { // the model in training: dashed, no label
+    const sh = upto.filter((r) => isNum(r.shadow?.[k]));
+    if (!sh.length) continue;
+    el("polyline", { points: sh.map((r) => `${x(r.round)},${y(r.shadow[k])}`).join(" "), fill: "none", stroke: color,
+      "stroke-width": 2, "stroke-dasharray": "6 5", opacity: 0.75 }, s);
+    for (const r of sh) el("circle", { cx: x(r.round), cy: y(r.shadow[k]), r: 3.5, fill: "#fff", stroke: color, "stroke-width": 2 }, s);
+  }
   const series = [["rec", "#2742d6", "Teens caught"], ["ft", "#b85c1e", "Adults flagged"]];
   for (const [k, color, name] of series) {
     const pts_ = upto.filter((r) => isNum(r[k]));
@@ -204,7 +217,7 @@ function renderTraining() {
     $("t-weights-note").textContent = "";
     renderLoop(null);
     renderAgent(null);
-    $("t-table").querySelector("tbody").innerHTML = `<tr><td colspan="4" class="placeholder">Rounds appear here as they finish.</td></tr>`;
+    $("t-table").querySelector("tbody").innerHTML = `<tr><td colspan="5" class="placeholder">Rounds appear here as they finish.</td></tr>`;
     return;
   }
   renderBanner(row);
@@ -397,8 +410,11 @@ function renderAgent(row) {
 function renderTestTable(rs, row) {
   $("t-table").querySelector("tbody").innerHTML = rs.map((r) => {
     const cap = capOf(r), g = gateOf(r);
+    const sh = r.shadow;
+    const training = sh ? `${pct(sh.rec)} / <span class="${overCap(sh.ft, cap) ? "over" : ""}">${pct(sh.ft, 1)}</span>` : "–";
     return `<tr class="click${r.round === row.round ? " sel" : ""}" data-round="${r.round}"><td>${r.round}</td>
-      <td class="num">${pct(r.rec)}</td><td class="num${overCap(r.ft, cap) ? " over" : ""}">${pct(r.ft, 1)}</td><td>${esc(g.short)}</td></tr>`;
+      <td class="num">${pct(r.rec)}</td><td class="num${overCap(r.ft, cap) ? " over" : ""}">${pct(r.ft, 1)}</td>
+      <td class="num muted-cell">${training}</td><td>${esc(g.short)}</td></tr>`;
   }).join("");
 }
 

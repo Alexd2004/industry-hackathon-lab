@@ -70,6 +70,10 @@ cap_margin) and window_min (the smallest refit_window).
 promote).
 - rule: the rule-based decision (action, cap, and the cap_margin it refits with). Follow it unless the input \
 gives a reason not to.
+- When guards.promote_allowed is true, the model in training has passed its audit test (pooled audit false-teen \
+within the cap) and only goes live if you promote: until then the starter rule keeps scoring every account. \
+Promote unless the input shows a concrete problem with the new model (for example a1 reports real drift, or \
+candidate_false_teen is above the cap), and name that problem in the reason if you do not promote.
 
 Actions: hold keeps the current thresholds. re-tune refits the model and recomputes the thresholds. promote \
 moves SHADOW to ACTIVE. cap is the share of adults you accept being sent to verification, as a fraction. cap_margin (0 to 0.05, or null to keep the policy value) is how far below the cap the verify cutoff aims: a larger margin lowers the chance the false-teen rate overshoots the cap and costs some recall. Raise it when the audit false-teen rate runs above the cap, keep it small when it runs below. refit_window (2 or more, or null for all rounds) makes a re-tune use only the labels of the last that-many rounds: use it, with a small number such as 2 or 3, only when a1 reports real drift, so the refit forgets data from before the shift. cap_margin and refit_window only act on re-tune: on hold nothing is refit, and promote keeps the margin and window the promoted model was tested with, so leave both null unless you choose re-tune.

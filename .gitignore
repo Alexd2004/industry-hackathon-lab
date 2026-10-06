@@ -42,3 +42,4 @@ cache/
 **/results/reviews.json
 **/results/reviews.tmp
 **/results/run_lists/
+**/results/shadow.csv
