@@ -17,7 +17,8 @@ from softsignal.text_model import build_matrix
 from softsignal.tier1 import STARTER_CUT, STARTER_W, activity_score, blend, flag, style_score
 from softsignal.ui_loop import valid_decision
 
-POL = load_policy()
+# these tests pin the original promote rule and floor; the challenger (policy.yaml's default) has its own tests below
+POL = {**load_policy(), "promote_rule": "pooled", "min_audit_adults": 120}
 
 
 def state(mode=lp.SHADOW, streak=0):
@@ -133,7 +134,8 @@ def test_new_state_clamps_the_cap_once():
 # ---- whole loop on the real split ----
 def make(n_rounds, tmp_path, source="audit"):
     train, test = load_data(on_param_mismatch="error")
-    env = lp.make_env(train, test, threshold_source=source, timer=AgentTimer(tmp_path / "calls.jsonl", run="t"))
+    env = lp.make_env(train, test, policy=POL, threshold_source=source,
+                      timer=AgentTimer(tmp_path / "calls.jsonl", run="t"))
     st = lp.new_state(env.policy)
     rounds, records = lp.run_loop(env, n_rounds, st)
     return env, test, rounds, records, st
@@ -592,3 +594,31 @@ def test_labelled_rows_keep_only_the_last_rounds(split, tmp_path, monkeypatch):
     all_rows, last2 = lp.labelled_rows(env, st), lp.labelled_rows(env, st, 2)
     rev = env.oracle.revealed("all")
     assert len(last2) == int((rev["round"] > st.round - 2).sum()) and len(last2) < len(all_rows)
+
+
+
+# ---- the challenger (policy.yaml promote_rule: challenger) ----
+@pytest.mark.parametrize("live,cand,adults,wins", [
+    ((0.80, 0.356), (0.88, 0.17), 30, True),    # the live rule is over the bar, the challenger is not
+    ((0.80, 0.356), (0.95, 0.30), 30, False),   # both over the bar: no win, whatever the recall
+    ((0.88, 0.15), (0.88, 0.12), 30, True),     # both within: as many teens caught is enough
+    ((0.90, 0.15), (0.88, 0.12), 30, False),    # both within: fewer teens caught loses
+    ((0.80, 0.356), (0.88, 0.17), 19, False),   # too few audit adults in the round to decide
+    ((0.80, 0.356), (None, 0.10), 30, False),   # no audit teen to measure recall on
+])
+def test_challenger_wins(live, cand, adults, wins):
+    assert lp.challenger_wins(live, cand, 0.15, adults) is wins
+
+
+def test_audit_rates():
+    y, s = np.array([1, 1, 0, 0]), np.array([0.9, 0.2, 0.8, 0.1])
+    assert lp.audit_rates(y, s, 0.5) == (0.5, 0.5)
+    assert lp.audit_rates(np.array([0, 0]), np.array([0.9, 0.1]), 0.5) == (None, 0.5)
+
+
+def test_one_won_round_promotes_under_the_challenger_rule():
+    pol = {**POL, "promote_rule": "challenger", "min_audit_adults": 50}
+    assert lp.rule_decision(state(lp.SHADOW, 1), pol, 60)["action"] == lp.PROMOTE
+    assert lp.rule_decision(state(lp.SHADOW, 0), pol, 60)["action"] == lp.RETUNE
+    assert lp.rule_decision(state(lp.SHADOW, 1), pol, 49)["action"] == lp.HOLD  # the floor still comes first
+    assert lp.rule_decision(state(lp.SHADOW, 1), POL, 130)["action"] == lp.RETUNE  # pooled needs two rounds

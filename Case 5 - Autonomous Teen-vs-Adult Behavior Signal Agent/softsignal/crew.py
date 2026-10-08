@@ -56,7 +56,9 @@ import pandas as pd
 from softsignal.agent_timer import DEFAULT_LOG, AgentTimer, round_agent_summary
 from softsignal.agents import a1_drift, a2_controller, a3_errors, a5_audit
 from softsignal.agents.a2_controller import run_a2
-from softsignal.agents.base import FALLBACK, AgentResult, input_hash, make_client, merge_block
+from softsignal.agents.base import (FALLBACK, INVALID, OFFLINE, REPLAY_MISMATCH, AgentResult, input_hash,
+                                    is_real_fallback, make_client, merge_block)
+from softsignal.agents.schemas import A1Output, A2Output, A3Output
 from softsignal.agents.contracts import (
     A3_COLS, INSUFFICIENT_INPUT, a1_history, a1_input, a2_input, a3_input, a5_input, a5_sources, evidence_source,
     load_checklist, round_claims,
@@ -65,9 +67,21 @@ from softsignal.data import load_data
 from softsignal.explain import explain_frame
 from softsignal.features import ID_COL, TARGET
 from softsignal.loop import (DECISIONS_JSONL, ROUNDS_CSV, RUN_MODES, SHADOW, Decide, DecisionContext, Env, State,
-                             check_rounds_header, make_env, run_loop, write_run)
+                             check_rounds_header, make_env, run_loop, shadow_path, write_run)
 from softsignal.metrics import ROUNDS_COLS
 from softsignal.replay import Replayer, read_records, serve
+
+def with_schema(schema: type, validate):
+    """validate, after today's output schema: a recording made under looser limits (A3 had 4 patterns, now 2) is
+    not served, because replay.serve only runs the agent's own check, which does not re-check list lengths."""
+    def check(output, payload):
+        try:
+            schema.model_validate(output)
+        except Exception as e:  # noqa: BLE001 - any mismatch means "do not serve"
+            return INVALID, [f"recording fails today's schema: {type(e).__name__}"]
+        return validate(output, payload)
+    return check
+
 
 A5_ERROR = "agent_error"  # A5 raised: the round keeps going with an empty, FALLBACK A5 block
 A3_ERROR = "agent_error"  # A3's input or run raised: the round keeps going with a FALLBACK, no-analysis A3 block
@@ -132,7 +146,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
 
     def replay_or_run(key: str, rnd: int, payload: dict, validate, run) -> AgentResult:
         """The recorded output when offline and the input matches (REPLAY), else run() as usual. If this round and
-        agent were recorded from a different input, the result's errors say so (replay_hash_mismatch)."""
+        agent were recorded from a different input, the result's errors say so, and an offline fallback is reported
+        as replay_hash_mismatch: the recording exists but no longer fits (an input contract changed)."""
         got = serve(offline, key, rnd, payload, validate, env.timer)
         if got is not None:
             return got
@@ -140,6 +155,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         note = offline.mismatch_note(rnd, key, input_hash(payload)) if offline is not None else None
         if note:
             result.errors.append(note)
+            if result.fallback_reason == OFFLINE:
+                result.fallback_reason = REPLAY_MISMATCH
         return result
 
     def block(result, rnd: int) -> dict:
@@ -150,7 +167,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         rows = prior.iloc[0:0] if batch is None else batch.rows
         score_psi = psi_val if state.mode == SHADOW else None  # the live model changes every refit once ACTIVE
         payload = a1_input(prior, rows, score_psi, env.oracle.audit_counts(), history, rnd, psi_drift)
-        a1 = replay_or_run("a1", rnd, payload, a1_drift.validate_output,
+        a1 = replay_or_run("a1", rnd, payload, with_schema(A1Output, a1_drift.validate_output),
                            lambda: a1_drift.run_a1(payload, client, env.timer, rnd))
         if batch is not None:
             history.append(a1_history(payload))
@@ -160,7 +177,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         """A3 on this round's earlier-round errors. Never raises: an A3 error must not take A1 or the round down."""
         try:
             payload = a3_payload(env, state, batch, prior)
-            return replay_or_run("a3", rnd, payload, a3_errors.validate_output,
+            return replay_or_run("a3", rnd, payload, with_schema(A3Output, a3_errors.validate_output),
                                  lambda: a3_errors.run_a3(payload, client, env.timer, rnd))
         except Exception as e:  # noqa: BLE001 - the agents' contract: never break the round
             return AgentResult("A3", FALLBACK, a3_errors.fallback_output(), A3_ERROR, "", [f"{type(e).__name__}: {e}"[:500]])
@@ -172,7 +189,8 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
             # (rounds_recorded.csv) must hash like a normal one (rounds.csv) or offline replay of A5 never matches
             sources = a5_sources(rounds_path.parent, pd.DataFrame(rows_so_far, columns=ROUNDS_COLS), ROUNDS_CSV.name,
                                  files=("rounds",))
-            sources.append(evidence_source(result.record, env.policy, rnd, result.row))  # what A2's reason may quote
+            sources.append(evidence_source(result.record, env.policy, rnd, result.row,  # what A2's reason may quote
+                                           audit=env.oracle.audit_counts()))
             claims = round_claims(result.row, result.record)
             payload = a5_input(claims, sources, checklist, "round", rnd)
             # the round's own headline only (no A2 reason yet): the script checks it, no model call needed
@@ -190,7 +208,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         payload = a2_input(ctx.round, ctx.thresholds, ctx.audit, ctx.bounds, ctx.guards, ctx.rule,
                            a1=a1 if isinstance(a1, dict) else INSUFFICIENT_INPUT,
                            a3=a3 if a3_ok else INSUFFICIENT_INPUT, policy=env.policy)
-        a2 = replay_or_run("a2", ctx.round, payload, a2_controller.validate_output,
+        a2 = replay_or_run("a2", ctx.round, payload, with_schema(A2Output, a2_controller.validate_output),
                            lambda: run_a2(payload, client, env.timer, ctx.round))
         return {"a2": merge_block(a2, round_agent_summary(env.timer.records, ctx.round, env.timer.run).get(a2.agent))}
 
@@ -199,7 +217,7 @@ def run_crew(env: Env, client=None, n_rounds: int | None = None, write: bool = F
         rows_so_far.append(result.row)
         if write:  # the round shows now, A5's card reads "working..." (a5 null) until its line lands
             write_run(pd.DataFrame([result.row], columns=ROUNDS_COLS), [{**result.record, "a5": None}],
-                      rounds_path, decisions_path)
+                      rounds_path, decisions_path, shadow=[result.shadow])
         result.record["a5"] = block(_a5_round(result, rnd), rnd)
         if write:  # the same round again with A5 in it: the last line of a (run, round) wins
             write_run(pd.DataFrame(columns=ROUNDS_COLS), [result.record], rounds_path, decisions_path)
@@ -220,15 +238,15 @@ AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
 
 
 def run_fallbacks(records: list[dict]) -> int:
-    """FALLBACK blocks in one run that are not the expected "insufficient_data" (no model call was needed)."""
-    return sum(1 for r in records for k in AGENT_KEYS
-               if (r.get(k) or {}).get("status") == FALLBACK and (r[k].get("fallback_reason") != "insufficient_data"))
+    """Real fallbacks in one run (base.is_real_fallback: a reply refused by a check, or no usable reply). The
+    scripted ones (insufficient_data, script_only) needed no model call and offline ones had none to make."""
+    return sum(1 for r in records for k in AGENT_KEYS if is_real_fallback(r.get(k)))
 
 
 def pick_canonical(records: list[dict], n_rounds: int) -> str | None:
     """The run id to commit as the recording, or None if no run has all n_rounds rounds.
 
-    Rule, fixed before any run is looked at: among complete runs, the fewest unexpected FALLBACK blocks, ties to
+    Rule, fixed before any run is looked at: among complete runs, the fewest real fallbacks (run_fallbacks), ties to
     the earliest run id. It never looks at recall, false-teen or any metric, so picking the recording cannot
     be picking the best-looking numbers.
     """
@@ -240,9 +258,14 @@ def pick_canonical(records: list[dict], n_rounds: int) -> str | None:
 
 
 def keep_run(paths: tuple[Path, Path], run: str) -> None:
-    """Rewrite the rounds csv and decisions jsonl at paths so they hold only this run."""
+    """Rewrite the rounds csv and decisions jsonl at paths (and the rounds file's shadow csv, if any) so they hold
+    only this run."""
     rounds = pd.read_csv(paths[0], dtype={"run": str})
     rounds[rounds["run"] == run].to_csv(paths[0], index=False, lineterminator="\n")
+    shadow = shadow_path(paths[0])
+    if shadow.exists():
+        rows = pd.read_csv(shadow, dtype={"run": str})
+        rows[rows["run"] == run].to_csv(shadow, index=False, lineterminator="\n")
     kept = [r for r in read_records(paths[1]) if r["run"] == run]
     paths[1].write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
 
@@ -325,7 +348,8 @@ def main() -> None:
     recorded = (ROUNDS_RECORDED, DECISIONS_RECORDED)
     # --record builds the new run next to the committed one and swaps it in only once the run has finished
     paths = tuple(p.with_name(p.name + ".new") for p in recorded) if args.record else (ROUNDS_CSV, DECISIONS_JSONL)
-    for p in paths if args.record else ():
+    temp = (*paths, shadow_path(paths[0])) if args.record else ()  # the shadow rows are swapped in with the run
+    for p in temp:
         p.unlink(missing_ok=True)
     try:
         replayer = None if args.record or args.no_replay else Replayer.from_file(DECISIONS_RECORDED)
@@ -338,9 +362,9 @@ def main() -> None:
             all_rounds.append(rounds)
             all_records.append(records)
             if args.runs > 1:
-                print(f"run {env.timer.run}: {run_fallbacks(records)} unexpected FALLBACK blocks")
+                print(f"run {env.timer.run}: {run_fallbacks(records)} real fallbacks")
     except BaseException:
-        for p in paths if args.record else ():
+        for p in temp:
             p.unlink(missing_ok=True)
         raise
     if args.record:
@@ -352,16 +376,20 @@ def main() -> None:
             keep_run(paths, canon)
             rounds = next(r for r in all_rounds if (r["run"] == canon).all())
             records = [r for rs in all_records for r in rs if r["run"] == canon]
-            print(f"canonical run: {canon} (fewest unexpected FALLBACKs, ties to the earliest; metrics not used)")
+            print(f"canonical run: {canon} (fewest real fallbacks, ties to the earliest; metrics not used)")
         from softsignal.recorded_check import scan_recorded  # lazy: recorded_check imports this module
 
         problems = scan_recorded(*paths)  # the repo is public: nothing is swapped in if the new run is not clean
         if problems:
-            for p in paths:
+            for p in temp:
                 p.unlink(missing_ok=True)
             raise SystemExit("recording not saved, safety scan found:\n  " + "\n  ".join(problems))
         for new, old in zip(paths, recorded):
             os.replace(new, old)
+        if temp[-1].exists():  # the new run's shadow rows; an old recording's never outlive it
+            os.replace(temp[-1], shadow_path(ROUNDS_RECORDED))
+        else:
+            shadow_path(ROUNDS_RECORDED).unlink(missing_ok=True)
         paths = recorded
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))

@@ -34,7 +34,7 @@ from softsignal.agents.schemas import A4_MAX_NOTE_CHARS, A4Output
 
 AGENT = "A4"
 SYSTEM = f"""You are A4, the verify-band triager in SoftSignal. SoftSignal estimates whether an account belongs \
-to a teen (13-17) or an adult (23+) from how the person writes and how they use the app. It never uses a \
+to a teen or an adult from how the person writes and how they use the app. It never uses a \
 birthday or a photo. A human reviewer is about to verify the accounts in this batch's verify band. Write them \
 one short note about the batch.
 
@@ -112,7 +112,7 @@ def _fallback(payload: dict, h: str, reason: str, errors: list[str], timer: Agen
     if timer is None:
         output = INSUFFICIENT if reason == INSUFFICIENT else fallback_output(payload)
     else:
-        with timer.call(AGENT, "fallback", "tool", status=FALLBACK, **rnd):
+        with timer.call(AGENT, "fallback", "tool", status=FALLBACK, reason=reason, **rnd):
             output = INSUFFICIENT if reason == INSUFFICIENT else fallback_output(payload)
     return AgentResult(AGENT, FALLBACK, output, reason, h, errors, rejected)
 

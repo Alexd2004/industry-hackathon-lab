@@ -20,6 +20,16 @@ PSI. Each round is compared with the scores the live rule gave earlier batches w
 history restarts on a promote (starter and stack scores are on different scales), so the round after a
 promote has no psi. Once ACTIVE the live rule changes every refit, so the history mixes successive models.
 
+Challenger (policy.yaml promote_rule: challenger, the default since the pooled rule left a run flat until round 7).
+Each round the model refit last round (the challenger) and the live rule are both scored on this round's audit
+slice, before the refit, so neither has seen those labels. The challenger wins when its audit false-teen is within
+cap + PROMOTE_SLACK on at least CHALLENGE_MIN_ADULTS audit adults and it catches at least as many audit teens as the
+live rule, or when the live rule is over that bar and it is not; an INSUFFICIENT_* candidate never wins. A win sets
+the streak to 1, so the rule's decision is promote in SHADOW; in ACTIVE a win lets this round's refit replace the
+live rule and a loss keeps the live rule (the pooled rule replaced it on every refit). The newest refit is what
+goes live, as with the pooled rule: the evidence is on the previous one. promote_rule: pooled keeps the original
+rule described above.
+
 Hold rule (enforced here, from policy.yaml): no refit and no new thresholds until the cumulative
 revealed audit adults reach min_audit_adults. Until then the starter stays live and action is "hold".
 
@@ -94,6 +104,8 @@ PROMOTE_SLACK = 0.03  # SHADOW -> ACTIVE needs the pooled audit false-teen <= ca
 PROMOTE_STREAK = 2  # ... pooled over this many rounds in a row
 PROMOTE_MIN_ADULTS = 40  # ... and over at least this many pooled audit adults (2 x 20, the old per-round floor)
 UNSAFE_FLAGS = (INSUFFICIENT_ADULTS, INSUFFICIENT_TEENS)  # a candidate with these is never promoted
+CHALLENGER, POOLED = "challenger", "pooled"  # policy.yaml promote_rule
+CHALLENGE_MIN_ADULTS = 20  # a challenge on fewer audit adults in the round is not decided (about 27-37 per round)
 THRESHOLD_SOURCES = ("audit", "all_verified")
 AGENT = "loop"
 AGENT_KEYS = ("a1", "a2", "a3", "a4", "a5")
@@ -169,6 +181,7 @@ class Env:
 class RoundResult:
     row: dict  # ROUNDS_COLS
     record: dict  # decisions.jsonl shape
+    shadow: dict | None = None  # SHADOW_COLS: the model in training on the frozen test set (report only), or None
 
 
 def new_state(policy: dict) -> State:
@@ -208,9 +221,29 @@ def rule_decision(state: State, policy: dict, n_audit_adults: int) -> dict:
     cap = clamp_cap(policy["cap_false_teen"])
     if n_audit_adults < policy["min_audit_adults"]:
         return {"action": HOLD, "cap": cap}
-    if state.mode == SHADOW and state.streak >= PROMOTE_STREAK:
+    need = 1 if policy.get("promote_rule") == CHALLENGER else PROMOTE_STREAK  # challenger: one won round
+    if state.mode == SHADOW and state.streak >= need:
         return {"action": PROMOTE, "cap": cap}
     return {"action": RETUNE, "cap": cap}
+
+
+def audit_rates(y: np.ndarray, scores: np.ndarray, t_verify: float) -> tuple[float | None, float | None]:
+    """(recall, false-teen) on labelled audit rows at a cutoff; None where the class is absent."""
+    pred = (scores >= t_verify).astype(int)
+    rec = float(pred[y == 1].mean()) if (y == 1).any() else None
+    ft = float(pred[y == 0].mean()) if (y == 0).any() else None
+    return rec, ft
+
+
+def challenger_wins(live: tuple, cand: tuple, cap: float, n_adults: int) -> bool:
+    """The challenger beats the live rule on this round's audit slice (see the module docstring)."""
+    (live_rec, live_ft), (cand_rec, cand_ft) = live, cand
+    bar = cap + PROMOTE_SLACK
+    if n_adults < CHALLENGE_MIN_ADULTS or cand_rec is None or cand_ft is None or cand_ft > bar:
+        return False
+    if live_ft is None or live_ft > bar:
+        return True
+    return live_rec is None or cand_rec >= live_rec
 
 
 def _tie_order(round_id: int, n: int) -> np.ndarray:
@@ -526,7 +559,20 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
                 "cand_unsafe": state.candidate is not None and _unsafe(state.candidate),
                 "cand_age": None if state.candidate_round is None else batch.round - state.candidate_round,
                 "pooled_adults": None, "pooled_ft": None, "promote_refused": False}
-    if state.mode == SHADOW:
+    challenger = env.policy.get("promote_rule") == CHALLENGER
+    wins = False
+    if challenger:
+        live_rf = audit_rates(y_audit, live_s[a_idx], state.live.th.t_verify)
+        cand_rf = (None, None)
+        if state.candidate is not None and not evidence["cand_unsafe"]:
+            cand_rf = audit_rates(y_audit, cand_s, t_cand)
+            wins = challenger_wins(live_rf, cand_rf, clamp_cap(env.policy["cap_false_teen"]), round_adults)
+        state.streak = 1 if wins else 0
+        state.window = [(round_adults, cand_fts)] if cand_fts is not None else []
+        evidence.update(streak=state.streak, pooled_adults=round_adults if cand_fts is not None else None,
+                        pooled_ft=cand_ft, live_audit_rec=live_rf[0], live_audit_ft=live_rf[1],
+                        cand_audit_rec=cand_rf[0], challenger_wins=wins)
+    elif state.mode == SHADOW:
         # a candidate with INSUFFICIENT_* flags holds the prior's cutoffs, which may be on another scale
         usable = cand_ft is not None and not evidence["cand_unsafe"]
         state.window = (state.window + [(round_adults, cand_fts)])[-PROMOTE_STREAK:] if usable else []
@@ -583,7 +629,9 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
             else:
                 state.mode = ACTIVE
                 state.live_scores = np.empty(0)  # the starter's scores are not on the stack's scale
-        if state.mode == ACTIVE:
+                state.live = state.candidate
+        # pooled: once ACTIVE every refit goes live. challenger: only after a won round (a loss keeps the live rule)
+        if state.mode == ACTIVE and (not challenger or (wins and not _unsafe(state.candidate))):
             state.live = state.candidate
     if source == SOURCE_RULE:
         rule_orig = applied  # a refused promote shows as the rule's own decision, as before A2 existed
@@ -602,7 +650,18 @@ def _apply_round(state: State, batch: Batch, env: Env, before_decision: BeforeDe
     record.update(blocks)
     record.update(a2_blocks)
     record["diff"] = diff
-    return RoundResult(row, record)
+    return RoundResult(row, record, shadow_row(env, state, batch.round))
+
+
+def shadow_row(env: Env, state: State, rnd: int) -> dict | None:
+    """The model in training (the newest candidate, refit this round or earlier) on the frozen test set, at its own
+    t_verify, or None before the first refit. Report only: it goes to shadow.csv, never to state, a decision, an
+    agent or decisions.jsonl (which carries no test metric), so the screen can show the learning each round while
+    the starter is still live in SHADOW."""
+    if state.candidate is None:
+        return None
+    return {"run": env.timer.run, "round": rnd, "candidate_round": state.candidate_round,
+            "t_verify": float(state.candidate.th.t_verify), **report_metrics(state.candidate, env.test)}
 
 
 # ---- whole run ----
@@ -659,8 +718,16 @@ def check_rounds_header(rounds_path: Path, columns: list[str]) -> str:
     return first
 
 
+SHADOW_COLS = ["run", "round", "candidate_round", "t_verify", "prec", "rec", "ft", "mt", "auc"]
+
+
+def shadow_path(rounds_path: Path) -> Path:
+    """Where a rounds file's shadow rows go: rounds.csv -> shadow.csv, rounds_recorded.csv -> shadow_recorded.csv."""
+    return rounds_path.with_name(rounds_path.name.replace("rounds", "shadow", 1))
+
+
 def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROUNDS_CSV,
-              decisions_path: Path = DECISIONS_JSONL) -> None:
+              decisions_path: Path = DECISIONS_JSONL, shadow: list[dict | None] | None = None) -> None:
     """Append rows to rounds.csv and records to decisions.jsonl (rows carry their run id; header written once).
 
     Raises ValueError, writing nothing, if rounds.csv already has a different header. Both appends happen
@@ -668,6 +735,8 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
     round or race on a temp file. Appends are small; a reader that catches one mid-write sees a last line
     with no newline, which the readers skip. A torn last line (a writer killed mid-append) is cut off first,
     never completed into a malformed row. Nothing checks for a run id that is already present.
+
+    shadow: RoundResult.shadow rows (None entries skipped), appended to shadow_path(rounds_path) under the same lock.
     """
     with _write_lock(rounds_path.parent):
         for path in (rounds_path, decisions_path):
@@ -679,6 +748,13 @@ def write_run(rounds: pd.DataFrame, records: list[dict], rounds_path: Path = ROU
         for path, text in ((rounds_path, buf.getvalue()), (decisions_path, new_dec)):
             with open(path, "a", encoding="utf-8", newline="") as f:
                 f.write(text)
+        rows = [r for r in shadow or [] if r is not None]
+        if rows:
+            path = shadow_path(rounds_path)
+            _drop_torn_tail(path)
+            new = not path.exists() or path.stat().st_size == 0
+            pd.DataFrame(rows, columns=SHADOW_COLS).to_csv(path, mode="a", header=new, index=False,
+                                                           lineterminator="\n")
 
 
 def _drop_torn_tail(path: Path, chunk: int = 4096) -> None:
@@ -721,10 +797,11 @@ def main() -> None:
         rounds, records = crew.run_crew(env, make_client(), args.rounds, write=not args.no_write)
         written = not args.no_write  # run_crew appended each round as it landed
     else:
-        rounds, records = run_loop(env, args.rounds)
+        shadows: list = []
+        rounds, records = run_loop(env, args.rounds, on_round=lambda r: shadows.append(r.shadow))
         written = False
         if not args.no_write:
-            write_run(rounds, records)
+            write_run(rounds, records, shadow=shadows)
             written = True
     pd.set_option("display.width", 220)
     print(rounds.drop(columns=["run"]).round(3).to_string(index=False))

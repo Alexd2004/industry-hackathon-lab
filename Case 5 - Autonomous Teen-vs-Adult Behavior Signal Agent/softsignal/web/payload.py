@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from softsignal.agents.base import outcome
 from softsignal.data import ROOT
 from softsignal.explain import ACTIONS, FEATURE_NAMES
 from softsignal.features import ID_COL, TARGET
@@ -111,12 +112,24 @@ def _agent_view(block: dict | None) -> dict | None:
     """The fields the page shows for one agent block (no hashes, no raw prompts)."""
     if not block:
         return None
-    return {k: block.get(k) for k in ("status", "output", "fallback_reason", "ms", "tokens_in", "tokens_out",
+    view = {k: block.get(k) for k in ("status", "output", "fallback_reason", "ms", "tokens_in", "tokens_out",
                                       "errors", "rejected")}
+    view["outcome"] = outcome(block)  # LIVE, REPLAY, NOT_RUN or a fallback's kind (SCRIPTED ... FAILED)
+    return view
 
 
-def _round_view(row: dict, rec: dict | None) -> dict:
+def read_shadow(path: Path) -> dict:
+    """{(run, round): shadow row} from a shadow csv (loop.write_run: the model in training on the test set)."""
+    df = read_rounds(path) if path.exists() else None  # same reader: torn tail skipped, last (run, round) wins
+    if df is None or df.empty:
+        return {}
+    return {(str(r["run"]), int(r["round"])): r for r in records(df)}
+
+
+def _round_view(row: dict, rec: dict | None, shadow: dict | None = None) -> dict:
     out = dict(row)
+    out["shadow"] = None if shadow is None else {k: shadow.get(k) for k in
+                                                 ("candidate_round", "t_verify", "prec", "rec", "ft", "mt", "auc")}
     rec = rec or {}
     out["agents"] = {k: _agent_view(rec.get(k)) for k in AGENT_KEYS}
     out["rule_decision"] = rec.get("rule_decision")
@@ -132,11 +145,13 @@ def load_runs(results_dir: Path = RESULTS) -> list[dict]:
     for source, (r_name, d_name, label) in SOURCES.items():
         rounds = read_rounds(results_dir / r_name)
         decs = read_decisions(results_dir / d_name if d_name else None)
+        shadows = read_shadow(results_dir / r_name.replace("rounds", "shadow", 1))
         ids = sorted(set(rounds["run"]) | {k[0] for k in decs}, reverse=True)
         for run in ids:
             rows = records(rounds[rounds["run"] == run])
             by_round = {r: d for (rid, r), d in decs.items() if rid == run}
-            views = [_round_view(row, by_round.get(int(row["round"]))) for row in rows]
+            views = [_round_view(row, by_round.get(int(row["round"])), shadows.get((run, int(row["round"]))))
+                     for row in rows]
             crew = any(v.get("applied_source") == "A2" for v in views) or any(by_round.values())
             runs.append({
                 "id": f"{source}:{run}", "run": run, "source": source,

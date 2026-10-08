@@ -123,6 +123,9 @@ input[type=range] { width: 100%; margin: 14px 0 4px; accent-color: var(--ink); }
 .status-LIVE { background: #d8f0e2; color: #10592f; }
 .status-REPLAY { background: #dfe4f2; color: #2c3a66; }
 .status-FALLBACK { background: #f7e6c4; color: #6e4a06; }
+.status-SCRIPTED, .status-UNAVAILABLE { background: #e7e9ee; color: #3b4250; }
+.status-REJECTED { background: #f7e6c4; color: #6e4a06; }
+.status-FAILED { background: #fbe0dd; color: #8a1c12; }
 .status-RULE { background: #e7e9ee; color: #3b4250; }
 .banner .status { opacity: 1; }
 
@@ -158,6 +161,7 @@ input[type=range] { width: 100%; margin: 14px 0 4px; accent-color: var(--ink); }
 .table td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .table tr:last-child td { border-bottom: 0; }
 .table td.num { font-variant-numeric: tabular-nums; }
+.table td.muted-cell { color: var(--ink-2); font-size: 12px; white-space: nowrap; }
 .table .over { color: var(--orange); font-weight: 600; }
 .table tr.sel td { background: var(--inset); font-weight: 600; }
 .table tr.click { cursor: pointer; }

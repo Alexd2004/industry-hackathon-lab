@@ -43,6 +43,8 @@ POLICY_KEYS = {
 }
 # present with a number, or null while the value is still to be measured (min_a3_errors: A3's floor on errors)
 OPTIONAL_KEYS = {"psi_drift": float, "min_a3_errors": int}
+# a named choice; absent means the first (the loop's original rule), so older policy files keep their behaviour
+CHOICE_KEYS = {"promote_rule": ("pooled", "challenger")}
 MIN_CLASS = 5  # fewer audit adults (or teens) than this: keep the prior threshold
 BANDS = ("verify", "soft", "none")
 LADDER_CAPS = (0.10, 0.05)  # reported next to the policy cap by main(); the ladder rows use these
@@ -61,7 +63,7 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
             raise ValueError(f"{path} is not valid YAML: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must hold a mapping of policy keys")
-    allowed = set(POLICY_KEYS) | set(OPTIONAL_KEYS)
+    allowed = set(POLICY_KEYS) | set(OPTIONAL_KEYS) | set(CHOICE_KEYS)
     if not set(POLICY_KEYS) <= set(raw) <= allowed:
         raise ValueError(f"{path} keys differ: missing {sorted(set(POLICY_KEYS) - set(raw))}, "
                          f"unknown {sorted(set(raw) - allowed)}")
@@ -87,6 +89,11 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
     for key in ("min_audit_adults", "audit_per_batch"):
         if out[key] < 1:
             raise ValueError(f"{key} must be at least 1, got {out[key]}")
+    for key, choices in CHOICE_KEYS.items():
+        v = raw.get(key, choices[0])
+        if v not in choices:
+            raise ValueError(f"{key} must be one of {choices}, got {v!r}")
+        out[key] = v
     return out
 
 

@@ -21,6 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from softsignal import crew, replay
+from softsignal.agents.base import UNAVAILABLE, is_real_fallback, outcome
 from softsignal.agents.contracts import TEST_METRIC_KEYS
 from softsignal.explain import FEATURE_NAMES
 from softsignal.metrics import DEFAULT_CAP, ROUNDS_COLS
@@ -257,6 +258,11 @@ def was(block: dict) -> str | None:
     return block.get("recorded_status") or block.get("status")
 
 
+def real_fallback(block: dict | None) -> bool:
+    """base.is_real_fallback on the status the block had when it ran (a replay keeps it in recorded_status)."""
+    return block is not None and is_real_fallback({**block, "status": was(block)})
+
+
 def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
     """One plain-English line per round for the decision log. tag marks the test metrics, e.g. " (projected)"."""
     d, src = decision["applied"]["decision"], decision["applied"]["source"]
@@ -270,7 +276,7 @@ def log_line(decision: dict, round_row: pd.Series | None, tag: str = "") -> str:
                             for k, v in decision["diff"].items())
         parts.append(f"A2 differs from the rule on {changes}")
     fallbacks = [f"{a.upper()} ({decision[a]['fallback_reason'] or 'no reason'})" for a in AGENTS
-                 if decision.get(a) is not None and was(decision[a]) == "FALLBACK"]
+                 if real_fallback(decision.get(a))]  # scripted / offline ones needed or had no model call
     if fallbacks:
         parts.append("Fallback: " + ", ".join(fallbacks))
     if decision.get("agent_error"):
@@ -558,8 +564,12 @@ def _loop_fragment() -> None:
     t1.metric("Round", "-" if latest is None else str(int(latest["round"])))
     t2.metric(f"Labels learned{tag}", "-" if latest is None else f"{int(latest['n_labels']):,}")
     t3.metric(f"Cutoff (t_verify){tag}", "-" if latest is None else _num(latest["t_verify"], "{:.2f}"))
-    t4.metric("Fallbacks this run", str(sum(was(d[a]) == "FALLBACK" for d in decisions for a in AGENTS
-                                             if d.get(a) is not None)))  # a replay counts what was recorded
+    t4.metric("Fallbacks this run", str(sum(real_fallback(d.get(a)) for d in decisions for a in AGENTS)),
+              help="Real fallbacks only: a reply a check refused, or no usable reply (timeout, API error). "
+                   "Insufficient data, script-only checks and offline runs needed or had no model call.")
+    unavailable = sum(outcome(d.get(a)) == UNAVAILABLE for d in decisions for a in AGENTS)
+    if unavailable:  # 0 fallbacks must not read as a clean live run when no model was there to call
+        st.caption(f"{unavailable} agent calls had no model to call (offline, or the recording no longer fits).")
     t5.metric(f"PSI{tag}", "n/a" if latest is None else _num(latest["psi"], "{:.2f}"))
 
     cap = DEFAULT_CAP if latest is None else float(latest["cap"])

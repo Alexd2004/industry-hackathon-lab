@@ -302,11 +302,12 @@ def test_insufficient_reasons(parts):
     assert insufficient_reason(a3_input(df, labels, T_VERIFY, 4, n + 1, test_ids=[])) is not None
 
 
-def test_live_reply_is_used_with_the_decision_path_timeout(payload, tmp_path):
+def test_live_reply_is_used_with_a3s_own_timeout(payload, tmp_path):
     client = FakeClient(reply(live_output(payload)))
     result, records = run(payload, client, tmp_path)
     assert (result.status, result.output, result.fallback_reason) == (LIVE, live_output(payload), None)
-    assert client.options == [{"timeout": base.TIMEOUT_S, "max_retries": 0}]
+    assert client.options == [{"timeout": base.TIMEOUTS["A3"], "max_retries": 0}]
+    assert base.TIMEOUTS["A3"] > base.TIMEOUT_S  # every A3 call timed out at the shared 4 s
     (kw,) = client.calls
     assert kw["system"] == SYSTEM and kw["messages"] == [{"role": "user", "content": user_message(payload)}]
     assert kw["output_config"]["format"]["schema"] == anthropic.transform_schema(A3Output)
@@ -360,6 +361,7 @@ def test_every_failure_is_no_analysis(payload, tmp_path, make, reason):
 
 def test_system_prompt_is_fully_rendered_and_states_the_signal_caveat():
     assert "{" not in SYSTEM and "}" not in SYSTEM  # an f-string placeholder must not reach the model unfilled
-    assert "up to 4 items" in SYSTEM  # A3_MAX_PATTERNS, the schema's own limit
+    assert "up to 2 items" in SYSTEM  # A3_MAX_PATTERNS, the schema's own limit
+    assert "13" not in SYSTEM and "23" not in SYSTEM  # an echoed age range would trip the number and age checks
     assert "fit on these same accounts" in SYSTEM and "do not show why" in SYSTEM.lower().replace("\n", " ")
     assert "caused" in SYSTEM  # no causal claims about a signal

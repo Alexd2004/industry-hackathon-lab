@@ -36,7 +36,8 @@ def write_policy(tmp_path, **over):
 # ---- policy.yaml ----
 def test_committed_policy_has_exactly_the_policy_keys_with_their_types():
     p = pol.load_policy()
-    assert set(p) == set(pol.POLICY_KEYS) | set(pol.OPTIONAL_KEYS)
+    assert set(p) == set(pol.POLICY_KEYS) | set(pol.OPTIONAL_KEYS) | set(pol.CHOICE_KEYS)
+    assert p["promote_rule"] == "challenger"  # the model in training goes live as soon as it wins a round
     assert all(type(p[k]) is kind for k, kind in pol.POLICY_KEYS.items())
     assert p["psi_drift"] == 0.25  # measured for A1, see policy.yaml
     assert p["min_a3_errors"] == 30  # picked from A3 errors per round, see policy.yaml
@@ -403,3 +404,11 @@ def test_malformed_yaml_raises_value_error(tmp_path):
     bad.write_text("cap_false_teen: [0.15\nreview_budget: 0.25\n")
     with pytest.raises(ValueError, match="not valid YAML"):
         pol.load_policy(bad)
+
+
+
+def test_promote_rule_defaults_to_pooled_and_rejects_unknown_rules(tmp_path):
+    assert pol.load_policy(write_policy(tmp_path))["promote_rule"] == "pooled"
+    assert pol.load_policy(write_policy(tmp_path, promote_rule="challenger"))["promote_rule"] == "challenger"
+    with pytest.raises(ValueError, match="promote_rule"):
+        pol.load_policy(write_policy(tmp_path, promote_rule="always"))
